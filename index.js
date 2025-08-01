@@ -33,7 +33,7 @@ app.post("/generar-video", async (req, res) => {
           pad_audio: 0.5,
           stitch: true
         },
-        source_url: "https://d-id-public-bucket.s3.amazonaws.com/demo/jesus_avatar_1.mp4"
+        source_url: "https://d-id-public-bucket.s3.amazonaws.com/demo-assets/jesus-avatar.jpg"
       },
       {
         headers: {
