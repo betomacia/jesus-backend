@@ -6,8 +6,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Reemplaza tu clave D-ID codificada base64 aquí
-const DID_AUTH = Buffer.from("Y2VjdGVsZXZpc2lvbkBnbWFpbC5jb20:OQb1VbC-NsJH40EtsnAaW").toString("base64");
+const DID_AUTH = Buffer.from("Y2VjdGVsZXZpc2lvbkBnbWFpbC5jb20:_uPsesMQivi6-F2iiZ-dd").toString("base64");
 
 app.post("/generar-video", async (req, res) => {
   const { mensaje } = req.body;
@@ -52,7 +51,6 @@ app.post("/generar-video", async (req, res) => {
 
   } catch (error) {
     console.error("❌ Error al generar el video:", error.message);
-
     return res.status(500).json({
       error: "Error generando el video",
       details: error.response?.data?.message || error.message || "Error desconocido"
