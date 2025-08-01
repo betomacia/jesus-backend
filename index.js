@@ -7,7 +7,6 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Codificamos directamente tu usuario:contraseña en Base64
 const DID_AUTH = Buffer.from("cectelevision@gmail.com:Endirecto2306").toString("base64");
 
 app.post("/generar-video", async (req, res) => {
