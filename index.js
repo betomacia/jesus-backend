@@ -52,9 +52,21 @@ app.post("/generar-video", async (req, res) => {
     res.json({ result_url: resultUrl });
 
   } catch (error) {
-    console.error("❌ Error al generar el video:", error.response?.data || error.message);
-    res.status(500).json({ error: "Error generando el video", details: error.response?.data || error.message });
+    let msg = "Error generando el video";
+
+    // Si la API de D-ID devolvió algo útil, lo mostramos
+    if (error.response) {
+      msg = error.response.data || error.response.statusText;
+    }
+
+    console.error("❌ Error al generar el video:", msg);
+
+    return res.status(500).json({
+      error: "Error generando el video",
+      details: msg
+    });
   }
+
 });
 
 const PORT = process.env.PORT || 3000;
