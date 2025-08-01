@@ -1,6 +1,6 @@
 
 {
-  "name": "jesus-backend-fixed-final",
+  "name": "jesus-backend-userpass",
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {

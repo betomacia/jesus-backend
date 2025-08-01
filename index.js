@@ -7,8 +7,8 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ✅ Clave API correcta, codificada automáticamente
-const DID_AUTH = Buffer.from("cectelevision@gmail.com:Yj6jiu-1O-IScCnF5QMW4").toString("base64");
+// ✅ Usuario y contraseña combinados correctamente
+const DID_AUTH = Buffer.from("Y2VjdGVsZXZpc2lvbkBnbWFpbC5jb20:OQb1VbC-NsJH40EtsnAaW").toString("base64");
 
 app.post("/generar-video", async (req, res) => {
   const { mensaje } = req.body;
