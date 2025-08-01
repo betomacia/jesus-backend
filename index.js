@@ -1,4 +1,3 @@
-
 const express = require("express");
 const axios = require("axios");
 const cors = require("cors");
@@ -7,7 +6,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ✅ Usuario y contraseña combinados correctamente
+// Reemplaza tu clave D-ID codificada base64 aquí
 const DID_AUTH = Buffer.from("Y2VjdGVsZXZpc2lvbkBnbWFpbC5jb20:OQb1VbC-NsJH40EtsnAaW").toString("base64");
 
 app.post("/generar-video", async (req, res) => {
@@ -52,24 +51,15 @@ app.post("/generar-video", async (req, res) => {
     res.json({ result_url: resultUrl });
 
   } catch (error) {
-    let msg = "Error generando el video";
-
-    // Si la API de D-ID devolvió algo útil, lo mostramos
-    if (error.response) {
-      msg = error.response.data || error.response.statusText;
-    }
-
-    console.error("❌ Error al generar el video:", msg);
+    console.error("❌ Error al generar el video:", error.message);
 
     return res.status(500).json({
       error: "Error generando el video",
-      details: msg
+      details: error.response?.data?.message || error.message || "Error desconocido"
     });
   }
-
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`✅ Servidor corriendo en el puerto ${PORT}`);
+app.listen(8080, () => {
+  console.log("✅ Servidor corriendo en el puerto 8080");
 });
