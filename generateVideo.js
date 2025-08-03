@@ -1,12 +1,11 @@
+// generateVideo.js
 import fetch from "node-fetch";
 
 export async function generateVideo(text) {
   const username = process.env.DID_USERNAME;
   const password = process.env.DID_PASSWORD;
 
-  if (!username || !password) {
-    throw new Error("Credenciales D-ID no configuradas.");
-  }
+  if (!username || !password) throw new Error("Credenciales D-ID no configuradas.");
 
   const auth = Buffer.from(`${username}:${password}`).toString("base64");
 
@@ -30,6 +29,29 @@ export async function generateVideo(text) {
       "Content-Type": "application/json"
     },
     body: JSON.stringify(data)
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`D-ID error: ${errorText}`);
+  }
+
+  return await response.json();
+}
+
+export async function getClipStatus(clipId) {
+  const username = process.env.DID_USERNAME;
+  const password = process.env.DID_PASSWORD;
+
+  if (!username || !password) throw new Error("Credenciales D-ID no configuradas.");
+
+  const auth = Buffer.from(`${username}:${password}`).toString("base64");
+
+  const response = await fetch(`https://api.d-id.com/clips/${clipId}`, {
+    headers: {
+      Authorization: `Basic ${auth}`,
+      "Content-Type": "application/json"
+    }
   });
 
   if (!response.ok) {
