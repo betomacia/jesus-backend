@@ -1,7 +1,7 @@
 import express from "express";
 import cors from "cors";
-import { generateVideo } from "./generateVideo.js";
 import dotenv from "dotenv";
+import { generateVideo, getClipStatus } from "./generateVideo.js";
 
 dotenv.config();
 
@@ -17,7 +17,21 @@ app.post("/generate-video", async (req, res) => {
     const videoData = await generateVideo(text);
     res.json(videoData);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error("Error en /generate-video:", error);
+    res.status(500).json({ error: "Error al generar video." });
+  }
+});
+
+app.get("/clip-status/:id", async (req, res) => {
+  const clipId = req.params.id;
+  if (!clipId) return res.status(400).json({ error: "ID es requerido" });
+
+  try {
+    const status = await getClipStatus(clipId);
+    res.json(status);
+  } catch (error) {
+    console.error("Error en /clip-status:", error);
+    res.status(500).json({ error: "Error al consultar estado del clip." });
   }
 });
 
