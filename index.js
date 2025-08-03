@@ -9,27 +9,29 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Endpoint para generar video a partir de texto
 app.post("/generate-video", async (req, res) => {
   const { text } = req.body;
   if (!text) return res.status(400).json({ error: "El texto es requerido" });
 
   try {
     const videoData = await generateVideo(text);
-    res.json(videoData);
+    return res.json(videoData);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error("Error en /generate-video:", error);
+    return res.status(500).json({ error: "Error al generar video." });
   }
 });
 
-// Endpoint para consultar estado del video generado
 app.get("/clip-status/:id", async (req, res) => {
   const clipId = req.params.id;
+  if (!clipId) return res.status(400).json({ error: "ID es requerido" });
+
   try {
     const status = await getClipStatus(clipId);
-    res.json(status);
+    return res.json(status);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error("Error en /clip-status:", error);
+    return res.status(500).json({ error: "Error al consultar estado del clip." });
   }
 });
 
