@@ -44,36 +44,11 @@ app.post("/generate-video", async (req, res) => {
     const json = await response.json();
     return res.json(json);
   } catch (error) {
-    // Evitar pasar objetos circulares al JSON de error
-    const safeError = {
-      message: error.message,
-      stack: error.stack,
-    };
-    return res.status(500).json({ error: safeError });
-  }
-});
+    // Debug: log completo del error
+    console.error("ERROR en /generate-video:", error);
 
-app.get("/talk-status/:id", async (req, res) => {
-  const talkId = req.params.id;
-
-  try {
-    const response = await fetch(`https://api.d-id.com/talks/${talkId}`, {
-      headers: { Authorization: `Basic ${auth}` },
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      return res.status(response.status).json({ error: errorText });
-    }
-
-    const json = await response.json();
-    return res.json(json);
-  } catch (error) {
-    const safeError = {
-      message: error.message,
-      stack: error.stack,
-    };
-    return res.status(500).json({ error: safeError });
+    // Enviar solo mensaje simple para evitar circular refs
+    return res.status(500).json({ error: error.message || "Error interno" });
   }
 });
 
