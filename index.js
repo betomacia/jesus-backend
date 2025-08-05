@@ -38,14 +38,15 @@ app.post("/generate-video", async (req, res) => {
 
     if (!response.ok) {
       const errorText = await response.text();
+      // Enviar texto plano del error recibido
       return res.status(response.status).json({ error: errorText });
     }
 
     const json = await response.json();
     return res.json(json);
   } catch (error) {
-    // Envía solo el mensaje de error para evitar ciclos en JSON.stringify
-    return res.status(500).json({ error: error.message || String(error) });
+    // Enviar solo mensaje simple del error para evitar circularidad
+    return res.status(500).json({ error: error.message || "Error desconocido" });
   }
 });
 
@@ -65,8 +66,7 @@ app.get("/talk-status/:id", async (req, res) => {
     const json = await response.json();
     return res.json(json);
   } catch (error) {
-    // Envía solo el mensaje de error para evitar ciclos en JSON.stringify
-    return res.status(500).json({ error: error.message || String(error) });
+    return res.status(500).json({ error: error.message || "Error desconocido" });
   }
 });
 
