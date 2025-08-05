@@ -44,7 +44,8 @@ app.post("/generate-video", async (req, res) => {
     const json = await response.json();
     return res.json(json);
   } catch (error) {
-    return res.status(500).json({ error: error.message });
+    // Envía solo el mensaje de error para evitar ciclos en JSON.stringify
+    return res.status(500).json({ error: error.message || String(error) });
   }
 });
 
@@ -64,7 +65,8 @@ app.get("/talk-status/:id", async (req, res) => {
     const json = await response.json();
     return res.json(json);
   } catch (error) {
-    return res.status(500).json({ error: error.message });
+    // Envía solo el mensaje de error para evitar ciclos en JSON.stringify
+    return res.status(500).json({ error: error.message || String(error) });
   }
 });
 
