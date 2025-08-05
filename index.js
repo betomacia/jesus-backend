@@ -65,10 +65,11 @@ app.get("/talk-status/:id", async (req, res) => {
 
     const json = await response.json();
     return res.json(json);
-  } catch (error) {
-    return res.status(500).json({ error: error.message || "Error desconocido" });
+  } catch (_) {
+    return res.status(500).json({ error: "Error interno, revise logs." });
   }
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor escuchando en puerto ${PORT}`));
+
