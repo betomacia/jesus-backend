@@ -38,38 +38,16 @@ app.post("/generate-video", async (req, res) => {
 
     if (!response.ok) {
       const errorText = await response.text();
-      // Enviar texto plano del error recibido
       return res.status(response.status).json({ error: errorText });
     }
 
     const json = await response.json();
     return res.json(json);
   } catch (error) {
-    // Enviar solo mensaje simple del error para evitar circularidad
-    return res.status(500).json({ error: error.message || "Error desconocido" });
-  }
-});
-
-app.get("/talk-status/:id", async (req, res) => {
-  const talkId = req.params.id;
-
-  try {
-    const response = await fetch(`https://api.d-id.com/talks/${talkId}`, {
-      headers: { Authorization: `Basic ${auth}` },
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      return res.status(response.status).json({ error: errorText });
-    }
-
-    const json = await response.json();
-    return res.json(json);
-  } catch (_) {
-    return res.status(500).json({ error: "Error interno, revise logs." });
+    // Solo enviamos error.message para evitar estructuras circulares
+    return res.status(500).json({ error: error.message || "Error interno" });
   }
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor escuchando en puerto ${PORT}`));
-
