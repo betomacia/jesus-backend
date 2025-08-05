@@ -44,10 +44,29 @@ app.post("/generate-video", async (req, res) => {
     const json = await response.json();
     return res.json(json);
   } catch (error) {
-    // Debug: log completo del error
-    console.error("ERROR en /generate-video:", error);
+    console.error("Error in /generate-video:", error);
+    // Evitamos enviar todo el objeto error para prevenir errores circulares
+    return res.status(500).json({ error: error.message || "Error interno" });
+  }
+});
 
-    // Enviar solo mensaje simple para evitar circular refs
+app.get("/talk-status/:id", async (req, res) => {
+  const talkId = req.params.id;
+
+  try {
+    const response = await fetch(`https://api.d-id.com/talks/${talkId}`, {
+      headers: { Authorization: `Basic ${auth}` },
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      return res.status(response.status).json({ error: errorText });
+    }
+
+    const json = await response.json();
+    return res.json(json);
+  } catch (error) {
+    console.error("Error in /talk-status/:id:", error);
     return res.status(500).json({ error: error.message || "Error interno" });
   }
 });
