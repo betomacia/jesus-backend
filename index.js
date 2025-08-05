@@ -13,7 +13,7 @@ const auth = Buffer.from(`${process.env.DID_USERNAME}:${process.env.DID_PASSWORD
 
 async function generateVideo(text) {
   const data = {
-    source_url: "https://raw.githubusercontent.com/betomacia/imagen-jesus/main/ojos%202.png",
+    source_url: "https://raw.githubusercontent.com/betomacia/imagen-jesus/refs/heads/main/jesus.jpg",
     script: {
       type: "text",
       input: text,
@@ -55,3 +55,4 @@ app.post("/generate-video", async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor escuchando en http://localhost:${PORT}`));
+
