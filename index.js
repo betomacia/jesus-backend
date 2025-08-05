@@ -15,7 +15,7 @@ app.post("/generate-video", async (req, res) => {
   if (!text) return res.status(400).json({ error: "El texto es requerido" });
 
   const data = {
-    source_url: "https://d-id-public-bucket.s3.us-west-2.amazonaws.com/alice.jpg", // tu imagen pública
+    source_url: "https://raw.githubusercontent.com/betomacia/imagen-jesus/refs/heads/main/jesus.jpg", // tu imagen pública
     script: {
       type: "text",
       input: text,
@@ -55,6 +55,7 @@ app.post("/generate-video", async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor escuchando en puerto ${PORT}`));
+
 
 
 
