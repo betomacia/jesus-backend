@@ -44,9 +44,36 @@ app.post("/generate-video", async (req, res) => {
     const json = await response.json();
     return res.json(json);
   } catch (error) {
-    console.error("Error en /generate-video:", error);
-    // Solo enviamos error.message para evitar estructuras circulares
-    return res.status(500).json({ error: error.message || "Error interno" });
+    // Evitar pasar objetos circulares al JSON de error
+    const safeError = {
+      message: error.message,
+      stack: error.stack,
+    };
+    return res.status(500).json({ error: safeError });
+  }
+});
+
+app.get("/talk-status/:id", async (req, res) => {
+  const talkId = req.params.id;
+
+  try {
+    const response = await fetch(`https://api.d-id.com/talks/${talkId}`, {
+      headers: { Authorization: `Basic ${auth}` },
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      return res.status(response.status).json({ error: errorText });
+    }
+
+    const json = await response.json();
+    return res.json(json);
+  } catch (error) {
+    const safeError = {
+      message: error.message,
+      stack: error.stack,
+    };
+    return res.status(500).json({ error: safeError });
   }
 });
 
