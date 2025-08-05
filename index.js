@@ -44,6 +44,7 @@ app.post("/generate-video", async (req, res) => {
     const json = await response.json();
     return res.json(json);
   } catch (error) {
+    console.error("Error en /generate-video:", error);
     // Solo enviamos error.message para evitar estructuras circulares
     return res.status(500).json({ error: error.message || "Error interno" });
   }
