@@ -5,12 +5,9 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-app.post("/generate-video", (req, res) => {
-  const { text } = req.body;
-  if (!text) return res.status(400).json({ error: "Texto requerido" });
-  // Solo respondemos con el texto recibido, sin más lógica
-  res.json({ message: "Texto recibido correctamente", text });
+app.get("/", (req, res) => {
+  res.json({ message: "Servidor funcionando" });
 });
 
-const PORT = 3000;
-app.listen(PORT, () => console.log(`Servidor escuchando en http://localhost:${PORT}`));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Servidor escuchando en puerto ${PORT}`));
