@@ -1,7 +1,8 @@
-const express = require("express");
-const cors = require("cors");
-const fetch = require("node-fetch");
-const dotenv = require("dotenv");
+// backend/index.js
+import express from "express";
+import cors from "cors";
+import fetch from "node-fetch";
+import dotenv from "dotenv";
 
 dotenv.config();
 
@@ -11,109 +12,85 @@ app.use(express.json());
 
 const auth = Buffer.from(`${process.env.DID_USERNAME}:${process.env.DID_PASSWORD}`).toString("base64");
 
-let currentSessionId = null;
-
-// Crear sesión de streaming
+// Crear sesión de streaming en D-ID
 app.post("/create-stream-session", async (req, res) => {
   try {
-    console.log("POST /create-stream-session recibido");
-
-    const data = {
-      source_url: "https://raw.githubusercontent.com/betomacia/imagen-jesus/refs/heads/main/jesus.jpg",
-      voice: {
-        provider: "microsoft",
-        voice_id: "es-ES-AlvaroNeural"
-      }
-    };
-
     const response = await fetch("https://api.d-id.com/talks/streams", {
       method: "POST",
       headers: {
         Authorization: `Basic ${auth}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(data),
+      body: JSON.stringify({
+        source_url: "https://raw.githubusercontent.com/betomacia/imagen-jesus/refs/heads/main/jesus.jpg",
+        voice: {
+          provider: "microsoft",
+          voice_id: "es-ES-AlvaroNeural",
+        },
+      }),
     });
 
     if (!response.ok) {
-      const errText = await response.text();
-      console.error("Error respuesta D-ID API:", errText);
-      return res.status(response.status).json({ error: errText });
+      const errorText = await response.text();
+      return res.status(response.status).json({ error: errorText });
     }
 
-    const json = await response.json();
-    currentSessionId = json.session_id;
-    console.log("Streaming session creada con session_id:", currentSessionId);
-
-    res.json({ sessionId: currentSessionId });
-  } catch (error) {
-    console.error("Error creando sesión streaming:", error);
+    const data = await response.json();
+    console.log("Stream session creada:", data);
+    res.json(data);
+  } catch (err) {
+    console.error("Error creando sesión de streaming:", err);
     res.status(500).json({ error: "Error interno" });
   }
 });
 
-// Enviar texto a la sesión streaming para que hable Jesús
-app.post("/send-message", async (req, res) => {
-  const { sessionId, text } = req.body;
-
-  if (!sessionId || !text) {
-    return res.status(400).json({ error: "sessionId y text son requeridos" });
-  }
-
+// Recibir oferta SDP del cliente y enviar respuesta SDP
+app.post("/signal/offer", async (req, res) => {
+  const { session_id, offer } = req.body;
   try {
-    console.log(`POST /send-message recibido para sessionId: ${sessionId} texto: ${text}`);
-
-    const data = {
-      text,
-      voice: {
-        provider: "microsoft",
-        voice_id: "es-ES-AlvaroNeural"
-      }
-    };
-
-    const response = await fetch(`https://api.d-id.com/talks/streams/${sessionId}`, {
+    const response = await fetch(`https://api.d-id.com/talks/streams/${session_id}/offer`, {
       method: "POST",
       headers: {
         Authorization: `Basic ${auth}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(data),
+      body: JSON.stringify({ offer }),
     });
 
     if (!response.ok) {
-      const errText = await response.text();
-      console.error("Error respuesta D-ID API:", errText);
-      return res.status(response.status).json({ error: errText });
+      const errorText = await response.text();
+      return res.status(response.status).json({ error: errorText });
     }
 
-    const json = await response.json();
-    console.log("Mensaje enviado correctamente a la sesión streaming");
-    res.json(json);
-  } catch (error) {
-    console.error("Error enviando mensaje streaming:", error);
+    const data = await response.json();
+    res.json(data); // Respuesta SDP
+  } catch (err) {
+    console.error("Error en /signal/offer:", err);
     res.status(500).json({ error: "Error interno" });
   }
 });
 
-// Opcional: info de sesión streaming (puede ayudar en debugging)
-app.get("/stream-url/:sessionId", async (req, res) => {
-  const { sessionId } = req.params;
-
+// Recibir candidatos ICE del cliente y reenviarlos a D-ID
+app.post("/signal/ice", async (req, res) => {
+  const { session_id, candidate } = req.body;
   try {
-    const response = await fetch(`https://api.d-id.com/talks/streams/${sessionId}`, {
+    const response = await fetch(`https://api.d-id.com/talks/streams/${session_id}/ice-candidate`, {
+      method: "POST",
       headers: {
         Authorization: `Basic ${auth}`,
+        "Content-Type": "application/json",
       },
+      body: JSON.stringify({ candidate }),
     });
 
     if (!response.ok) {
-      const errText = await response.text();
-      return res.status(response.status).json({ error: errText });
+      const errorText = await response.text();
+      return res.status(response.status).json({ error: errorText });
     }
 
-    const json = await response.json();
-    res.json(json);
-  } catch (error) {
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Error en /signal/ice:", err);
     res.status(500).json({ error: "Error interno" });
   }
 });
