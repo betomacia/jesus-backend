@@ -6,7 +6,17 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const app = express();
-app.use(cors());
+
+// Configurar CORS para aceptar todas las peticiones y manejar OPTIONS
+app.use(cors({
+  origin: "*", // Puedes cambiarlo por el dominio que uses si quieres más seguridad
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+}));
+
+// Middleware para manejar preflight OPTIONS en todas las rutas
+app.options("*", cors());
+
 app.use(express.json());
 
 const auth = Buffer.from(`${process.env.DID_USERNAME}:${process.env.DID_PASSWORD}`).toString("base64");
@@ -55,4 +65,3 @@ app.post("/generate-video", async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor escuchando en http://localhost:${PORT}`));
-
