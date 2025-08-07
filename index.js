@@ -5,76 +5,116 @@ const dotenv = require("dotenv");
 
 dotenv.config();
 
-process.on('uncaughtException', (err) => {
-  console.error('uncaughtException:', err);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('unhandledRejection:', reason);
-});
-
 const app = express();
-
 app.use(cors());
 app.use(express.json());
 
 const auth = Buffer.from(`${process.env.DID_USERNAME}:${process.env.DID_PASSWORD}`).toString("base64");
 
-async function generateVideo(text) {
-  const data = {
-    source_url: "https://raw.githubusercontent.com/betomacia/imagen-jesus/refs/heads/main/jesus.jpg",
-    script: {
-      type: "text",
-      input: text,
-      provider: { type: "microsoft", voice_id: "es-ES-AlvaroNeural" },
-      ssml: false,
-    },
-    config: { stitch: true },
-  };
+let currentSessionId = null;
 
-  console.log("Enviando request a D-ID con payload:", JSON.stringify(data));
+// Crear sesión de streaming
+app.post("/create-stream-session", async (req, res) => {
+  try {
+    console.log("POST /create-stream-session recibido");
 
-  const response = await fetch("https://api.d-id.com/talks", {
-    method: "POST",
-    headers: {
-      Authorization: `Basic ${auth}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(data),
-  });
+    const data = {
+      source_url: "https://raw.githubusercontent.com/betomacia/imagen-jesus/refs/heads/main/jesus.jpg",
+      voice: {
+        provider: "microsoft",
+        voice_id: "es-ES-AlvaroNeural"
+      }
+    };
 
-  console.log("Respuesta HTTP D-ID status:", response.status);
+    const response = await fetch("https://api.d-id.com/talks/streams", {
+      method: "POST",
+      headers: {
+        Authorization: `Basic ${auth}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(data),
+    });
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    console.error("Error response de D-ID:", errorText);
-    throw new Error(`D-ID API error: ${errorText}`);
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error("Error respuesta D-ID API:", errText);
+      return res.status(response.status).json({ error: errText });
+    }
+
+    const json = await response.json();
+    currentSessionId = json.session_id;
+    console.log("Streaming session creada con session_id:", currentSessionId);
+
+    res.json({ sessionId: currentSessionId });
+  } catch (error) {
+    console.error("Error creando sesión streaming:", error);
+    res.status(500).json({ error: "Error interno" });
   }
+});
 
-  const json = await response.json();
-  console.log("Respuesta JSON de D-ID:", json);
-  return json;
-}
+// Enviar texto a la sesión streaming para que hable Jesús
+app.post("/send-message", async (req, res) => {
+  const { sessionId, text } = req.body;
 
-app.post("/generate-video", async (req, res) => {
-  console.log(">>> POST /generate-video recibido");
-  console.log("Body:", req.body);
-
-  const { text } = req.body;
-  if (!text) {
-    console.log("Error: texto no proporcionado");
-    return res.status(400).json({ error: "Texto requerido" });
+  if (!sessionId || !text) {
+    return res.status(400).json({ error: "sessionId y text son requeridos" });
   }
 
   try {
-    console.log("Llamando a generateVideo con texto:", text);
-    const videoData = await generateVideo(text);
-    console.log("Respuesta de D-ID API:", videoData);
+    console.log(`POST /send-message recibido para sessionId: ${sessionId} texto: ${text}`);
 
-    res.json(videoData);
+    const data = {
+      text,
+      voice: {
+        provider: "microsoft",
+        voice_id: "es-ES-AlvaroNeural"
+      }
+    };
+
+    const response = await fetch(`https://api.d-id.com/talks/streams/${sessionId}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Basic ${auth}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(data),
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error("Error respuesta D-ID API:", errText);
+      return res.status(response.status).json({ error: errText });
+    }
+
+    const json = await response.json();
+    console.log("Mensaje enviado correctamente a la sesión streaming");
+    res.json(json);
   } catch (error) {
-    console.error("Error generando video:", error);
-    res.status(500).json({ error: error.message || "Error interno" });
+    console.error("Error enviando mensaje streaming:", error);
+    res.status(500).json({ error: "Error interno" });
+  }
+});
+
+// Opcional: info de sesión streaming (puede ayudar en debugging)
+app.get("/stream-url/:sessionId", async (req, res) => {
+  const { sessionId } = req.params;
+
+  try {
+    const response = await fetch(`https://api.d-id.com/talks/streams/${sessionId}`, {
+      headers: {
+        Authorization: `Basic ${auth}`,
+      },
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      return res.status(response.status).json({ error: errText });
+    }
+
+    const json = await response.json();
+    res.json(json);
+  } catch (error) {
+    res.status(500).json({ error: "Error interno" });
   }
 });
 
