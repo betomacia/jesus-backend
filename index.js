@@ -1,4 +1,3 @@
-// backend/index.js
 import express from "express";
 import cors from "cors";
 import fetch from "node-fetch";
@@ -12,7 +11,9 @@ app.use(express.json());
 
 const auth = Buffer.from(`${process.env.DID_USERNAME}:${process.env.DID_PASSWORD}`).toString("base64");
 
-// Crear sesión de streaming en D-ID
+// Guardamos sesiones activas con sus peer connections (opcional si usas almacenamiento)
+const sessions = new Map();
+
 app.post("/create-stream-session", async (req, res) => {
   try {
     const response = await fetch("https://api.d-id.com/talks/streams", {
@@ -36,7 +37,8 @@ app.post("/create-stream-session", async (req, res) => {
     }
 
     const data = await response.json();
-    console.log("Stream session creada:", data);
+    sessions.set(data.id, {}); // Puedes guardar info adicional si quieres
+    console.log("Stream session creada:", data.id);
     res.json(data);
   } catch (err) {
     console.error("Error creando sesión de streaming:", err);
@@ -44,7 +46,6 @@ app.post("/create-stream-session", async (req, res) => {
   }
 });
 
-// Recibir oferta SDP del cliente y enviar respuesta SDP
 app.post("/signal/offer", async (req, res) => {
   const { session_id, offer } = req.body;
   try {
@@ -63,14 +64,13 @@ app.post("/signal/offer", async (req, res) => {
     }
 
     const data = await response.json();
-    res.json(data); // Respuesta SDP
+    res.json(data);
   } catch (err) {
     console.error("Error en /signal/offer:", err);
     res.status(500).json({ error: "Error interno" });
   }
 });
 
-// Recibir candidatos ICE del cliente y reenviarlos a D-ID
 app.post("/signal/ice", async (req, res) => {
   const { session_id, candidate } = req.body;
   try {
