@@ -9,7 +9,7 @@ const app = express();
 
 // Configurar CORS para aceptar todas las peticiones y manejar OPTIONS
 app.use(cors({
-  origin: "*", // Puedes cambiarlo por el dominio que uses si quieres más seguridad
+  origin: "*",
   methods: ["GET", "POST", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
 }));
@@ -22,6 +22,8 @@ app.use(express.json());
 const auth = Buffer.from(`${process.env.DID_USERNAME}:${process.env.DID_PASSWORD}`).toString("base64");
 
 async function generateVideo(text) {
+  console.log("generateVideo llamado con texto:", text);
+
   const data = {
     source_url: "https://raw.githubusercontent.com/betomacia/imagen-jesus/refs/heads/main/jesus.jpg",
     script: {
@@ -44,18 +46,27 @@ async function generateVideo(text) {
 
   if (!response.ok) {
     const errorText = await response.text();
+    console.error("Error respuesta D-ID API:", errorText);
     throw new Error(`D-ID API error: ${errorText}`);
   }
 
-  return await response.json();
+  const jsonResponse = await response.json();
+  console.log("Respuesta de D-ID API recibida:", jsonResponse);
+  return jsonResponse;
 }
 
 app.post("/generate-video", async (req, res) => {
+  console.log("POST /generate-video recibido con body:", req.body);
+
   const { text } = req.body;
-  if (!text) return res.status(400).json({ error: "Texto requerido" });
+  if (!text) {
+    console.log("No se recibió texto en el body");
+    return res.status(400).json({ error: "Texto requerido" });
+  }
 
   try {
     const videoData = await generateVideo(text);
+    console.log("Enviando respuesta videoData:", videoData);
     res.json(videoData);
   } catch (error) {
     console.error("Error generating video:", error);
