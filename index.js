@@ -6,13 +6,12 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const app = express();
-
 app.use(cors());
 app.use(express.json());
 
 const auth = Buffer.from(`${process.env.DID_USERNAME}:${process.env.DID_PASSWORD}`).toString("base64");
 
-// Función para hacer polling internamente en backend
+// Polling para esperar que el video esté listo
 async function pollTalkStatus(talkId) {
   let status = "";
   while (status !== "done") {
@@ -25,16 +24,18 @@ async function pollTalkStatus(talkId) {
     }
     const json = await res.json();
     status = json.status;
+
     if (status === "done") {
-      return json.result_url;
+      return json.result_url;  // Aquí la URL definitiva del video
     }
     if (status === "failed") {
       throw new Error("Falló la generación del video");
     }
-    await new Promise((r) => setTimeout(r, 5000)); // Espera 5 seg
+    await new Promise((r) => setTimeout(r, 3000)); // espera 3 segundos antes de volver a consultar
   }
 }
 
+// Crear video
 async function generateVideo(text) {
   const data = {
     source_url: "https://raw.githubusercontent.com/betomacia/imagen-jesus/refs/heads/main/jesus.jpg",
@@ -61,7 +62,7 @@ async function generateVideo(text) {
     throw new Error(`D-ID API error: ${errorText}`);
   }
 
-  return await response.json();
+  return await response.json(); // Devuelve el ID y estado inicial
 }
 
 app.post("/generate-video", async (req, res) => {
@@ -71,18 +72,14 @@ app.post("/generate-video", async (req, res) => {
   try {
     console.log("POST /generate-video recibido con body:", req.body);
 
-    // Generar la charla (video)
     const talkData = await generateVideo(text);
     console.log("ID generado:", talkData.id);
 
-    // Esperar a que el video esté listo (polling)
     const videoUrl = await pollTalkStatus(talkData.id);
 
-    // Enviar URL de video al frontend junto con texto
-    res.json({
-      videoUrl,
-      text,
-    });
+    console.log("Video listo:", videoUrl);
+
+    res.json({ videoUrl, text });
   } catch (error) {
     console.error("Error generando video:", error);
     res.status(500).json({ error: error.message || "Error interno" });
