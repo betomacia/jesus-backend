@@ -1,11 +1,17 @@
-// index.js (o server.js)
-
 const express = require("express");
 const cors = require("cors");
 const fetch = require("node-fetch");
 const dotenv = require("dotenv");
 
 dotenv.config();
+
+process.on('uncaughtException', (err) => {
+  console.error('uncaughtException:', err);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('unhandledRejection:', reason);
+});
 
 const app = express();
 
@@ -26,6 +32,8 @@ async function generateVideo(text) {
     config: { stitch: true },
   };
 
+  console.log("Enviando request a D-ID con payload:", JSON.stringify(data));
+
   const response = await fetch("https://api.d-id.com/talks", {
     method: "POST",
     headers: {
@@ -35,23 +43,33 @@ async function generateVideo(text) {
     body: JSON.stringify(data),
   });
 
+  console.log("Respuesta HTTP D-ID status:", response.status);
+
   if (!response.ok) {
     const errorText = await response.text();
+    console.error("Error response de D-ID:", errorText);
     throw new Error(`D-ID API error: ${errorText}`);
   }
 
-  return await response.json();
+  const json = await response.json();
+  console.log("Respuesta JSON de D-ID:", json);
+  return json;
 }
 
 app.post("/generate-video", async (req, res) => {
+  console.log(">>> POST /generate-video recibido");
+  console.log("Body:", req.body);
+
   const { text } = req.body;
-  if (!text) return res.status(400).json({ error: "Texto requerido" });
+  if (!text) {
+    console.log("Error: texto no proporcionado");
+    return res.status(400).json({ error: "Texto requerido" });
+  }
 
   try {
-    console.log("POST /generate-video recibido con body:", req.body);
-
+    console.log("Llamando a generateVideo con texto:", text);
     const videoData = await generateVideo(text);
-    console.log("Respuesta de D-ID API recibida:", videoData);
+    console.log("Respuesta de D-ID API:", videoData);
 
     res.json(videoData);
   } catch (error) {
