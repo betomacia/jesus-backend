@@ -1,4 +1,3 @@
-// index.js
 const express = require("express");
 const cors = require("cors");
 const fetch = require("node-fetch");
@@ -10,7 +9,7 @@ app.use(express.json());
 
 const auth = Buffer.from(`${process.env.DID_USERNAME}:${process.env.DID_PASSWORD}`).toString("base64");
 
-// Guardamos el estado de cada stream en memoria (por simplicidad)
+// Guardamos el estado de cada stream en memoria (simplificado)
 const streams = {};
 
 // Crear sesión streaming - POST /create-stream-session
@@ -42,7 +41,13 @@ app.post("/create-stream-session", async (req, res) => {
       peerConnectionReady: false,
     };
 
-    res.json(json);
+    // IMPORTANTE: Aquí enviamos al frontend los datos necesarios para WebRTC
+    res.json({
+      id: json.id,
+      session_id: json.session_id,
+      offer: json.offer,         // SDP offer que D-ID genera
+      ice_servers: json.ice_servers || [], // Servidores ICE para RTCPeerConnection
+    });
   } catch (error) {
     console.error("Error creando stream session:", error);
     res.status(500).json({ error: error.message || "Error interno" });
@@ -109,44 +114,4 @@ app.post("/talks/streams/:streamId/ice", async (req, res) => {
   }
 });
 
-// Enviar texto para que el avatar hable - POST /talks/streams/:streamId
-app.post("/talks/streams/:streamId", async (req, res) => {
-  try {
-    const streamId = req.params.streamId;
-    const { session_id, script } = req.body;
-
-    if (!streams[streamId]) return res.status(404).json({ error: "Stream no encontrado" });
-
-    const data = {
-      session_id,
-      script,
-      config: { stitch: true },
-    };
-
-    const response = await fetch(`https://api.d-id.com/talks/streams/${streamId}`, {
-      method: "POST",
-      headers: {
-        Authorization: `Basic ${auth}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(data),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      return res.status(response.status).json({ error: errorText });
-    }
-
-    const json = await response.json();
-
-    res.json(json);
-  } catch (error) {
-    console.error("Error enviando texto para hablar:", error);
-    res.status(500).json({ error: error.message || "Error interno" });
-  }
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Servidor escuchando en http://localhost:${PORT}`);
-});
+// Enviar texto par
