@@ -1,19 +1,24 @@
+// index.js
 const express = require("express");
 const cors = require("cors");
 const fetch = require("node-fetch");
 require("dotenv").config();
 
 const app = express();
-
 app.use(cors());
 app.use(express.json());
 
 const auth = Buffer.from(`${process.env.DID_USERNAME}:${process.env.DID_PASSWORD}`).toString("base64");
 
-// Crear sesión de streaming (POST /create-stream-session)
+// Guardamos el estado de cada stream en memoria (por simplicidad)
+const streams = {};
+
+// Crear sesión streaming - POST /create-stream-session
 app.post("/create-stream-session", async (req, res) => {
   try {
-    console.log("POST /create-stream-session recibido", req.body);
+    const data = {
+      source_url: "https://raw.githubusercontent.com/betomacia/imagen-jesus/refs/heads/main/jesus.jpg",
+    };
 
     const response = await fetch("https://api.d-id.com/talks/streams", {
       method: "POST",
@@ -21,33 +26,36 @@ app.post("/create-stream-session", async (req, res) => {
         Authorization: `Basic ${auth}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        source_url: "https://raw.githubusercontent.com/betomacia/imagen-jesus/main/jesus.jpg",
-      }),
+      body: JSON.stringify(data),
     });
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error("Error creando sesión:", errorText);
       return res.status(response.status).json({ error: errorText });
     }
 
     const json = await response.json();
-    console.log("Sesión creada:", json);
+
+    // Guardar datos de sesión para este streamId
+    streams[json.id] = {
+      session_id: json.session_id,
+      peerConnectionReady: false,
+    };
+
     res.json(json);
   } catch (error) {
-    console.error("Error en /create-stream-session:", error);
-    res.status(500).json({ error: error.message });
+    console.error("Error creando stream session:", error);
+    res.status(500).json({ error: error.message || "Error interno" });
   }
 });
 
-// Recibir SDP answer del cliente (POST /streams/:streamId/sdp)
-app.post("/streams/:streamId/sdp", async (req, res) => {
+// Recibir SDP answer - POST /talks/streams/:streamId/sdp
+app.post("/talks/streams/:streamId/sdp", async (req, res) => {
   try {
     const streamId = req.params.streamId;
     const { answer, session_id } = req.body;
 
-    console.log(`POST /streams/${streamId}/sdp recibido`, req.body);
+    if (!streams[streamId]) return res.status(404).json({ error: "Stream no encontrado" });
 
     const response = await fetch(`https://api.d-id.com/talks/streams/${streamId}/sdp`, {
       method: "POST",
@@ -60,26 +68,25 @@ app.post("/streams/:streamId/sdp", async (req, res) => {
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error("Error enviando SDP answer:", errorText);
       return res.status(response.status).json({ error: errorText });
     }
 
-    const json = await response.json();
-    console.log("SDP answer aceptado:", json);
-    res.json(json);
+    streams[streamId].peerConnectionReady = true;
+
+    res.json({ message: "SDP answer enviada correctamente" });
   } catch (error) {
-    console.error("Error en /streams/:streamId/sdp:", error);
-    res.status(500).json({ error: error.message });
+    console.error("Error enviando SDP answer:", error);
+    res.status(500).json({ error: error.message || "Error interno" });
   }
 });
 
-// Recibir ICE candidates (POST /streams/:streamId/ice)
-app.post("/streams/:streamId/ice", async (req, res) => {
+// Recibir ICE candidate - POST /talks/streams/:streamId/ice
+app.post("/talks/streams/:streamId/ice", async (req, res) => {
   try {
     const streamId = req.params.streamId;
     const { candidate, sdpMid, sdpMLineIndex, session_id } = req.body;
 
-    console.log(`POST /streams/${streamId}/ice recibido`, req.body);
+    if (!streams[streamId]) return res.status(404).json({ error: "Stream no encontrado" });
 
     const response = await fetch(`https://api.d-id.com/talks/streams/${streamId}/ice`, {
       method: "POST",
@@ -92,25 +99,29 @@ app.post("/streams/:streamId/ice", async (req, res) => {
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error("Error enviando ICE candidate:", errorText);
       return res.status(response.status).json({ error: errorText });
     }
 
-    const json = await response.json();
-    res.json(json);
+    res.json({ message: "ICE candidate enviado correctamente" });
   } catch (error) {
-    console.error("Error en /streams/:streamId/ice:", error);
-    res.status(500).json({ error: error.message });
+    console.error("Error enviando ICE candidate:", error);
+    res.status(500).json({ error: error.message || "Error interno" });
   }
 });
 
-// Crear talk stream (POST /streams/:streamId/talk)
-app.post("/streams/:streamId/talk", async (req, res) => {
+// Enviar texto para que el avatar hable - POST /talks/streams/:streamId
+app.post("/talks/streams/:streamId", async (req, res) => {
   try {
     const streamId = req.params.streamId;
-    const { session_id, text } = req.body;
+    const { session_id, script } = req.body;
 
-    console.log(`POST /streams/${streamId}/talk recibido`, req.body);
+    if (!streams[streamId]) return res.status(404).json({ error: "Stream no encontrado" });
+
+    const data = {
+      session_id,
+      script,
+      config: { stitch: true },
+    };
 
     const response = await fetch(`https://api.d-id.com/talks/streams/${streamId}`, {
       method: "POST",
@@ -118,28 +129,20 @@ app.post("/streams/:streamId/talk", async (req, res) => {
         Authorization: `Basic ${auth}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        session_id,
-        script: {
-          type: "text",
-          input: text,
-          provider: { type: "microsoft", voice_id: "es-ES-AlvaroNeural" },
-          ssml: false,
-        },
-      }),
+      body: JSON.stringify(data),
     });
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error("Error creando talk stream:", errorText);
       return res.status(response.status).json({ error: errorText });
     }
 
     const json = await response.json();
+
     res.json(json);
   } catch (error) {
-    console.error("Error en /streams/:streamId/talk:", error);
-    res.status(500).json({ error: error.message });
+    console.error("Error enviando texto para hablar:", error);
+    res.status(500).json({ error: error.message || "Error interno" });
   }
 });
 
