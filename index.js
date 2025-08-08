@@ -1,156 +1,118 @@
+// index.js
+require('dotenv').config();
+
+console.log("DID_USERNAME:", process.env.DID_USERNAME ? "✅ definido" : "❌ no definido");
+console.log("DID_PASSWORD:", process.env.DID_PASSWORD ? "✅ definido" : "❌ no definido");
+
 const express = require("express");
 const cors = require("cors");
 const fetch = require("node-fetch");
-require("dotenv").config();
 
 const app = express();
-app.use(cors());
+
+const corsOptions = {
+  origin: "*", // Cambia a tu dominio frontend para mayor seguridad
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+};
+app.use(cors(corsOptions));
 app.use(express.json());
 
-const DID_API_KEY = process.env.DID_API_KEY; // tu clave API base64 o usuario:password base64
-const AUTH_HEADER = `Basic ${Buffer.from(DID_API_KEY).toString("base64")}`;
+const auth = Buffer.from(`${process.env.DID_USERNAME}:${process.env.DID_PASSWORD}`).toString("base64");
 
-app.post("/stream/create-session", async (req, res) => {
-  try {
-    console.log("Crear sesión streaming");
+async function generateVideo(text) {
+  console.log("Enviando petición a D-ID con texto:", text);
 
-    const data = {
-      source_url: "https://raw.githubusercontent.com/betomacia/imagen-jesus/refs/heads/main/jesus.jpg",
-    };
+  const data = {
+    source_url: "https://raw.githubusercontent.com/betomacia/imagen-jesus/refs/heads/main/jesus.jpg",
+    script: {
+      type: "text",
+      input: text,
+      provider: { type: "microsoft", voice_id: "es-ES-AlvaroNeural" },
+      ssml: false,
+    },
+    config: { stitch: true },
+  };
 
-    const response = await fetch("https://api.d-id.com/talks/streams", {
-      method: "POST",
-      headers: {
-        Authorization: AUTH_HEADER,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(data),
-    });
+  const response = await fetch("https://api.d-id.com/talks", {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${auth}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(data),
+  });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error("Error crear sesión streaming:", errorText);
-      return res.status(response.status).json({ error: errorText });
-    }
-
-    const json = await response.json();
-    console.log("Sesión streaming creada:", json);
-
-    // Retornamos id, session_id, offer y ice_servers para frontend
-    res.json(json);
-  } catch (error) {
-    console.error("Error general crear sesión:", error);
-    res.status(500).json({ error: error.message });
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error("Error en API D-ID:", errorText);
+    throw new Error(`D-ID API error: ${errorText}`);
   }
-});
 
-// Recibir SDP answer del cliente
-app.post("/stream/:streamId/sdp", async (req, res) => {
-  const { streamId } = req.params;
-  const { answer, session_id } = req.body;
+  const json = await response.json();
+  console.log("Respuesta D-ID API:", json);
+  return json;
+}
 
-  if (!answer || !session_id)
-    return res.status(400).json({ error: "answer y session_id son requeridos" });
+async function pollTalkStatus(talkId) {
+  let status = "";
+  let attempts = 0;
+  while (status !== "done" && attempts < 60) { // max 60 intentos ~5 min
+    attempts++;
+    console.log(`Intento #${attempts} para talkId ${talkId}`);
 
-  try {
-    const response = await fetch(`https://api.d-id.com/talks/streams/${streamId}/sdp`, {
-      method: "POST",
-      headers: {
-        Authorization: AUTH_HEADER,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ answer, session_id }),
+    const res = await fetch(`https://api.d-id.com/talks/${talkId}`, {
+      headers: { Authorization: `Basic ${auth}` },
     });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error("Error enviar SDP answer:", errorText);
-      return res.status(response.status).json({ error: errorText });
+    if (!res.ok) {
+      const errorText = await res.text();
+      console.error(`Error consultando estado video: ${res.status} ${errorText}`);
+      throw new Error(`Error consultando estado video: ${res.status} ${errorText}`);
     }
 
-    const json = await response.json();
-    console.log("SDP answer enviado OK:", json);
-    res.json(json);
-  } catch (error) {
-    console.error("Error general SDP answer:", error);
-    res.status(500).json({ error: error.message });
+    const json = await res.json();
+    status = json.status;
+    console.log(`Estado actual de talkId ${talkId}: ${status}`);
+
+    if (status === "done") {
+      console.log(`Video listo para talkId ${talkId}, URL: ${json.result_url}`);
+      return json.result_url;
+    }
+
+    if (status === "failed") {
+      throw new Error("Falló la generación del video");
+    }
+
+    await new Promise((r) => setTimeout(r, 5000)); // espera 5 seg
   }
-});
 
-// Recibir ICE candidates
-app.post("/stream/:streamId/ice", async (req, res) => {
-  const { streamId } = req.params;
-  const { candidate, sdpMid, sdpMLineIndex, session_id } = req.body;
+  throw new Error("Timeout esperando video listo");
+}
 
-  if (!candidate || !session_id)
-    return res.status(400).json({ error: "candidate y session_id son requeridos" });
+app.post("/generate-video", async (req, res) => {
+  const { text } = req.body;
+  if (!text) return res.status(400).json({ error: "Texto requerido" });
 
   try {
-    const response = await fetch(`https://api.d-id.com/talks/streams/${streamId}/ice`, {
-      method: "POST",
-      headers: {
-        Authorization: AUTH_HEADER,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ candidate, sdpMid, sdpMLineIndex, session_id }),
+    console.log("POST /generate-video recibido con body:", req.body);
+
+    const talkData = await generateVideo(text);
+
+    const videoUrl = await pollTalkStatus(talkData.id);
+
+    res.json({
+      videoUrl,
+      text,
     });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error("Error enviar ICE candidate:", errorText);
-      return res.status(response.status).json({ error: errorText });
-    }
-
-    res.json({ ok: true });
   } catch (error) {
-    console.error("Error general ICE candidate:", error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Crear un "talk" en streaming para que hable Jesús
-app.post("/stream/:streamId/talk", async (req, res) => {
-  const { streamId } = req.params;
-  const { session_id, text } = req.body;
-
-  if (!session_id || !text)
-    return res.status(400).json({ error: "session_id y text son requeridos" });
-
-  try {
-    const data = {
-      session_id,
-      script: {
-        type: "text",
-        input: text,
-        provider: { type: "microsoft", voice_id: "es-ES-AlvaroNeural" },
-        ssml: false,
-      },
-      config: { stitch: false },
-    };
-
-    const response = await fetch(`https://api.d-id.com/talks/streams/${streamId}`, {
-      method: "POST",
-      headers: {
-        Authorization: AUTH_HEADER,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(data),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error("Error crear talk stream:", errorText);
-      return res.status(response.status).json({ error: errorText });
-    }
-
-    const json = await response.json();
-    console.log("Talk stream creado:", json);
-    res.json(json);
-  } catch (error) {
-    console.error("Error general crear talk stream:", error);
-    res.status(500).json({ error: error.message });
+    console.error("Error generando video:", error);
+    res.status(500).json({ error: error.message || "Error interno" });
   }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Servidor escuchando en http://localhost:${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Servidor escuchando en http://localhost:${PORT}`);
+  setInterval(() => console.log("Servidor vivo... " + new Date().toISOString()), 60000);
+});
