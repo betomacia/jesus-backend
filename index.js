@@ -7,35 +7,21 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const auth = Buffer.from(`${process.env.DID_USERNAME}:${process.env.DID_PASSWORD}`).toString("base64");
+const DID_API_KEY = process.env.DID_API_KEY; // tu clave API base64 o usuario:password base64
+const AUTH_HEADER = `Basic ${Buffer.from(DID_API_KEY).toString("base64")}`;
 
-// Crear sesión de streaming en D-ID
-app.post("/create-stream-session", async (req, res) => {
-  const { text } = req.body;
-  if (!text) return res.status(400).json({ error: "Texto requerido" });
-
+app.post("/stream/create-session", async (req, res) => {
   try {
-    console.log("POST /create-stream-session recibido con texto:", text);
+    console.log("Crear sesión streaming");
 
     const data = {
       source_url: "https://raw.githubusercontent.com/betomacia/imagen-jesus/refs/heads/main/jesus.jpg",
-      script: {
-        type: "text",
-        input: text,
-        provider: { type: "microsoft", voice_id: "es-ES-AlvaroNeural" },
-        ssml: false,
-      },
-      config: {
-        stitch: true,
-        // live streaming config: para crear sesión de streaming en D-ID
-        type: "stream",
-      },
     };
 
     const response = await fetch("https://api.d-id.com/talks/streams", {
       method: "POST",
       headers: {
-        Authorization: `Basic ${auth}`,
+        Authorization: AUTH_HEADER,
         "Content-Type": "application/json",
       },
       body: JSON.stringify(data),
@@ -43,42 +29,109 @@ app.post("/create-stream-session", async (req, res) => {
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error("Error creando sesión:", errorText);
+      console.error("Error crear sesión streaming:", errorText);
       return res.status(response.status).json({ error: errorText });
     }
 
     const json = await response.json();
     console.log("Sesión streaming creada:", json);
 
+    // Retornamos id, session_id, offer y ice_servers para frontend
     res.json(json);
   } catch (error) {
-    console.error("Error en create-stream-session:", error);
-    res.status(500).json({ error: error.message || "Error interno" });
+    console.error("Error general crear sesión:", error);
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Enviar texto para que sesión active la respuesta (usar en frontend para enviar nuevas frases)
-app.post("/stream/send-text", async (req, res) => {
-  const { talkId, text } = req.body;
-  if (!talkId || !text)
-    return res.status(400).json({ error: "talkId y text son requeridos" });
+// Recibir SDP answer del cliente
+app.post("/stream/:streamId/sdp", async (req, res) => {
+  const { streamId } = req.params;
+  const { answer, session_id } = req.body;
+
+  if (!answer || !session_id)
+    return res.status(400).json({ error: "answer y session_id son requeridos" });
 
   try {
-    console.log(`POST /stream/send-text para talkId: ${talkId} con texto: ${text}`);
+    const response = await fetch(`https://api.d-id.com/talks/streams/${streamId}/sdp`, {
+      method: "POST",
+      headers: {
+        Authorization: AUTH_HEADER,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ answer, session_id }),
+    });
 
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error("Error enviar SDP answer:", errorText);
+      return res.status(response.status).json({ error: errorText });
+    }
+
+    const json = await response.json();
+    console.log("SDP answer enviado OK:", json);
+    res.json(json);
+  } catch (error) {
+    console.error("Error general SDP answer:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Recibir ICE candidates
+app.post("/stream/:streamId/ice", async (req, res) => {
+  const { streamId } = req.params;
+  const { candidate, sdpMid, sdpMLineIndex, session_id } = req.body;
+
+  if (!candidate || !session_id)
+    return res.status(400).json({ error: "candidate y session_id son requeridos" });
+
+  try {
+    const response = await fetch(`https://api.d-id.com/talks/streams/${streamId}/ice`, {
+      method: "POST",
+      headers: {
+        Authorization: AUTH_HEADER,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ candidate, sdpMid, sdpMLineIndex, session_id }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error("Error enviar ICE candidate:", errorText);
+      return res.status(response.status).json({ error: errorText });
+    }
+
+    res.json({ ok: true });
+  } catch (error) {
+    console.error("Error general ICE candidate:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Crear un "talk" en streaming para que hable Jesús
+app.post("/stream/:streamId/talk", async (req, res) => {
+  const { streamId } = req.params;
+  const { session_id, text } = req.body;
+
+  if (!session_id || !text)
+    return res.status(400).json({ error: "session_id y text son requeridos" });
+
+  try {
     const data = {
+      session_id,
       script: {
         type: "text",
         input: text,
         provider: { type: "microsoft", voice_id: "es-ES-AlvaroNeural" },
         ssml: false,
       },
+      config: { stitch: false },
     };
 
-    const response = await fetch(`https://api.d-id.com/talks/streams/${talkId}/script`, {
-      method: "PUT",
+    const response = await fetch(`https://api.d-id.com/talks/streams/${streamId}`, {
+      method: "POST",
       headers: {
-        Authorization: `Basic ${auth}`,
+        Authorization: AUTH_HEADER,
         "Content-Type": "application/json",
       },
       body: JSON.stringify(data),
@@ -86,21 +139,18 @@ app.post("/stream/send-text", async (req, res) => {
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error("Error enviando texto a sesión:", errorText);
+      console.error("Error crear talk stream:", errorText);
       return res.status(response.status).json({ error: errorText });
     }
 
     const json = await response.json();
-    console.log("Texto enviado a sesión:", json);
-
+    console.log("Talk stream creado:", json);
     res.json(json);
   } catch (error) {
-    console.error("Error en stream/send-text:", error);
-    res.status(500).json({ error: error.message || "Error interno" });
+    console.error("Error general crear talk stream:", error);
+    res.status(500).json({ error: error.message });
   }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () =>
-  console.log(`Servidor escuchando en http://localhost:${PORT}`)
-);
+app.listen(PORT, () => console.log(`Servidor escuchando en http://localhost:${PORT}`));
