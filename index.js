@@ -1,113 +1,99 @@
-const express = require("express");
-const cors = require("cors");
-const fetch = require("node-fetch");
-require("dotenv").config();
+import React, { useState, useRef, useEffect } from "react";
 
-const app = express();
+const backendUrl = "https://jesus-backend-production-7f2d.up.railway.app";
 
-const corsOptions = {
-  origin: "*", // Cambia a tu dominio frontend para más seguridad
-  methods: ["GET", "POST", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
-};
-app.use(cors(corsOptions));
-app.use(express.json());
+export default function App() {
+  const [userName, setUserName] = useState("");
+  const [hasEnteredName, setHasEnteredName] = useState(false);
+  const [error, setError] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const pcRef = useRef<RTCPeerConnection | null>(null);
 
-const auth = Buffer.from(`${process.env.DID_USERNAME}:${process.env.DID_PASSWORD}`).toString("base64");
+  const startStreaming = async (text: string) => {
+    setIsLoading(true);
+    setError("");
 
-async function generateVideo(text) {
-  console.log("Enviando petición a D-ID con texto:", text);
+    try {
+      const res = await fetch(`${backendUrl}/create-stream-session`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
 
-  const data = {
-    source_url: "https://raw.githubusercontent.com/betomacia/imagen-jesus/refs/heads/main/jesus.jpg",
-    script: {
-      type: "text",
-      input: text,
-      provider: { type: "microsoft", voice_id: "es-ES-AlvaroNeural" },
-      ssml: false,
-    },
-    config: { stitch: true },
+      if (!res.ok) {
+        const errorText = await res.text();
+        throw new Error(errorText);
+      }
+
+      const data = await res.json();
+
+      // Inicializar PeerConnection
+      const pc = new RTCPeerConnection({
+        iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+      });
+      pcRef.current = pc;
+
+      // Manejar pista remota (video/audio)
+      pc.ontrack = (event) => {
+        if (videoRef.current) {
+          videoRef.current.srcObject = event.streams[0];
+        }
+      };
+
+      // Setear descripción remota (offer desde D-ID)
+      await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+
+      // Crear answer y enviarla al backend D-ID
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+
+      await fetch(data.answer_url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ answer: pc.localDescription }),
+      });
+
+      setIsLoading(false);
+    } catch (err: any) {
+      setError(err.message || "Error iniciando streaming");
+      setIsLoading(false);
+    }
   };
 
-  const response = await fetch("https://api.d-id.com/talks", {
-    method: "POST",
-    headers: {
-      Authorization: `Basic ${auth}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(data),
-  });
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!userName.trim()) return;
+    setHasEnteredName(true);
+    startStreaming(`Hola ${userName}, ¿cómo estás?`);
+  };
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    console.error("Error en API D-ID:", errorText);
-    throw new Error(`D-ID API error: ${errorText}`);
-  }
-
-  const json = await response.json();
-  console.log("Respuesta D-ID API:", json);
-  return json;
+  return (
+    <div style={{ padding: 20 }}>
+      {!hasEnteredName ? (
+        <form onSubmit={handleSubmit}>
+          <input
+            value={userName}
+            onChange={(e) => setUserName(e.target.value)}
+            placeholder="Ingresa tu nombre"
+          />
+          <button type="submit" disabled={!userName.trim()}>
+            Empezar conversación
+          </button>
+        </form>
+      ) : (
+        <div>
+          {isLoading && <p>Jesús está preparando su respuesta...</p>}
+          {error && <p style={{ color: "red" }}>{error}</p>}
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            muted={false}
+            style={{ width: "100%", maxWidth: 600, borderRadius: 12 }}
+          />
+        </div>
+      )}
+    </div>
+  );
 }
-
-async function pollTalkStatus(talkId) {
-  let status = "";
-  let attempts = 0;
-  while (status !== "done" && attempts < 60) { // max 60 intentos ~5 min
-    attempts++;
-    console.log(`Intento #${attempts} para talkId ${talkId}`);
-
-    const res = await fetch(`https://api.d-id.com/talks/${talkId}`, {
-      headers: { Authorization: `Basic ${auth}` },
-    });
-
-    if (!res.ok) {
-      const errorText = await res.text();
-      console.error(`Error consultando estado video: ${res.status} ${errorText}`);
-      throw new Error(`Error consultando estado video: ${res.status} ${errorText}`);
-    }
-
-    const json = await res.json();
-    status = json.status;
-    console.log(`Estado actual de talkId ${talkId}: ${status}`);
-
-    if (status === "done") {
-      console.log(`Video listo para talkId ${talkId}, URL: ${json.result_url}`);
-      return json.result_url;
-    }
-
-    if (status === "failed") {
-      throw new Error("Falló la generación del video");
-    }
-
-    await new Promise((r) => setTimeout(r, 5000)); // espera 5 seg
-  }
-
-  throw new Error("Timeout esperando video listo");
-}
-
-app.post("/generate-video", async (req, res) => {
-  const { text } = req.body;
-  if (!text) return res.status(400).json({ error: "Texto requerido" });
-
-  try {
-    console.log("POST /generate-video recibido con body:", req.body);
-
-    const talkData = await generateVideo(text);
-
-    const videoUrl = await pollTalkStatus(talkData.id);
-
-    res.json({
-      videoUrl,
-      text,
-    });
-  } catch (error) {
-    console.error("Error generando video:", error);
-    res.status(500).json({ error: error.message || "Error interno" });
-  }
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Servidor escuchando en http://localhost:${PORT}`);
-  setInterval(() => console.log("Servidor vivo... " + new Date().toISOString()), 60000);
-});
