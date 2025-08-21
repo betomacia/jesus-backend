@@ -8,6 +8,11 @@ const { OpenAI } = require("openai");
 
 const app = express();
 
+import oneQuestionApp from './one-question';  // arriba, con los otros imports
+
+app.use(oneQuestionApp);  // antes de app.listen(...)
+
+
 /* ===== CORS ===== */
 const allowedOrigin = process.env.CORS_ORIGIN || "*";
 app.use(
@@ -186,3 +191,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Servidor escuchando en http://localhost:${PORT}`);
 });
+
