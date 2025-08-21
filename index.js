@@ -5,13 +5,9 @@ require("dotenv").config();
 
 const multer = require("multer");
 const { OpenAI } = require("openai");
+const oneQuestionApp = require("./one-question"); // 👈 import del nuevo archivo
 
 const app = express();
-
-import oneQuestionApp from './one-question';  // arriba, con los otros imports
-
-app.use(oneQuestionApp);  // antes de app.listen(...)
-
 
 /* ===== CORS ===== */
 const allowedOrigin = process.env.CORS_ORIGIN || "*";
@@ -181,6 +177,9 @@ app.all("/api/tts", async (req, res) => {
   }
 });
 
+/* ====== One-question endpoint ====== */
+app.use(oneQuestionApp); // 👈 aquí se activa el nuevo endpoint
+
 /* ====== Root / Health ====== */
 app.get("/", (_req, res) => {
   res.send("jesus-backend up ✅");
@@ -191,4 +190,3 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Servidor escuchando en http://localhost:${PORT}`);
 });
-
