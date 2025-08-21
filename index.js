@@ -91,7 +91,6 @@ app.post("/api/transcribe", upload.single("file"), async (req, res) => {
       return res.status(400).json({ error: "No se recibió ningún archivo" });
     }
 
-    // Usamos Blob en lugar de File para compatibilidad en Node
     const fileBlob = new Blob([req.file.buffer], {
       type: req.file.mimetype || "audio/webm",
     });
@@ -108,7 +107,51 @@ app.post("/api/transcribe", upload.single("file"), async (req, res) => {
   }
 });
 
-// ---- Ruta raíz (para que no dé Cannot GET /) ----
+// ---- ElevenLabs TTS (Texto -> Audio MP3) ----
+app.post("/api/tts", async (req, res) => {
+  try {
+    const { text } = req.body || {};
+    if (!text || !text.trim()) {
+      return res.status(400).json({ error: "no_text" });
+    }
+    const VOICE_ID = process.env.ELEVENLABS_VOICE_ID;
+    const API_KEY = process.env.ELEVENLABS_API_KEY;
+    if (!VOICE_ID || !API_KEY) {
+      return res.status(500).json({ error: "missing_elevenlabs_env" });
+    }
+
+    const url = `https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}?optimize_streaming_latency=0`;
+
+    const r = await fetch(url, {
+      method: "POST",
+      headers: {
+        "xi-api-key": API_KEY,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        text,
+        model_id: "eleven_multilingual_v2",
+        voice_settings: { stability: 0.4, similarity_boost: 0.8 },
+      }),
+    });
+
+    if (!r.ok) {
+      const body = await r.text().catch(() => "");
+      console.error("elevenlabs error", r.status, body);
+      return res.status(502).json({ error: "elevenlabs_failed" });
+    }
+
+    const buf = Buffer.from(await r.arrayBuffer());
+    res.setHeader("Content-Type", "audio/mpeg");
+    res.setHeader("Cache-Control", "no-store");
+    return res.send(buf);
+  } catch (err) {
+    console.error("tts error", err);
+    return res.status(500).json({ error: "tts_failed" });
+  }
+});
+
+// ---- Ruta raíz ----
 app.get("/", (_req, res) => {
   res.send("jesus-backend up ✅");
 });
