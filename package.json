@@ -1,17 +1,21 @@
 {
   "name": "jesus-backend",
   "version": "1.0.0",
+  "private": true,
   "main": "index.js",
   "type": "commonjs",
   "scripts": {
     "start": "node index.js"
   },
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
-    "multer": "1.4.5-lts.2",           // 👈 FIX: versión válida
-    "node-fetch": "^2.6.7",            // 👈 RECOMENDADO: v2 para require(...)
+    "multer": "1.4.5-lts.2",
+    "node-fetch": "^2.6.7",
     "openai": "^4.0.0"
   }
 }
