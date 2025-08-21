@@ -3,18 +3,25 @@ const cors = require("cors");
 const fetch = require("node-fetch");
 require("dotenv").config();
 
+const multer = require("multer");
+const { OpenAI } = require("openai");
+
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const auth = Buffer.from(`${process.env.DID_USERNAME}:${process.env.DID_PASSWORD}`).toString("base64");
+// ---- D-ID ----
+const auth = Buffer.from(
+  `${process.env.DID_USERNAME}:${process.env.DID_PASSWORD}`
+).toString("base64");
 
 const streams = {};
 
 app.post("/create-stream-session", async (req, res) => {
   try {
     const data = {
-      source_url: "https://raw.githubusercontent.com/betomacia/imagen-jesus/refs/heads/main/jesus.jpg",
+      source_url:
+        "https://raw.githubusercontent.com/betomacia/imagen-jesus/refs/heads/main/jesus.jpg",
     };
 
     // 1) Crear la sesión streaming
@@ -35,13 +42,16 @@ app.post("/create-stream-session", async (req, res) => {
     const createJson = await createResponse.json();
 
     // 2) Obtener offer e ice_servers con GET
-    const sdpResponse = await fetch(`https://api.d-id.com/talks/streams/${createJson.id}`, {
-      method: "GET",
-      headers: {
-        Authorization: `Basic ${auth}`,
-        "Content-Type": "application/json",
-      },
-    });
+    const sdpResponse = await fetch(
+      `https://api.d-id.com/talks/streams/${createJson.id}`,
+      {
+        method: "GET",
+        headers: {
+          Authorization: `Basic ${auth}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
 
     if (!sdpResponse.ok) {
       const errorText = await sdpResponse.text();
@@ -65,33 +75,29 @@ app.post("/create-stream-session", async (req, res) => {
     });
   } catch (error) {
     console.error("Error creando stream session:", error);
-    res.status(500).json({ error: error.message || "Error interno" });
+    res
+      .status(500)
+      .json({ error: error.message || "Error interno creando sesión" });
   }
 });
 
-// ... los demás endpoints (SDP answer, ICE candidate, enviar texto) igual que antes
-const multer = require("multer");
-const { OpenAI } = require("openai");
+// ---- OpenAI Whisper (Transcripción) ----
+const upload = multer({ limits: { fileSize: 25 * 1024 * 1024 } }); // máx 25 MB
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-const upload = multer({ limits: { fileSize: 25 * 1024 * 1024 } }); // máximo 25 MB
-
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
-
-// NUEVO ENDPOINT: /api/transcribe
 app.post("/api/transcribe", upload.single("file"), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: "No se recibió ningún archivo" });
     }
 
-    const file = new File([req.file.buffer], req.file.originalname || "audio.webm", {
+    // Usamos Blob en lugar de File para compatibilidad en Node
+    const fileBlob = new Blob([req.file.buffer], {
       type: req.file.mimetype || "audio/webm",
     });
 
     const resp = await openai.audio.transcriptions.create({
-      file,
+      file: fileBlob,
       model: "whisper-1",
     });
 
@@ -102,8 +108,13 @@ app.post("/api/transcribe", upload.single("file"), async (req, res) => {
   }
 });
 
+// ---- Ruta raíz (para que no dé Cannot GET /) ----
+app.get("/", (_req, res) => {
+  res.send("jesus-backend up ✅");
+});
+
+// ---- Iniciar servidor ----
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Servidor escuchando en http://localhost:${PORT}`);
 });
-
