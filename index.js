@@ -70,8 +70,40 @@ app.post("/create-stream-session", async (req, res) => {
 });
 
 // ... los demás endpoints (SDP answer, ICE candidate, enviar texto) igual que antes
+const multer = require("multer");
+const { OpenAI } = require("openai");
+
+const upload = multer({ limits: { fileSize: 25 * 1024 * 1024 } }); // máximo 25 MB
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
+// NUEVO ENDPOINT: /api/transcribe
+app.post("/api/transcribe", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: "No se recibió ningún archivo" });
+    }
+
+    const file = new File([req.file.buffer], req.file.originalname || "audio.webm", {
+      type: req.file.mimetype || "audio/webm",
+    });
+
+    const resp = await openai.audio.transcriptions.create({
+      file,
+      model: "whisper-1",
+    });
+
+    res.json({ text: (resp.text || "").trim() });
+  } catch (err) {
+    console.error("Error en transcripción:", err);
+    res.status(500).json({ error: "Error transcribiendo audio" });
+  }
+});
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Servidor escuchando en http://localhost:${PORT}`);
 });
+
