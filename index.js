@@ -7,28 +7,41 @@ const multer = require("multer");
 const { OpenAI } = require("openai");
 
 const app = express();
-app.use(cors());
+
+/* ===== CORS ===== */
+const allowedOrigin = process.env.CORS_ORIGIN || "*";
+app.use(
+  cors({
+    origin: allowedOrigin === "*" ? true : allowedOrigin,
+  })
+);
 app.use(express.json());
 
-// ---- D-ID ----
-const auth = Buffer.from(
-  `${process.env.DID_USERNAME}:${process.env.DID_PASSWORD}`
-).toString("base64");
+/* ====== D-ID ====== */
+const DID_USER = process.env.DID_USERNAME || "";
+const DID_PASS = process.env.DID_PASSWORD || "";
+const didAuth =
+  DID_USER && DID_PASS
+    ? Buffer.from(`${DID_USER}:${DID_PASS}`).toString("base64")
+    : null;
 
 const streams = {};
 
 app.post("/create-stream-session", async (req, res) => {
+  if (!didAuth) {
+    return res.status(500).json({ error: "missing_did_credentials" });
+  }
   try {
     const data = {
       source_url:
         "https://raw.githubusercontent.com/betomacia/imagen-jesus/refs/heads/main/jesus.jpg",
     };
 
-    // 1) Crear la sesión streaming
+    // 1) Crear sesión
     const createResponse = await fetch("https://api.d-id.com/talks/streams", {
       method: "POST",
       headers: {
-        Authorization: `Basic ${auth}`,
+        Authorization: `Basic ${didAuth}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify(data),
@@ -41,13 +54,13 @@ app.post("/create-stream-session", async (req, res) => {
 
     const createJson = await createResponse.json();
 
-    // 2) Obtener offer e ice_servers con GET
+    // 2) Obtener offer + ice servers
     const sdpResponse = await fetch(
       `https://api.d-id.com/talks/streams/${createJson.id}`,
       {
         method: "GET",
         headers: {
-          Authorization: `Basic ${auth}`,
+          Authorization: `Basic ${didAuth}`,
           "Content-Type": "application/json",
         },
       }
@@ -66,7 +79,6 @@ app.post("/create-stream-session", async (req, res) => {
       peerConnectionReady: false,
     };
 
-    // Enviar al frontend todos los datos necesarios
     res.json({
       id: createJson.id,
       session_id: createJson.session_id,
@@ -81,8 +93,8 @@ app.post("/create-stream-session", async (req, res) => {
   }
 });
 
-// ---- OpenAI Whisper (Transcripción) ----
-const upload = multer({ limits: { fileSize: 25 * 1024 * 1024 } }); // máx 25 MB
+/* ====== OpenAI Whisper (Transcripción) ====== */
+const upload = multer({ limits: { fileSize: 25 * 1024 * 1024 } }); // máx 25MB
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 app.post("/api/transcribe", upload.single("file"), async (req, res) => {
@@ -91,6 +103,7 @@ app.post("/api/transcribe", upload.single("file"), async (req, res) => {
       return res.status(400).json({ error: "No se recibió ningún archivo" });
     }
 
+    // Node 18+ tiene Blob nativo
     const fileBlob = new Blob([req.file.buffer], {
       type: req.file.mimetype || "audio/webm",
     });
@@ -98,6 +111,7 @@ app.post("/api/transcribe", upload.single("file"), async (req, res) => {
     const resp = await openai.audio.transcriptions.create({
       file: fileBlob,
       model: "whisper-1",
+      // language: "es" // opcional: forzar idioma
     });
 
     res.json({ text: (resp.text || "").trim() });
@@ -107,11 +121,15 @@ app.post("/api/transcribe", upload.single("file"), async (req, res) => {
   }
 });
 
-// ---- ElevenLabs TTS (Texto -> Audio MP3) ----
-app.post("/api/tts", async (req, res) => {
+/* ====== ElevenLabs TTS (streaming, baja latencia) ======
+   Frontend recomendado:
+   new Audio(`${BASE_URL}/api/tts?text=${encodeURIComponent(text)}`).play();
+*/
+app.all("/api/tts", async (req, res) => {
   try {
-    const { text } = req.body || {};
-    if (!text || !text.trim()) {
+    const text =
+      req.method === "GET" ? (req.query.text || "") : (req.body?.text || "");
+    if (!text || !String(text).trim()) {
       return res.status(400).json({ error: "no_text" });
     }
     const VOICE_ID = process.env.ELEVENLABS_VOICE_ID;
@@ -120,7 +138,10 @@ app.post("/api/tts", async (req, res) => {
       return res.status(500).json({ error: "missing_elevenlabs_env" });
     }
 
-    const url = `https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}?optimize_streaming_latency=0`;
+    // Streaming + formato liviano para arrancar rápido
+    const url =
+      `https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}/stream` +
+      `?optimize_streaming_latency=4&output_format=mp3_22050_32`;
 
     const r = await fetch(url, {
       method: "POST",
@@ -129,34 +150,38 @@ app.post("/api/tts", async (req, res) => {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        text,
+        text: String(text),
         model_id: "eleven_multilingual_v2",
-        voice_settings: { stability: 0.4, similarity_boost: 0.8 },
+        voice_settings: {
+          stability: 0.3,
+          similarity_boost: 0.7,
+          style: 0,
+          use_speaker_boost: false,
+        },
       }),
     });
 
-    if (!r.ok) {
+    if (!r.ok || !r.body) {
       const body = await r.text().catch(() => "");
-      console.error("elevenlabs error", r.status, body);
+      console.error("elevenlabs stream error", r.status, body);
       return res.status(502).json({ error: "elevenlabs_failed" });
     }
 
-    const buf = Buffer.from(await r.arrayBuffer());
     res.setHeader("Content-Type", "audio/mpeg");
     res.setHeader("Cache-Control", "no-store");
-    return res.send(buf);
+    r.body.pipe(res); // stream directo (sin bufferizar)
   } catch (err) {
-    console.error("tts error", err);
+    console.error("tts stream error", err);
     return res.status(500).json({ error: "tts_failed" });
   }
 });
 
-// ---- Ruta raíz ----
+/* ====== Root / Health ====== */
 app.get("/", (_req, res) => {
   res.send("jesus-backend up ✅");
 });
 
-// ---- Iniciar servidor ----
+/* ====== Inicio servidor ====== */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Servidor escuchando en http://localhost:${PORT}`);
