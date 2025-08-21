@@ -121,20 +121,23 @@ app.post("/api/transcribe", upload.single("file"), async (req, res) => {
 });
 
 /* ====== ElevenLabs TTS ====== */
+/* ====== ElevenLabs TTS (streaming, baja latencia) ====== */
 app.all("/api/tts", async (req, res) => {
   try {
     const text =
-      req.method === "GET" ? req.query.text || "" : req.body?.text || "";
+      req.method === "GET"
+        ? (req.query.text || "")
+        : (req.body?.text || "");
     if (!text || !String(text).trim()) {
       return res.status(400).json({ error: "no_text" });
     }
+
     const VOICE_ID = process.env.ELEVENLABS_VOICE_ID;
     const API_KEY = process.env.ELEVENLABS_API_KEY;
     if (!VOICE_ID || !API_KEY) {
       return res.status(500).json({ error: "missing_elevenlabs_env" });
     }
 
-    // Streaming + formato liviano para arrancar rápido
     const url =
       `https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}/stream` +
       `?optimize_streaming_latency=4&output_format=mp3_22050_32`;
@@ -165,12 +168,13 @@ app.all("/api/tts", async (req, res) => {
 
     res.setHeader("Content-Type", "audio/mpeg");
     res.setHeader("Cache-Control", "no-store");
-    r.body.pipe(res); // stream directo
+    r.body.pipe(res); // stream directo (sin bufferizar)
   } catch (err) {
     console.error("tts stream error", err);
     return res.status(500).json({ error: "tts_failed" });
   }
 });
+
 
 /* ====== Importar one-question ====== */
 const oneQuestionRoute = require("./one-question");
@@ -186,3 +190,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Servidor escuchando en http://localhost:${PORT}`);
 });
+
