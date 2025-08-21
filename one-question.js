@@ -12,7 +12,6 @@ Evita frases genéricas como "¿cómo seguimos hoy?".
 Usa un tono cálido y humano, como si realmente estuvieras conversando.
 La salida debe ser SOLO una pregunta terminada en "?"`;
 
-
 function clampQuestion(s) {
   let t = (s || "").trim();
   if (!t.endsWith("?")) t += "?";
@@ -29,7 +28,7 @@ router.post("/api/openai/one-question", async (req, res) => {
 
     const resp = await openai.chat.completions.create({
       model: "gpt-4o-mini",
-      temperature: 0.2,
+      temperature: 0.5,
       max_tokens: 100,
       messages: [
         { role: "system", content: SYS_BASE },
