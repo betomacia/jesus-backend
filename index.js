@@ -1,11 +1,11 @@
 const express = require("express");
 const cors = require("cors");
-const fetch = require("node-fetch");
+const fetch = require("node-fetch"); // puedes usar fetch nativo en Node 18+ si prefieres
 require("dotenv").config();
 const multer = require("multer");
 const { OpenAI } = require("openai");
 
-/* ⬇️ NUEVO: router de D-ID (API key vía Railway) */
+/* ⬇️ NUEVO: router de D-ID (usuario/contraseña vía Railway) */
 const didRouter = require("./routes/did");
 
 const app = express();
@@ -19,10 +19,17 @@ app.use(
 );
 app.use(express.json());
 
+/* 🔎 Logger de requests (debug) — para ver si “llega algo” al backend */
+app.use((req, _res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl}`);
+  next();
+});
+
 /* ⬇️ NUEVO: monta /api/did/* (streams, sdp, ice, talk) */
 app.use("/api/did", didRouter);
 
-/* ====== D-ID (USER/PASS legado, si lo sigues usando) ====== */
+/* ====== D-ID (LEGACY: create-stream-session con user/pass) ====== */
+/* Nota: no es necesario si ya usas /api/did/*, pero lo dejamos por compatibilidad */
 const DID_USER = process.env.DID_USERNAME || "";
 const DID_PASS = process.env.DID_PASSWORD || "";
 const didAuth =
