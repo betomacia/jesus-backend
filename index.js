@@ -1,10 +1,12 @@
 // index.js
 const express = require("express");
 const cors = require("cors");
-const nodeFetch = require("node-fetch"); // fallback si el runtime no trae fetch global
+const nodeFetch = require("node-fetch"); // usaremos SIEMPRE node-fetch v2
 require("dotenv").config();
 const multer = require("multer");
 const { OpenAI } = require("openai");
+const { Readable } = require("stream");
+const { toFile } = require("openai/uploads");
 
 /* ============ RUTAS D-ID (WebRTC) ============ */
 const didRouter = require("./routes/did");
@@ -34,8 +36,8 @@ app.use(express.urlencoded({ extended: true, limit: "2mb" }));
 app.use("/api/did", didRouter);
 
 /* ============ ENV & HELPERS ============ */
-const _fetch = (...args) =>
-  (globalThis.fetch ? globalThis.fetch(...args) : nodeFetch(...args));
+// Fuerza node-fetch para evitar ReadableStream web que no soporta .pipe()
+const _fetch = (...args) => nodeFetch(...args);
 
 const PUBLIC_BASE_URL =
   process.env.PUBLIC_BASE_URL ||
@@ -163,10 +165,12 @@ app.post("/api/transcribe", upload.single("file"), async (req, res) => {
       return res.status(400).json({ error: "No se recibió ningún archivo" });
     }
 
-    // OpenAI SDK acepta Buffer directamente
+    // Crear FileLike robusto desde Buffer (soporta Node)
     const fileName = req.file.originalname || "audio.webm";
+    const file = await toFile(new Blob([req.file.buffer], { type: req.file.mimetype || "audio/webm" }), fileName);
+
     const resp = await openai.audio.transcriptions.create({
-      file: new File([req.file.buffer], fileName, { type: req.file.mimetype || "audio/webm" }),
+      file,
       model: "whisper-1",
     });
 
@@ -196,7 +200,7 @@ app.all("/api/tts", async (req, res) => {
       return res.status(500).json({ error: "missing_elevenlabs_env" });
     }
 
-    // Opcional: AbortController para timeout (Railway a veces cuelga peticiones externas)
+    // AbortController para timeout
     const controller = new AbortController();
     const timeoutMs = Number(process.env.TTS_TIMEOUT_MS || 30000);
     const t = setTimeout(() => controller.abort(), timeoutMs);
@@ -210,7 +214,7 @@ app.all("/api/tts", async (req, res) => {
       headers: {
         "xi-api-key": API_KEY,
         "Content-Type": "application/json",
-        Accept: "audio/mpeg",
+        "Accept": "audio/mpeg",
       },
       body: JSON.stringify({
         text: String(text).slice(0, 5000),
@@ -228,7 +232,9 @@ app.all("/api/tts", async (req, res) => {
     clearTimeout(t);
 
     if (!r.ok || !r.body) {
-      const body = await r.text().catch(() => "");
+      const body = await (async () => {
+        try { return await r.text(); } catch { return ""; }
+      })();
       console.error("elevenlabs stream error", r.status, body);
       return res.status(502).json({ error: "elevenlabs_failed", detail: body });
     }
@@ -236,22 +242,26 @@ app.all("/api/tts", async (req, res) => {
     // Cabeceras para entregar MP3 por streaming
     res.setHeader("Content-Type", "audio/mpeg");
     res.setHeader("Cache-Control", "no-store");
-    // Importante para que D-ID y navegadores no “sesguen” el stream
     res.setHeader("Accept-Ranges", "bytes");
 
     // Pipe del stream remoto al response
-    r.body.pipe(res);
-    r.body.on("error", (e) => {
-      console.error("pipe error", e);
-      if (!res.headersSent) {
-        res.status(500).json({ error: "tts_pipe_failed" });
-      } else {
-        res.end();
-      }
-    });
+    if (typeof r.body.pipe === "function") {
+      // node-fetch v2: Readable de Node
+      r.body.pipe(res);
+      r.body.on("error", (e) => {
+        console.error("pipe error", e);
+        if (!res.headersSent) {
+          res.status(500).json({ error: "tts_pipe_failed" });
+        } else {
+          res.end();
+        }
+      });
+    } else {
+      // Por si en algún runtime devolviera ReadableStream web
+      Readable.fromWeb(r.body).pipe(res);
+    }
   } catch (err) {
     console.error("tts stream error", err);
-    // Si fue por timeout/abort, devolver 504
     const msg = (err && err.message) || "";
     const code = msg.includes("The operation was aborted") ? 504 : 500;
     return res.status(code).json({ error: "tts_failed", detail: msg });
