@@ -1,10 +1,13 @@
 // index.js
 const express = require("express");
 const cors = require("cors");
-const fetch = require("node-fetch");
+const fetch = require("node-fetch"); // fallback si el runtime no trae fetch global
 require("dotenv").config();
 const multer = require("multer");
 const { OpenAI } = require("openai");
+
+/* ============ RUTAS D-ID (WebRTC) ============ */
+const didRouter = require("./routes/did");
 
 const app = express();
 
@@ -24,139 +27,95 @@ app.use(
 );
 app.use(express.json());
 
+/* ============ MONTA /api/did/* (streams, sdp, ice, talk TEXT/AUDIO) ============ */
+app.use("/api/did", didRouter);
+
 /* ============ ENV & HELPERS ============ */
-const _fetch = (...args) =>
-  (globalThis.fetch ? globalThis.fetch(...args) : fetch(...args));
+const _fetch = (...args) => (globalThis.fetch ? globalThis.fetch(...args) : fetch(...args));
 
 const PUBLIC_BASE_URL =
-  process.env.PUBLIC_BASE_URL ||
-  "https://jesus-backend-production-1cf4.up.railway.app";
+  process.env.PUBLIC_BASE_URL || "https://jesus-backend-production-1cf4.up.railway.app";
 
-/* ====== D-ID AUTH ====== */
+/* ====== D-ID AUTH (API KEY o USER/PASS) ====== */
 const DID_API_KEY = process.env.DID_API_KEY || "";
-if (!DID_API_KEY) {
-  console.warn("[WARN] DID_API_KEY no está definida en Railway > Variables.");
-}
-const didHeaders = () => ({
-  Authorization: "Basic " + Buffer.from(`${DID_API_KEY}:`).toString("base64"),
-  "Content-Type": "application/json",
-});
+const DID_USER = process.env.DID_USERNAME || "";
+const DID_PASS = process.env.DID_PASSWORD || "";
 
-/* ---------------------------------------------------
-   D-ID WEBRTC: implementado aquí (sin routes/did)
-   --------------------------------------------------- */
+const didHeaders = () => {
+  const h = { "Content-Type": "application/json", Accept: "application/json" };
+  if (DID_API_KEY) {
+    // API Key (recomendado)
+    h.Authorization = "Basic " + Buffer.from(`${DID_API_KEY}:`).toString("base64");
+  } else if (DID_USER && DID_PASS) {
+    // Fallback: usuario/contraseña
+    h.Authorization = "Basic " + Buffer.from(`${DID_USER}:${DID_PASS}`).toString("base64");
+  } else {
+    console.warn("[WARN] Faltan credenciales D-ID (DID_API_KEY o DID_USERNAME/DID_PASSWORD)");
+  }
+  return h;
+};
 
-/** Crear stream (oferta remota + ice servers) */
-app.post("/api/did/streams", async (req, res) => {
+/* ====== LEGADO: Crear sesión por USER/PASS (usando didHeaders()) ====== */
+const streams = {};
+app.post("/create-stream-session", async (_req, res) => {
   try {
-    const source_url =
-      (req.body && req.body.source_url) ||
-      "https://raw.githubusercontent.com/betomacia/jesus-backend/main/public/JESPANOL.jpeg";
+    const data = {
+      // avatar por defecto; el frontend puede usar /api/did/streams con su imagen por idioma
+      source_url:
+        "https://raw.githubusercontent.com/betomacia/imagen-jesus/refs/heads/main/jesus.jpg",
+    };
 
-    // 1) crear stream
-    const r1 = await _fetch("https://api.d-id.com/talks/streams", {
+    const createResponse = await _fetch("https://api.d-id.com/talks/streams", {
       method: "POST",
       headers: didHeaders(),
-      body: JSON.stringify({ source_url }),
+      body: JSON.stringify(data),
     });
-    if (!r1.ok) {
-      const txt = await r1.text().catch(() => "");
-      return res.status(r1.status).send(txt || '{"message":"Create failed"}');
-    }
-    const j1 = await r1.json();
 
-    // 2) obtener oferta/ICE
-    const r2 = await _fetch(`https://api.d-id.com/talks/streams/${j1.id}`, {
-      method: "GET",
-      headers: didHeaders(),
-    });
-    if (!r2.ok) {
-      const txt = await r2.text().catch(() => "");
-      return res.status(r2.status).send(txt || '{"message":"SDP get failed"}');
+    if (!createResponse.ok) {
+      const errorText = await createResponse.text();
+      return res.status(createResponse.status).json({ error: errorText });
     }
-    const j2 = await r2.json();
 
-    return res.json({
-      id: j1.id,
-      session_id: j1.session_id,
-      offer: j2.offer,
-      ice_servers: j2.ice_servers || [],
+    const createJson = await createResponse.json();
+
+    const sdpResponse = await _fetch(
+      `https://api.d-id.com/talks/streams/${createJson.id}`,
+      {
+        method: "GET",
+        headers: didHeaders(),
+      }
+    );
+
+    if (!sdpResponse.ok) {
+      const errorText = await sdpResponse.text();
+      return res.status(sdpResponse.status).json({ error: errorText });
+    }
+
+    const sdpJson = await sdpResponse.json();
+
+    streams[createJson.id] = {
+      session_id: createJson.session_id,
+      peerConnectionReady: false,
+    };
+
+    res.json({
+      id: createJson.id,
+      session_id: createJson.session_id,
+      offer: sdpJson.offer,
+      ice_servers: sdpJson.ice_servers || [],
     });
-  } catch (e) {
-    console.error("streams create error", e);
-    return res.status(500).json({ message: "streams_create_error" });
+  } catch (error) {
+    console.error("Error creando stream session:", error);
+    res
+      .status(500)
+      .json({ error: error.message || "Error interno creando sesión" });
   }
 });
 
-/** Enviar ANSWER local */
-app.post("/api/did/streams/:id/sdp", async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { answer, session_id } = req.body || {};
-    if (!id || !answer || !session_id) {
-      return res.status(400).json({ message: "missing_fields" });
-    }
-    const r = await _fetch(`https://api.d-id.com/talks/streams/${id}/sdp`, {
-      method: "POST",
-      headers: didHeaders(),
-      body: JSON.stringify({ answer, session_id }),
-    });
-    const txt = await r.text().catch(() => "");
-    return res.status(r.ok ? 200 : r.status).send(txt || "{}");
-  } catch (e) {
-    console.error("post sdp error", e);
-    return res.status(500).json({ message: "sdp_failed" });
-  }
-});
-
-/** Enviar ICE local */
-app.post("/api/did/streams/:id/ice", async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { candidate, session_id } = req.body || {};
-    if (!id || !candidate || !session_id) {
-      return res.status(400).json({ message: "missing_fields" });
-    }
-    const r = await _fetch(`https://api.d-id.com/talks/streams/${id}/ice`, {
-      method: "POST",
-      headers: didHeaders(),
-      body: JSON.stringify({ candidate, session_id }),
-    });
-    const txt = await r.text().catch(() => "");
-    return res.status(r.ok ? 200 : r.status).send(txt || "{}");
-  } catch (e) {
-    console.error("post ice error", e);
-    return res.status(500).json({ message: "ice_failed" });
-  }
-});
-
-/** Hablar con texto (script.type = 'text') */
-app.post("/api/did/streams/:id/talk", async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { session_id, script } = req.body || {};
-    if (!id || !session_id || !script) {
-      return res.status(400).json({ message: "missing_fields" });
-    }
-    const r = await _fetch(`https://api.d-id.com/talks/streams/${id}`, {
-      method: "POST",
-      headers: didHeaders(),
-      body: JSON.stringify({ session_id, script }),
-    });
-    const txt = await r.text().catch(() => "");
-    return res.status(r.ok ? 200 : r.status).send(txt || "{}");
-  } catch (e) {
-    console.error("talk text error", e);
-    return res.status(500).json({ message: "talk_failed" });
-  }
-});
-
-/** Créditos D-ID (debug) */
+/* ====== EXTRA: Créditos D-ID (debug rápido) ====== */
 app.get("/api/did/credits", async (_req, res) => {
   try {
-    const r = await _fetch("https://api.d-id.com/credits", {
-      headers: didHeaders(),
-    });
+    const r = await _fetch("https://api.d-id.com/credits", { headers: didHeaders() });
     const data = await r.json().catch(() => ({}));
     return res.status(r.ok ? 200 : r.status).json(data);
   } catch (e) {
@@ -165,36 +124,40 @@ app.get("/api/did/credits", async (_req, res) => {
   }
 });
 
-/** Hablar con D-ID usando AUDIO_URL (ElevenLabs) */
+/* ====== NUEVO: Hablar con D-ID usando AUDIO_URL (ElevenLabs) ======
+   Frontend envía: { id, session_id, text }
+   Generamos audio_url público a /api/tts y se lo pasamos a D-ID (script.type = 'audio')
+=============================================================== */
 app.post("/api/did/talk-el", async (req, res) => {
   try {
     const { id, session_id, text } = req.body || {};
     if (!id || !session_id || !text) {
       return res.status(400).json({ error: "missing_fields" });
     }
-    const audio_url = `${PUBLIC_BASE_URL}/api/tts?text=${encodeURIComponent(
-      String(text)
-    )}`;
+
+    // URL pública que D-ID podrá descargar
+    const audio_url = `${PUBLIC_BASE_URL}/api/tts?text=${encodeURIComponent(String(text))}`;
+
     const payload = {
       session_id,
       script: { type: "audio", audio_url },
     };
+
     const r = await _fetch(`https://api.d-id.com/talks/streams/${id}`, {
       method: "POST",
       headers: didHeaders(),
       body: JSON.stringify(payload),
     });
-    const txt = await r.text().catch(() => "");
-    return res.status(r.ok ? 200 : r.status).send(txt || "{}");
+
+    const data = await r.json().catch(() => ({}));
+    return res.status(r.ok ? 200 : r.status).json(data);
   } catch (e) {
     console.error("talk-el error", e);
     return res.status(500).json({ error: "talk_el_failed" });
   }
 });
 
-/* ---------------------------------------------------
-   OpenAI Whisper (opcional)
-   --------------------------------------------------- */
+/* ====== OpenAI Whisper (Transcripción) ====== */
 const upload = multer({ limits: { fileSize: 25 * 1024 * 1024 } });
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -203,13 +166,16 @@ app.post("/api/transcribe", upload.single("file"), async (req, res) => {
     if (!req.file) {
       return res.status(400).json({ error: "No se recibió ningún archivo" });
     }
+
     const fileBlob = new Blob([req.file.buffer], {
       type: req.file.mimetype || "audio/webm",
     });
+
     const resp = await openai.audio.transcriptions.create({
       file: fileBlob,
       model: "whisper-1",
     });
+
     res.json({ text: (resp.text || "").trim() });
   } catch (err) {
     console.error("Error en transcripción:", err);
@@ -217,13 +183,13 @@ app.post("/api/transcribe", upload.single("file"), async (req, res) => {
   }
 });
 
-/* ---------------------------------------------------
-   ElevenLabs TTS (stream)
-   --------------------------------------------------- */
+/* ====== ElevenLabs TTS (stream) ====== */
 app.all("/api/tts", async (req, res) => {
   try {
     const text =
-      req.method === "GET" ? req.query.text || "" : req.body?.text || "";
+      req.method === "GET"
+        ? (req.query.text || "")
+        : (req.body?.text || "");
     if (!text || !String(text).trim()) {
       return res.status(400).json({ error: "no_text" });
     }
@@ -270,9 +236,7 @@ app.all("/api/tts", async (req, res) => {
   }
 });
 
-/* ---------------------------------------------------
-   Otros
-   --------------------------------------------------- */
+/* ====== Endpoint: Bienvenida dinámica ====== */
 app.get("/api/welcome", (_req, res) => {
   const greetings = [
     "Buenos días, que la paz de Dios te acompañe hoy.",
@@ -287,11 +251,12 @@ app.get("/api/welcome", (_req, res) => {
   res.json({ text: randomGreeting });
 });
 
+/* ====== Raíz ====== */
 app.get("/", (_req, res) => {
   res.send("jesus-backend up ✅");
 });
 
-/* ============ INICIO SERVIDOR ============ */
+/* ====== Inicio servidor ====== */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Servidor escuchando en http://localhost:${PORT}`);
