@@ -5,6 +5,9 @@ require("dotenv").config();
 const multer = require("multer");
 const { OpenAI } = require("openai");
 
+/* ⬇️ NUEVO: router de D-ID (API key vía Railway) */
+const didRouter = require("./routes/did");
+
 const app = express();
 
 /* ===== CORS ===== */
@@ -16,7 +19,10 @@ app.use(
 );
 app.use(express.json());
 
-/* ====== D-ID ====== */
+/* ⬇️ NUEVO: monta /api/did/* (streams, sdp, ice, talk) */
+app.use("/api/did", didRouter);
+
+/* ====== D-ID (USER/PASS legado, si lo sigues usando) ====== */
 const DID_USER = process.env.DID_USERNAME || "";
 const DID_PASS = process.env.DID_PASSWORD || "";
 const didAuth =
@@ -90,7 +96,7 @@ app.post("/create-stream-session", async (req, res) => {
 });
 
 /* ====== OpenAI Whisper (Transcripción) ====== */
-const upload = multer({ limits: { fileSize: 25 * 1024 * 1024 } }); 
+const upload = multer({ limits: { fileSize: 25 * 1024 * 1024 } });
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 app.post("/api/transcribe", upload.single("file"), async (req, res) => {
