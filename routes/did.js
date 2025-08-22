@@ -1,116 +1,106 @@
 // routes/did.js
-const express = require('express');
+const express = require("express");
 const router = express.Router();
 
-const DID_BASE = 'https://api.d-id.com';
-const DID_API_KEY = process.env.DID_API_KEY;
-const DEFAULT_SOURCE_URL =
-  process.env.DID_SOURCE_URL ||
-  'https://raw.githubusercontent.com/betomacia/imagen-jesus/refs/heads/main/jesus.jpg';
-
-if (!DID_API_KEY) {
-  console.warn('[WARN] DID_API_KEY no está definida. Agrégala en Railway > Variables.');
-}
+const DID_API_KEY = process.env.DID_API_KEY || "";
+const DID_USERNAME = process.env.DID_USERNAME || "";
+const DID_PASSWORD = process.env.DID_PASSWORD || "";
 
 function didHeaders() {
-  return {
-    'Authorization': 'Basic ' + Buffer.from(`${DID_API_KEY}:`).toString('base64'),
-    'Content-Type': 'application/json'
-  };
+  const h = { "Content-Type": "application/json", Accept: "application/json" };
+  if (DID_API_KEY) {
+    h.Authorization = "Basic " + Buffer.from(`${DID_API_KEY}:`).toString("base64");
+  } else if (DID_USERNAME && DID_PASSWORD) {
+    h.Authorization = "Basic " + Buffer.from(`${DID_USERNAME}:${DID_PASSWORD}`).toString("base64");
+  } else {
+    console.warn("[WARN] Faltan credenciales D-ID (DID_API_KEY o DID_USERNAME/DID_PASSWORD)");
+  }
+  return h;
 }
 
-/* Créditos (opcional, útil para test rápido) */
-router.get('/credits', async (_req, res) => {
+// Crear stream + devolver offer/ice_servers
+router.post("/streams", async (req, res) => {
   try {
-    const r = await globalThis.fetch(`${DID_BASE}/credits`, {
-      method: 'GET',
-      headers: didHeaders()
-    });
-    const data = await r.json().catch(() => ({}));
-    return res.status(r.status).json(data);
-  } catch (e) {
-    console.error('DID /credits error:', e);
-    return res.status(500).json({ error: 'credits_failed' });
-  }
-});
+    const source_url = (req.body && req.body.source_url) || "";
+    if (!source_url) return res.status(400).json({ error: "missing_source_url" });
 
-/* 1) Crear stream: devolvemos offer, ice_servers y session_id */
-router.post('/streams', async (req, res) => {
-  try {
-    const { source_url } = req.body || {};
-    const src = source_url || DEFAULT_SOURCE_URL;
-
-    const r = await globalThis.fetch(`${DID_BASE}/talks/streams`, {
-      method: 'POST',
+    const createR = await fetch("https://api.d-id.com/talks/streams", {
+      method: "POST",
       headers: didHeaders(),
-      body: JSON.stringify({ source_url: src })
+      body: JSON.stringify({ source_url }),
     });
-    const data = await r.json();
-    if (!r.ok) return res.status(r.status).json(data);
 
-    return res.json({
-      id: data.id,
-      offer: data.offer,
-      ice_servers: data.ice_servers,
-      session_id: data.session_id
+    if (!createR.ok) {
+      const txt = await createR.text().catch(() => "");
+      return res.status(createR.status).json({ error: "create_failed", detail: txt });
+    }
+    const createJson = await createR.json();
+
+    const sdpR = await fetch(`https://api.d-id.com/talks/streams/${createJson.id}`, {
+      method: "GET",
+      headers: didHeaders(),
+    });
+
+    if (!sdpR.ok) {
+      const txt = await sdpR.text().catch(() => "");
+      return res.status(sdpR.status).json({ error: "offer_failed", detail: txt });
+    }
+    const sdpJson = await sdpR.json();
+
+    res.json({
+      id: createJson.id,
+      session_id: createJson.session_id,
+      offer: sdpJson.offer,
+      ice_servers: sdpJson.ice_servers || [],
     });
   } catch (e) {
-    console.error('DID /streams error:', e);
-    return res.status(500).json({ error: 'streams_failed' });
+    console.error("streams error", e);
+    res.status(500).json({ error: "streams_exception" });
   }
 });
 
-/* 2) Enviar SDP answer */
-router.post('/streams/:id/sdp', async (req, res) => {
+// Enviar ANSWER (SDP) del navegador
+router.post("/streams/:id/sdp", async (req, res) => {
   try {
     const { id } = req.params;
     const { answer, session_id } = req.body || {};
-    const r = await globalThis.fetch(`${DID_BASE}/talks/streams/${id}/sdp`, {
-      method: 'POST',
+    if (!id || !answer || !session_id) return res.status(400).json({ error: "missing_fields" });
+
+    const sdpR = await fetch(`https://api.d-id.com/talks/streams/${id}/sdp`, {
+      method: "POST",
       headers: didHeaders(),
-      body: JSON.stringify({ answer, session_id })
+      body: JSON.stringify({ answer, session_id }),
     });
-    const data = await r.json().catch(() => ({}));
-    return res.status(r.status).json(data);
+
+    const data = await sdpR.json().catch(() => ({}));
+    return res.status(sdpR.ok ? 200 : sdpR.status).json(data);
   } catch (e) {
-    console.error('DID /sdp error:', e);
-    return res.status(500).json({ error: 'sdp_failed' });
+    console.error("sdp error", e);
+    res.status(500).json({ error: "sdp_exception" });
   }
 });
 
-/* 3) Enviar ICE candidates */
-router.post('/streams/:id/ice', async (req, res) => {
+// Reenviar ICE candidates
+router.post("/streams/:id/ice", async (req, res) => {
   try {
     const { id } = req.params;
     const { candidate, session_id } = req.body || {};
-    const r = await globalThis.fetch(`${DID_BASE}/talks/streams/${id}/ice`, {
-      method: 'POST',
-      headers: didHeaders(),
-      body: JSON.stringify({ candidate, session_id })
-    });
-    const data = await r.json().catch(() => ({}));
-    return res.status(r.status).json(data);
-  } catch (e) {
-    console.error('DID /ice error:', e);
-    return res.status(500).json({ error: 'ice_failed' });
-  }
-});
+    if (!id || !candidate || !session_id) return res.status(400).json({ error: "missing_fields" });
 
-/* 4) Hacer hablar al avatar en la sesión */
-router.post('/streams/:id/talk', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { session_id, script, driver_url, config, voice } = req.body || {};
-    const r = await globalThis.fetch(`${DID_BASE}/talks/streams/${id}`, {
-      method: 'POST',
+    const iceR = await fetch(`https://api.d-id.com/talks/streams/${id}/ice`, {
+      method: "POST",
       headers: didHeaders(),
-      body: JSON.stringify({ session_id, script, driver_url, config, voice })
+      body: JSON.stringify({ candidate, session_id }),
     });
-    const data = await r.json().catch(() => ({}));
-    return res.status(r.status).json(data);
+
+    if (!iceR.ok) {
+      const txt = await iceR.text().catch(() => "");
+      return res.status(iceR.status).json({ error: "ice_failed", detail: txt });
+    }
+    return res.json({ ok: true });
   } catch (e) {
-    console.error('DID /talk error:', e);
-    return res.status(500).json({ error: 'talk_failed' });
+    console.error("ice error", e);
+    res.status(500).json({ error: "ice_exception" });
   }
 });
 
