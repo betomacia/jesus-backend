@@ -1,16 +1,24 @@
+// index.js
 const express = require("express");
 const cors = require("cors");
-const fetch = require("node-fetch"); // puedes usar fetch nativo en Node 18+ si prefieres
+const fetch = require("node-fetch"); // fallback si el runtime no trae fetch global
 require("dotenv").config();
 const multer = require("multer");
 const { OpenAI } = require("openai");
 
-/* ⬇️ NUEVO: router de D-ID (usuario/contraseña vía Railway) */
+/* ============ RUTAS D-ID (WebRTC) ============ */
 const didRouter = require("./routes/did");
 
 const app = express();
 
-/* ===== CORS ===== */
+/* ============ LOG SENCILLO ============ */
+app.use((req, _res, next) => {
+  const t = new Date().toISOString();
+  console.log(`[${t}] ${req.method} ${req.originalUrl}`);
+  next();
+});
+
+/* ============ CORS ============ */
 const allowedOrigin = process.env.CORS_ORIGIN || "*";
 app.use(
   cors({
@@ -19,28 +27,35 @@ app.use(
 );
 app.use(express.json());
 
-/* 🔎 Logger de requests (debug) — para ver si “llega algo” al backend */
-app.use((req, _res, next) => {
-  console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl}`);
-  next();
-});
-
-/* ⬇️ NUEVO: monta /api/did/* (streams, sdp, ice, talk) */
+/* ============ MONTA /api/did/* (streams, sdp, ice, talk TEXT/AUDIO) ============ */
 app.use("/api/did", didRouter);
 
-/* ====== D-ID (LEGACY: create-stream-session con user/pass) ====== */
-/* Nota: no es necesario si ya usas /api/did/*, pero lo dejamos por compatibilidad */
+/* ============ ENV & HELPERS ============ */
+const _fetch = (...args) => (globalThis.fetch ? globalThis.fetch(...args) : fetch(...args));
+
+const PUBLIC_BASE_URL =
+  process.env.PUBLIC_BASE_URL || "https://jesus-backend-production-1cf4.up.railway.app";
+
+/* ====== D-ID API KEY (para endpoints extra) ====== */
+const DID_API_KEY = process.env.DID_API_KEY || "";
+if (!DID_API_KEY) {
+  console.warn("[WARN] DID_API_KEY no está definida. Agrégala en Railway > Variables.");
+}
+const didHeaders = () => ({
+  Authorization: "Basic " + Buffer.from(`${DID_API_KEY}:`).toString("base64"),
+  "Content-Type": "application/json",
+});
+
+/* ====== (Opcional) Credenciales LEGADO USER/PASS ====== */
 const DID_USER = process.env.DID_USERNAME || "";
 const DID_PASS = process.env.DID_PASSWORD || "";
-const didAuth =
-  DID_USER && DID_PASS
-    ? Buffer.from(`${DID_USER}:${DID_PASS}`).toString("base64")
-    : null;
+const didAuthBasic =
+  DID_USER && DID_PASS ? Buffer.from(`${DID_USER}:${DID_PASS}`).toString("base64") : null;
 
+/* ====== (Legado) Crear sesión por USER/PASS (puedes ignorar si no lo usas) ====== */
 const streams = {};
-
-app.post("/create-stream-session", async (req, res) => {
-  if (!didAuth) {
+app.post("/create-stream-session", async (_req, res) => {
+  if (!didAuthBasic) {
     return res.status(500).json({ error: "missing_did_credentials" });
   }
   try {
@@ -49,10 +64,10 @@ app.post("/create-stream-session", async (req, res) => {
         "https://raw.githubusercontent.com/betomacia/imagen-jesus/refs/heads/main/jesus.jpg",
     };
 
-    const createResponse = await fetch("https://api.d-id.com/talks/streams", {
+    const createResponse = await _fetch("https://api.d-id.com/talks/streams", {
       method: "POST",
       headers: {
-        Authorization: `Basic ${didAuth}`,
+        Authorization: `Basic ${didAuthBasic}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify(data),
@@ -65,12 +80,12 @@ app.post("/create-stream-session", async (req, res) => {
 
     const createJson = await createResponse.json();
 
-    const sdpResponse = await fetch(
+    const sdpResponse = await _fetch(
       `https://api.d-id.com/talks/streams/${createJson.id}`,
       {
         method: "GET",
         headers: {
-          Authorization: `Basic ${didAuth}`,
+          Authorization: `Basic ${didAuthBasic}`,
           "Content-Type": "application/json",
         },
       }
@@ -102,6 +117,53 @@ app.post("/create-stream-session", async (req, res) => {
   }
 });
 
+/* ====== EXTRA: Créditos D-ID (debug rápido) ====== */
+app.get("/api/did/credits", async (_req, res) => {
+  try {
+    const r = await _fetch("https://api.d-id.com/credits", { headers: didHeaders() });
+    const data = await r.json().catch(() => ({}));
+    return res.status(r.ok ? 200 : r.status).json(data);
+  } catch (e) {
+    console.error("credits error", e);
+    return res.status(500).json({ error: "credits_failed" });
+  }
+});
+
+/* ====== NUEVO: Hablar con D-ID usando AUDIO_URL (ElevenLabs) ======
+   Frontend envía: { id, session_id, text }
+   El backend genera un audio_url público (nuestro /api/tts con ?text=...)
+   y se lo pasa a D-ID como script.type = 'audio'
+=============================================================== */
+app.post("/api/did/talk-el", async (req, res) => {
+  try {
+    const { id, session_id, text } = req.body || {};
+    if (!id || !session_id || !text) {
+      return res.status(400).json({ error: "missing_fields" });
+    }
+
+    // URL pública que D-ID podrá descargar
+    const audio_url = `${PUBLIC_BASE_URL}/api/tts?text=${encodeURIComponent(String(text))}`;
+
+    const payload = {
+      session_id,
+      script: { type: "audio", audio_url },
+      // driver_url opcional; lo dejamos simple para que use el lip-sync por defecto
+    };
+
+    const r = await _fetch(`https://api.d-id.com/talks/streams/${id}`, {
+      method: "POST",
+      headers: didHeaders(),
+      body: JSON.stringify(payload),
+    });
+
+    const data = await r.json().catch(() => ({}));
+    return res.status(r.ok ? 200 : r.status).json(data);
+  } catch (e) {
+    console.error("talk-el error", e);
+    return res.status(500).json({ error: "talk_el_failed" });
+  }
+});
+
 /* ====== OpenAI Whisper (Transcripción) ====== */
 const upload = multer({ limits: { fileSize: 25 * 1024 * 1024 } });
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -128,11 +190,13 @@ app.post("/api/transcribe", upload.single("file"), async (req, res) => {
   }
 });
 
-/* ====== ElevenLabs TTS ====== */
+/* ====== ElevenLabs TTS (stream) ====== */
 app.all("/api/tts", async (req, res) => {
   try {
     const text =
-      req.method === "GET" ? (req.query.text || "") : (req.body?.text || "");
+      req.method === "GET"
+        ? (req.query.text || "")
+        : (req.body?.text || "");
     if (!text || !String(text).trim()) {
       return res.status(400).json({ error: "no_text" });
     }
@@ -146,7 +210,7 @@ app.all("/api/tts", async (req, res) => {
       `https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}/stream` +
       `?optimize_streaming_latency=4&output_format=mp3_22050_32`;
 
-    const r = await fetch(url, {
+    const r = await _fetch(url, {
       method: "POST",
       headers: {
         "xi-api-key": API_KEY,
@@ -190,12 +254,11 @@ app.get("/api/welcome", (_req, res) => {
     "Jesús está contigo en cada paso, ¿quieres contarme lo que vives ahora?",
     "Eres escuchado y amado, ¿qué tienes en tu corazón hoy?",
   ];
-
   const randomGreeting = greetings[Math.floor(Math.random() * greetings.length)];
   res.json({ text: randomGreeting });
 });
 
-/* ====== Endpoint raíz ====== */
+/* ====== Raíz ====== */
 app.get("/", (_req, res) => {
   res.send("jesus-backend up ✅");
 });
