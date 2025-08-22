@@ -36,7 +36,6 @@ app.post("/create-stream-session", async (req, res) => {
         "https://raw.githubusercontent.com/betomacia/imagen-jesus/refs/heads/main/jesus.jpg",
     };
 
-    // 1) Crear sesión
     const createResponse = await fetch("https://api.d-id.com/talks/streams", {
       method: "POST",
       headers: {
@@ -53,7 +52,6 @@ app.post("/create-stream-session", async (req, res) => {
 
     const createJson = await createResponse.json();
 
-    // 2) Obtener offer + ice servers
     const sdpResponse = await fetch(
       `https://api.d-id.com/talks/streams/${createJson.id}`,
       {
@@ -72,7 +70,6 @@ app.post("/create-stream-session", async (req, res) => {
 
     const sdpJson = await sdpResponse.json();
 
-    // Guardar sesión
     streams[createJson.id] = {
       session_id: createJson.session_id,
       peerConnectionReady: false,
@@ -93,7 +90,7 @@ app.post("/create-stream-session", async (req, res) => {
 });
 
 /* ====== OpenAI Whisper (Transcripción) ====== */
-const upload = multer({ limits: { fileSize: 25 * 1024 * 1024 } }); // máx 25MB
+const upload = multer({ limits: { fileSize: 25 * 1024 * 1024 } }); 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 app.post("/api/transcribe", upload.single("file"), async (req, res) => {
@@ -102,7 +99,6 @@ app.post("/api/transcribe", upload.single("file"), async (req, res) => {
       return res.status(400).json({ error: "No se recibió ningún archivo" });
     }
 
-    // Node 18+ tiene Blob nativo
     const fileBlob = new Blob([req.file.buffer], {
       type: req.file.mimetype || "audio/webm",
     });
@@ -119,24 +115,14 @@ app.post("/api/transcribe", upload.single("file"), async (req, res) => {
   }
 });
 
-/* ====== ElevenLabs TTS STREAM ====== */
+/* ====== ElevenLabs TTS ====== */
 app.all("/api/tts", async (req, res) => {
   try {
-    // CORS rápido
-    res.setHeader(
-      "Access-Control-Allow-Origin",
-      allowedOrigin === "*" ? "*" : allowedOrigin
-    );
-    res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-    if (req.method === "OPTIONS") return res.status(204).end();
-
     const text =
       req.method === "GET" ? (req.query.text || "") : (req.body?.text || "");
     if (!text || !String(text).trim()) {
       return res.status(400).json({ error: "no_text" });
     }
-
     const VOICE_ID = process.env.ELEVENLABS_VOICE_ID;
     const API_KEY = process.env.ELEVENLABS_API_KEY;
     if (!VOICE_ID || !API_KEY) {
@@ -147,13 +133,11 @@ app.all("/api/tts", async (req, res) => {
       `https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}/stream` +
       `?optimize_streaming_latency=4&output_format=mp3_22050_32`;
 
-    const upstream = await fetch(url, {
+    const r = await fetch(url, {
       method: "POST",
       headers: {
         "xi-api-key": API_KEY,
         "Content-Type": "application/json",
-        "Accept": "audio/mpeg",
-        "Connection": "keep-alive",
       },
       body: JSON.stringify({
         text: String(text),
@@ -167,69 +151,38 @@ app.all("/api/tts", async (req, res) => {
       }),
     });
 
-    if (!upstream.ok || !upstream.body) {
-      const bodyText = await upstream.text().catch(() => "");
-      console.error("ElevenLabs stream error", upstream.status, bodyText);
+    if (!r.ok || !r.body) {
+      const body = await r.text().catch(() => "");
+      console.error("elevenlabs stream error", r.status, body);
       return res.status(502).json({ error: "elevenlabs_failed" });
     }
 
     res.setHeader("Content-Type", "audio/mpeg");
-    res.setHeader("Cache-Control", "no-store, no-transform");
-    res.setHeader("Transfer-Encoding", "chunked");
-    res.setHeader("Connection", "keep-alive");
-
-    upstream.body.pipe(res);
-    upstream.body.on("error", (e) => {
-      console.error("Stream piping error:", e);
-      try {
-        res.end();
-      } catch {}
-    });
+    res.setHeader("Cache-Control", "no-store");
+    r.body.pipe(res);
   } catch (err) {
     console.error("tts stream error", err);
     return res.status(500).json({ error: "tts_failed" });
   }
 });
 
-/* ====== OpenAI ONE-QUESTION ====== */
-const SYS_BASE = `Eres un asistente compasivo y concreto.
-Debes devolver EXACTAMENTE UNA PREGUNTA breve y específica que ayude al usuario a avanzar.
-No repitas lo que ya dijo. Evita frases genéricas como "¿cómo seguimos hoy?".
-La respuesta debe ser SOLO una pregunta terminada en "?"`;
+/* ====== Endpoint: Bienvenida dinámica ====== */
+app.get("/api/welcome", (_req, res) => {
+  const greetings = [
+    "Buenos días, que la paz de Dios te acompañe hoy.",
+    "Buenas tardes, recuerda que Jesús siempre camina a tu lado.",
+    "Buenas noches, que el amor del Padre te envuelva en descanso.",
+    "La paz sea contigo, ¿cómo te encuentras en este momento?",
+    "Que la esperanza y la fe iluminen tu día, ¿qué quisieras compartir hoy?",
+    "Jesús está contigo en cada paso, ¿quieres contarme lo que vives ahora?",
+    "Eres escuchado y amado, ¿qué tienes en tu corazón hoy?",
+  ];
 
-function clampQuestion(s) {
-  let t = (s || "").trim();
-  if (!t.endsWith("?")) t += "?";
-  return t;
-}
-
-app.post("/api/openai/one-question", async (req, res) => {
-  try {
-    const user_text = req.body?.user_text || "";
-    if (!user_text) {
-      return res.status(400).json({ error: "missing_user_text" });
-    }
-
-    const resp = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      temperature: 0.2,
-      max_tokens: 100,
-      messages: [
-        { role: "system", content: SYS_BASE },
-        { role: "user", content: user_text },
-      ],
-    });
-
-    let q = (resp.choices?.[0]?.message?.content || "").trim();
-    q = clampQuestion(q);
-    return res.json({ text: q });
-  } catch (err) {
-    console.error("one-question error", err);
-    return res.status(500).json({ error: "one-question_failed" });
-  }
+  const randomGreeting = greetings[Math.floor(Math.random() * greetings.length)];
+  res.json({ text: randomGreeting });
 });
 
-/* ====== Root / Health ====== */
+/* ====== Endpoint raíz ====== */
 app.get("/", (_req, res) => {
   res.send("jesus-backend up ✅");
 });
