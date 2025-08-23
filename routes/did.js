@@ -2,6 +2,7 @@
 const express = require("express");
 const router = express.Router();
 
+/* ====== Auth headers D-ID ====== */
 const DID_API_KEY = process.env.DID_API_KEY || "";
 const DID_USERNAME = process.env.DID_USERNAME || "";
 const DID_PASSWORD = process.env.DID_PASSWORD || "";
@@ -18,7 +19,7 @@ function didHeaders() {
   return h;
 }
 
-// Crear stream + devolver offer/ice_servers
+/* ====== Crear stream y devolver offer/ice_servers ====== */
 router.post("/streams", async (req, res) => {
   try {
     const source_url = (req.body && req.body.source_url) || "";
@@ -59,7 +60,7 @@ router.post("/streams", async (req, res) => {
   }
 });
 
-// Enviar ANSWER (SDP) del navegador
+/* ====== Enviar ANSWER (SDP) del navegador ====== */
 router.post("/streams/:id/sdp", async (req, res) => {
   try {
     const { id } = req.params;
@@ -80,7 +81,7 @@ router.post("/streams/:id/sdp", async (req, res) => {
   }
 });
 
-// Reenviar ICE candidates
+/* ====== Reenviar ICE candidates ====== */
 router.post("/streams/:id/ice", async (req, res) => {
   try {
     const { id } = req.params;
