@@ -6,6 +6,10 @@ const multer = require("multer");
 const { Readable } = require("stream");
 const { OpenAI } = require("openai");
 
+console.log("[BOOT] PUBLIC_BASE_URL:", process.env.PUBLIC_BASE_URL || "(default)");
+console.log("[BOOT] DID auth mode:", DID_API_KEY ? "API_KEY" : (DID_USER && DID_PASS ? "USER_PASS" : "MISSING"));
+
+
 /* ============ RUTAS D-ID (WebRTC) ============ */
 const didRouter = require("./routes/did");
 
@@ -246,3 +250,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Servidor escuchando en http://localhost:${PORT}`);
 });
+
