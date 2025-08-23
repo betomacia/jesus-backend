@@ -1,254 +1,188 @@
-/* =========================
-   routes/did.js  (D-ID Streams)
-   ========================= */
+// routes/did.js
 const express = require("express");
-const nodeFetch = require("node-fetch"); // fallback si el runtime no trae fetch global
 const router = express.Router();
+const fetch = globalThis.fetch || require("node-fetch");
 
-const _fetch = (...args) =>
-  (globalThis.fetch ? globalThis.fetch(...args) : nodeFetch(...args));
+/* ========= CONFIG ========= */
+const DID_API_KEY = process.env.DID_API_KEY || "";
+const DID_USER = process.env.DID_USERNAME || "";
+const DID_PASS = process.env.DID_PASSWORD || "";
 
-const PUBLIC_BASE_URL =
-  process.env.PUBLIC_BASE_URL ||
-  "https://jesus-backend-production-1cf4.up.railway.app";
+/**
+ * IMPORTANTE:
+ * Para Streams/Talks usa SIEMPRE /v1
+ */
+const DID_BASE = "https://api.d-id.com/v1";
 
-/* ---------- Auth & Base helpers ---------- */
-function didAuthMode() {
-  if (process.env.DID_API_KEY) return "API_KEY";
-  if (process.env.DID_USERNAME && process.env.DID_PASSWORD) return "USER_PASS";
-  return "MISSING";
-}
-function didBase() {
-  // Streams requieren API KEY + /v1
-  return didAuthMode() === "API_KEY" ? "https://api.d-id.com/v1" : "https://api.d-id.com";
-}
+/* ========= HEADERS ========= */
 function didHeaders() {
   const h = { "Content-Type": "application/json", Accept: "application/json" };
-  const { DID_API_KEY, DID_USERNAME, DID_PASSWORD } = process.env;
-
   if (DID_API_KEY) {
-    // Acepta clave 'simple' o del tipo 'usuario:token'
-    const raw   = DID_API_KEY.includes(":") ? DID_API_KEY : `${DID_API_KEY}:`;
-    const basic = Buffer.from(raw).toString("base64");
-    h.Authorization = `Basic ${basic}`;
-    h["X-DID-Auth-Mode"] = "API_KEY";
-  } else if (DID_USERNAME && DID_PASSWORD) {
-    h.Authorization = "Basic " + Buffer.from(`${DID_USERNAME}:${DID_PASSWORD}`).toString("base64");
-    h["X-DID-Auth-Mode"] = "USER_PASS";
-  } else {
-    h["X-DID-Auth-Mode"] = "MISSING";
+    // API Key en un solo env; si no trae ":", el backend agrega ":" para Basic user:pass
+    const raw = DID_API_KEY.includes(":") ? DID_API_KEY : `${DID_API_KEY}:`;
+    h.Authorization = "Basic " + Buffer.from(raw).toString("base64");
+  } else if (DID_USER && DID_PASS) {
+    h.Authorization = "Basic " + Buffer.from(`${DID_USER}:${DID_PASS}`).toString("base64");
   }
   return h;
 }
 
-console.log(`[BOOT] DID auth mode: ${didAuthMode()} base: ${didBase()}`);
+function authMode() {
+  if (DID_API_KEY) return "API_KEY";
+  if (DID_USER && DID_PASS) return "USER_PASS";
+  return "MISSING";
+}
 
-/* ---------- Selftest ---------- */
+/* ========= SELFTEST ========= */
+/**
+ * Devuelve modo de auth y prueba /v1/credits (si falla, intenta /credits como fallback).
+ */
 router.get("/selftest", async (_req, res) => {
+  const h = didHeaders();
+  let r, data, status, base = DID_BASE;
+
   try {
-    const r = await _fetch(`${didBase()}/credits`, { headers: didHeaders() });
-    const data = await r.json().catch(() => ({}));
-    res.status(200).json({
-      status: r.status,
-      authMode: didAuthMode(),
-      base: didBase(),
-      data,
-    });
+    r = await fetch(`${DID_BASE}/credits`, { headers: h });
+    status = r.status;
+    data = await r.json().catch(() => ({}));
+
+    // Fallback por si la cuenta tuviera legacy en /credits (raro hoy)
+    if (status >= 400) {
+      base = "https://api.d-id.com";
+      r = await fetch(`${base}/credits`, { headers: h });
+      status = r.status;
+      data = await r.json().catch(() => ({}));
+    }
   } catch (e) {
-    res.status(500).json({ status: 500, authMode: didAuthMode(), base: didBase(), error: "selftest_failed" });
+    status = 500;
+    data = { error: String(e && e.message || e) };
+  }
+
+  res.json({ status, authMode: authMode(), base, data });
+});
+
+/* ========= CREDITS ========= */
+router.get("/credits", async (_req, res) => {
+  try {
+    const r = await fetch(`${DID_BASE}/credits`, { headers: didHeaders() });
+    const data = await r.json().catch(() => ({}));
+    return res.status(r.ok ? 200 : r.status).json(data);
+  } catch (e) {
+    return res.status(500).json({ error: "credits_failed", detail: String(e?.message || e) });
   }
 });
 
-/* ---------- Crear stream (Streams/WebRTC) ---------- */
+/* ========= STREAMS: CREATE ========= */
+/**
+ * Body: { source_url: string }  (imagen/placeholder para el avatar)
+ * Devuelve: { id, session_id, offer, ice_servers }
+ */
 router.post("/streams", async (req, res) => {
   try {
-    if (didAuthMode() !== "API_KEY") {
-      return res.status(403).json({ error: "need_api_key", detail: "Streams requiere API_KEY; no USER/PASS" });
-    }
     const { source_url } = req.body || {};
-    const data = {
-      source_url:
-        source_url ||
-        "https://raw.githubusercontent.com/betomacia/jesus-backend/main/public/JESPANOL.jpeg",
-    };
+    const body = { source_url: source_url || "https://raw.githubusercontent.com/betomacia/jesus-backend/main/public/JESPANOL.jpeg" };
 
-    const createResponse = await _fetch(`${didBase()}/talks/streams`, {
+    const rCreate = await fetch(`${DID_BASE}/talks/streams`, {
       method: "POST",
       headers: didHeaders(),
-      body: JSON.stringify(data),
+      body: JSON.stringify(body),
     });
 
-    if (!createResponse.ok) {
-      const errorText = await createResponse.text();
-      console.error("[DID] streams create failed", createResponse.status, errorText);
-      return res.status(createResponse.status).json({
-        error: "streams_create_failed",
-        detail: tryParse(errorText),
-      });
+    if (!rCreate.ok) {
+      const detail = await rCreate.text().catch(() => "");
+      console.error("[DID] streams create failed", rCreate.status, detail);
+      return res.status(403).json({ error: "streams_create_failed", detail: tryJson(detail) });
     }
 
-    const createJson = await createResponse.json();
+    const createJson = await rCreate.json();
 
-    // Obtener offer + ice
-    const sdpResponse = await _fetch(`${didBase()}/talks/streams/${createJson.id}`, {
+    const rGet = await fetch(`${DID_BASE}/talks/streams/${createJson.id}`, {
       method: "GET",
       headers: didHeaders(),
     });
 
-    if (!sdpResponse.ok) {
-      const errorText = await sdpResponse.text();
-      console.error("[DID] sdp fetch failed", sdpResponse.status, errorText);
-      return res.status(sdpResponse.status).json({
-        error: "sdp_fetch_failed",
-        detail: tryParse(errorText),
-      });
+    if (!rGet.ok) {
+      const detail = await rGet.text().catch(() => "");
+      console.error("[DID] sdp get failed", rGet.status, detail);
+      return res.status(403).json({ error: "sdp_fetch_failed", detail: tryJson(detail) });
     }
 
-    const sdpJson = await sdpResponse.json();
+    const sdpJson = await rGet.json();
 
-    res.json({
+    return res.json({
       id: createJson.id,
       session_id: createJson.session_id,
       offer: sdpJson.offer,
       ice_servers: sdpJson.ice_servers || [],
     });
-  } catch (error) {
-    console.error("streams error", error);
-    res.status(500).json({ error: "streams_failed", detail: error?.message || String(error) });
+  } catch (e) {
+    console.error("streams create error", e);
+    return res.status(500).json({ error: "streams_create_error", detail: String(e?.message || e) });
   }
 });
 
-/* ---------- Enviar SDP answer ---------- */
+/* ========= STREAMS: POST SDP ANSWER ========= */
 router.post("/streams/:id/sdp", async (req, res) => {
   try {
-    if (didAuthMode() !== "API_KEY") {
-      return res.status(403).json({ error: "need_api_key" });
-    }
     const { id } = req.params;
     const { answer, session_id } = req.body || {};
-    if (!id || !answer || !session_id) {
-      return res.status(400).json({ error: "missing_fields" });
-    }
-
-    const r = await _fetch(`${didBase()}/talks/streams/${id}/sdp`, {
+    const r = await fetch(`${DID_BASE}/talks/streams/${id}/sdp`, {
       method: "POST",
       headers: didHeaders(),
       body: JSON.stringify({ answer, session_id }),
     });
-
     const data = await r.json().catch(() => ({}));
     return res.status(r.ok ? 200 : r.status).json(data);
   } catch (e) {
-    console.error("sdp post error", e);
-    return res.status(500).json({ error: "sdp_failed" });
+    console.error("post sdp error", e);
+    return res.status(500).json({ error: "post_sdp_failed" });
   }
 });
 
-/* ---------- Enviar ICE candidate ---------- */
+/* ========= STREAMS: POST ICE ========= */
 router.post("/streams/:id/ice", async (req, res) => {
   try {
-    if (didAuthMode() !== "API_KEY") {
-      return res.status(403).json({ error: "need_api_key" });
-    }
     const { id } = req.params;
     const { candidate, session_id } = req.body || {};
-    if (!id || !candidate || !session_id) {
-      return res.status(400).json({ error: "missing_fields" });
-    }
-
-    const r = await _fetch(`${didBase()}/talks/streams/${id}/ice`, {
+    const r = await fetch(`${DID_BASE}/talks/streams/${id}/ice`, {
       method: "POST",
       headers: didHeaders(),
       body: JSON.stringify({ candidate, session_id }),
     });
-
     const data = await r.json().catch(() => ({}));
     return res.status(r.ok ? 200 : r.status).json(data);
   } catch (e) {
-    console.error("ice post error", e);
-    return res.status(500).json({ error: "ice_failed" });
+    console.error("post ice error", e);
+    return res.status(500).json({ error: "post_ice_failed" });
   }
 });
 
-/* ---------- tts-cache (re-host con Content-Length) ---------- */
-const ttsCache = new Map(); // key -> { buf, type, at }
-const TTS_TTL_MS = 5 * 60 * 1000;
-
-router.get("/tts-cache/:key", (req, res) => {
-  const rec = ttsCache.get(req.params.key);
-  if (!rec) return res.status(404).end();
-  res.setHeader("Content-Type", rec.type || "audio/mpeg");
-  res.setHeader("Cache-Control", "public, max-age=120");
-  res.setHeader("Content-Length", String(rec.buf.length));
-  res.end(rec.buf);
-});
-
-router.head("/tts-cache/:key", (req, res) => {
-  const rec = ttsCache.get(req.params.key);
-  if (!rec) return res.status(404).end();
-  res.setHeader("Content-Type", rec.type || "audio/mpeg");
-  res.setHeader("Cache-Control", "public, max-age=120");
-  res.setHeader("Content-Length", String(rec.buf.length));
-  res.end();
-});
-
-// Limpieza básica
-setInterval(() => {
-  const now = Date.now();
-  for (const [k, v] of ttsCache.entries()) {
-    if (now - v.at > TTS_TTL_MS) ttsCache.delete(k);
-  }
-}, 60 * 1000);
-
-/* ---------- Talk (TEXT o AUDIO_URL) con intercept ---------- */
+/* ========= STREAMS: TALK (texto o audio_url) ========= */
+/**
+ * Body esperado (pass-through):
+ * - Para texto: { session_id, script: { type: "text", input: "<texto>" } }
+ * - Para audio_url: { session_id, script: { type: "audio", audio_url: "<URL_publica_mp3>" } }
+ */
 router.post("/streams/:id/talk", async (req, res) => {
   try {
-    if (didAuthMode() !== "API_KEY") {
-      return res.status(403).json({ error: "need_api_key" });
-    }
     const { id } = req.params;
-    let { session_id, script } = req.body || {};
-    if (!id || !session_id || !script) {
-      return res.status(400).json({ error: "missing_fields" });
-    }
-
-    // Intercept: si nos pasan audio_url, lo re-hospedamos con Content-Length
-    if (script.type === "audio" && script.audio_url) {
-      const absUrl = new URL(script.audio_url, PUBLIC_BASE_URL).toString();
-      const rr = await _fetch(absUrl, { method: "GET" });
-      if (!rr.ok) {
-        const txt = await rr.text().catch(() => "");
-        console.error("[tts-cache] fetch failed", rr.status, txt);
-        return res.status(502).json({ error: "tts_fetch_failed" });
-      }
-      const type = rr.headers.get("content-type") || "audio/mpeg";
-      const abuf = await rr.arrayBuffer();
-      const buf  = Buffer.from(abuf);
-      const key  = randomKey();
-      ttsCache.set(key, { buf, type, at: Date.now() });
-      script = { type: "audio", audio_url: `${PUBLIC_BASE_URL}/api/did/tts-cache/${key}` };
-    }
-
-    const r = await _fetch(`${didBase()}/talks/streams/${id}`, {
+    const payload = req.body || {};
+    const r = await fetch(`${DID_BASE}/talks/streams/${id}`, {
       method: "POST",
       headers: didHeaders(),
-      body: JSON.stringify({ session_id, script }),
+      body: JSON.stringify(payload),
     });
-
     const data = await r.json().catch(() => ({}));
     return res.status(r.ok ? 200 : r.status).json(data);
   } catch (e) {
-    console.error("talk error", e);
-    return res.status(500).json({ error: "talk_failed" });
+    console.error("streams talk error", e);
+    return res.status(500).json({ error: "streams_talk_failed" });
   }
 });
 
-/* ---------- Utils ---------- */
-function tryParse(t) {
-  try { return JSON.parse(t); } catch { return { message: String(t || "") }; }
-}
-function randomKey() {
-  return Math.random().toString(36).slice(2) + Date.now().toString(36);
+/* ========= UTIL ========= */
+function tryJson(s) {
+  try { return JSON.parse(s); } catch { return s; }
 }
 
 module.exports = router;
