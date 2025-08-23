@@ -1,20 +1,15 @@
-const express = require("express");
-const cors = require("cors");
-const nodeFetch = require("node-fetch"); // usamos SIEMPRE node-fetch v2
+// index.js
+const express   = require("express");
+const cors      = require("cors");
+const nodeFetch = require("node-fetch"); // fallback si el runtime no trae fetch global
 require("dotenv").config();
-const multer = require("multer");
-const { Readable } = require("stream");
+const multer    = require("multer");
 const { OpenAI } = require("openai");
-
-console.log("[BOOT] PUBLIC_BASE_URL:", process.env.PUBLIC_BASE_URL || "(default)");
-console.log("[BOOT] DID auth mode:", DID_API_KEY ? "API_KEY" : (DID_USER && DID_PASS ? "USER_PASS" : "MISSING"));
-
 
 /* ============ RUTAS D-ID (WebRTC) ============ */
 const didRouter = require("./routes/did");
 
 const app = express();
-app.disable("x-powered-by");
 
 /* ============ LOG SENCILLO ============ */
 app.use((req, _res, next) => {
@@ -28,8 +23,6 @@ const allowedOrigin = process.env.CORS_ORIGIN || "*";
 app.use(
   cors({
     origin: allowedOrigin === "*" ? true : allowedOrigin,
-    methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
 
@@ -37,18 +30,60 @@ app.use(
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true, limit: "2mb" }));
 
-/* ============ MONTA /api/did/* (streams, sdp, ice) ============ */
+/* ============ MONTA /api/did/* (streams, sdp, ice, talk TEXT/AUDIO) ============ */
 app.use("/api/did", didRouter);
 
 /* ============ ENV & HELPERS ============ */
-// Forzamos node-fetch para evitar WebStreams sin .pipe()
-const _fetch = (...args) => nodeFetch(...args);
+const _fetch = (...args) =>
+  (globalThis.fetch ? globalThis.fetch(...args) : nodeFetch(...args));
 
 const PUBLIC_BASE_URL =
   process.env.PUBLIC_BASE_URL ||
   "https://jesus-backend-production-1cf4.up.railway.app";
 
-/* ====== TALK con D-ID usando audio_url (ElevenLabs) ====== */
+/* ====== D-ID AUTH (API KEY o USER/PASS) ====== */
+const DID_API_KEY = process.env.DID_API_KEY || "";
+const DID_USER    = process.env.DID_USERNAME || "";
+const DID_PASS    = process.env.DID_PASSWORD || "";
+
+/* === LOGS DE ARRANQUE === */
+console.log("[BOOT] PUBLIC_BASE_URL:", PUBLIC_BASE_URL || "(default)");
+console.log(
+  "[BOOT] DID auth mode:",
+  DID_API_KEY ? "API_KEY" : (DID_USER && DID_PASS ? "USER_PASS" : "MISSING")
+);
+
+/* ====== headers D-ID (para las llamadas directas desde este archivo) ====== */
+const didHeaders = () => {
+  const h = { "Content-Type": "application/json", Accept: "application/json" };
+  if (DID_API_KEY) {
+    // Formato correcto: Basic base64("API_KEY:")
+    h.Authorization = "Basic " + Buffer.from(`${DID_API_KEY}:`).toString("base64");
+  } else if (DID_USER && DID_PASS) {
+    // Alternativa: Basic base64("user:pass")
+    h.Authorization = "Basic " + Buffer.from(`${DID_USER}:${DID_PASS}`).toString("base64");
+  } else {
+    console.warn("[WARN] Faltan credenciales D-ID (DID_API_KEY o DID_USERNAME/DID_PASSWORD)");
+  }
+  return h;
+};
+
+/* ====== EXTRA: Créditos D-ID (debug rápido) ====== */
+app.get("/api/did/credits", async (_req, res) => {
+  try {
+    const r = await _fetch("https://api.d-id.com/v1/credits", { headers: didHeaders() });
+    const data = await r.json().catch(() => ({}));
+    return res.status(r.ok ? 200 : r.status).json(data);
+  } catch (e) {
+    console.error("credits error", e);
+    return res.status(500).json({ error: "credits_failed" });
+  }
+});
+
+/* ====== NUEVO: Hablar con D-ID usando AUDIO_URL (ElevenLabs) ======
+   Frontend envía: { id, session_id, text }
+   Generamos audio_url público a /api/tts y se lo pasamos a D-ID (script.type = 'audio')
+=============================================================== */
 app.post("/api/did/talk-el", async (req, res) => {
   try {
     const { id, session_id, text } = req.body || {};
@@ -56,28 +91,23 @@ app.post("/api/did/talk-el", async (req, res) => {
       return res.status(400).json({ error: "missing_fields" });
     }
 
+    // URL pública que D-ID podrá descargar (mp3 stream ElevenLabs)
     const audio_url = `${PUBLIC_BASE_URL}/api/tts?text=${encodeURIComponent(
       String(text).slice(0, 5000)
     )}`;
 
-    const headers = (() => {
-      const h = { "Content-Type": "application/json", Accept: "application/json" };
-      const KEY = process.env.DID_API_KEY;
-      const U = process.env.DID_USERNAME;
-      const P = process.env.DID_PASSWORD;
-      if (KEY) h.Authorization = "Basic " + Buffer.from(`${KEY}:`).toString("base64");
-      else if (U && P) h.Authorization = "Basic " + Buffer.from(`${U}:${P}`).toString("base64");
-      else console.warn("[WARN] Faltan credenciales D-ID");
-      return h;
-    })();
+    const payload = { session_id, script: { type: "audio", audio_url } };
 
-    const r = await _fetch(`https://api.d-id.com/talks/streams/${id}`, {
+    const r = await _fetch(`https://api.d-id.com/v1/talks/streams/${id}`, {
       method: "POST",
-      headers,
-      body: JSON.stringify({ session_id, script: { type: "audio", audio_url } }),
+      headers: didHeaders(),
+      body: JSON.stringify(payload),
     });
 
     const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      console.error("[DID] talk-el failed", r.status, data);
+    }
     return res.status(r.ok ? 200 : r.status).json(data);
   } catch (e) {
     console.error("talk-el error", e);
@@ -94,6 +124,8 @@ app.post("/api/transcribe", upload.single("file"), async (req, res) => {
     if (!req.file) {
       return res.status(400).json({ error: "No se recibió ningún archivo" });
     }
+
+    // Usamos Blob para compatibilidad estable
     const fileBlob = new Blob([req.file.buffer], {
       type: req.file.mimetype || "audio/webm",
     });
@@ -123,15 +155,21 @@ app.all("/api/tts", async (req, res) => {
     }
 
     const VOICE_ID = process.env.ELEVENLABS_VOICE_ID;
-    const API_KEY = process.env.ELEVENLABS_API_KEY;
+    const API_KEY  = process.env.ELEVENLABS_API_KEY;
 
     if (!VOICE_ID || !API_KEY) {
       return res.status(500).json({ error: "missing_elevenlabs_env" });
     }
 
+    // Opcional: AbortController por si cuelga el proveedor externo
     const controller = new AbortController();
     const timeoutMs = Number(process.env.TTS_TIMEOUT_MS || 30000);
-    const t = setTimeout(() => controller.abort(), timeoutMs);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    // Log útil (no imprimimos el texto, solo longitudes y metadatos)
+    const sid  = req.method === "GET" ? (req.query.sid || "")  : (req.body?.sid || "");
+    const part = req.method === "GET" ? (req.query.part || "") : (req.body?.part || "");
+    console.log(`[TTS] ElevenLabs request len=${String(text).length} sid=${sid||"-"} part=${part||"-"}`);
 
     const url =
       `https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}/stream` +
@@ -157,7 +195,7 @@ app.all("/api/tts", async (req, res) => {
       signal: controller.signal,
     });
 
-    clearTimeout(t);
+    clearTimeout(timer);
 
     if (!r.ok || !r.body) {
       const body = await r.text().catch(() => "");
@@ -165,37 +203,21 @@ app.all("/api/tts", async (req, res) => {
       return res.status(502).json({ error: "elevenlabs_failed", detail: body });
     }
 
+    // Cabeceras para streaming MP3
     res.setHeader("Content-Type", "audio/mpeg");
     res.setHeader("Cache-Control", "no-store");
-    res.setHeader("Accept-Ranges", "bytes");
+    res.setHeader("Accept-Ranges", "bytes"); // útil para algunos clientes/players
 
-    const bodyStream = r.body;
-    if (bodyStream && typeof bodyStream.pipe === "function") {
-      bodyStream.pipe(res);
-      bodyStream.on("error", (e) => {
-        console.error("tts pipe error", e);
-        if (!res.headersSent) res.status(500).json({ error: "tts_pipe_failed" });
-        else res.end();
-      });
-    } else if (bodyStream && Readable.fromWeb) {
-      Readable.fromWeb(bodyStream).pipe(res);
-    } else if (bodyStream && typeof bodyStream.getReader === "function") {
-      const reader = bodyStream.getReader();
-      (async function pump() {
-        try {
-          const { done, value } = await reader.read();
-          if (done) return res.end();
-          res.write(Buffer.from(value));
-          pump();
-        } catch (e) {
-          console.error("tts pump error", e);
-          res.end();
-        }
-      })();
-    } else {
-      const buf = await r.buffer();
-      res.end(buf);
-    }
+    // Pipe streaming
+    r.body.pipe(res);
+    r.body.on("error", (e) => {
+      console.error("tts pipe error", e);
+      if (!res.headersSent) {
+        res.status(500).json({ error: "tts_pipe_failed" });
+      } else {
+        try { res.end(); } catch {}
+      }
+    });
   } catch (err) {
     console.error("tts stream error", err);
     const msg = (err && err.message) || "";
@@ -204,25 +226,24 @@ app.all("/api/tts", async (req, res) => {
   }
 });
 
-/* ====== Página de prueba TTS (SIN backticks) ====== */
+/* ====== Endpoint de prueba para escuchar fácilmente ====== */
 app.get("/api/tts-test", (req, res) => {
   const q = String(req.query.text || "Hola, la paz sea contigo.");
-  const esc = q.replace(/"/g, "&quot;");
-  const html =
-    '<!doctype html>' +
-    '<html><head><meta charset="utf-8"><title>TTS Test</title></head>' +
-    '<body style="font-family:sans-serif;padding:24px">' +
-    '<h1>TTS ElevenLabs Test</h1>' +
-    '<form method="GET" action="/api/tts-test">' +
-    '<label>Texto:</label> ' +
-    '<input type="text" name="text" value="' + esc + '" style="width: 420px" /> ' +
-    '<button type="submit">Reproducir</button>' +
-    '</form>' +
-    '<p>Endpoint: <code>/api/tts?text=...</code></p>' +
-    '<audio id="player" controls autoplay src="/api/tts?text=' + encodeURIComponent(q) + '"></audio>' +
-    '</body></html>';
   res.setHeader("Content-Type", "text/html; charset=utf-8");
-  res.end(html);
+  res.end(`<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>TTS Test</title></head>
+<body style="font-family:sans-serif;padding:24px">
+  <h1>TTS ElevenLabs Test</h1>
+  <form method="GET" action="/api/tts-test">
+    <label>Texto:</label>
+    <input type="text" name="text" value="${q.replace(/"/g, "&quot;")}" style="width: 420px" />
+    <button type="submit">Reproducir</button>
+  </form>
+  <p>Endpoint: <code>/api/tts?text=...</code></p>
+  <audio id="player" controls autoplay src="/api/tts?text=${encodeURIComponent(q)}"></audio>
+</body>
+</html>`);
 });
 
 /* ====== Endpoint: Bienvenida dinámica ====== */
@@ -250,4 +271,3 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Servidor escuchando en http://localhost:${PORT}`);
 });
-
