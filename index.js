@@ -1,34 +1,17 @@
 // index.js
-const express   = require("express");
-const cors      = require("cors");
-const nodeFetch = require("node-fetch");
+const express = require("express");
+const cors = require("cors");
+const nodeFetch = require("node-fetch"); // fallback si el runtime no trae fetch global
 require("dotenv").config();
-const multer    = require("multer");
+const multer = require("multer");
 const { OpenAI } = require("openai");
 
+/* ============ RUTAS D-ID (WebRTC, SDP/ICE, TALK con intercept) ============ */
 const didRouter = require("./routes/did");
 
 const app = express();
 
-/* Log básico */
-app.use((req, _res, next) => {
-  const t = new Date().toISOString();
-  console.log(`[${t}] ${req.method} ${req.originalUrl}`);
-  next();
-});
-
-/* CORS */
-const allowedOrigin = process.env.CORS_ORIGIN || "*";
-app.use(cors({ origin: allowedOrigin === "*" ? true : allowedOrigin }));
-
-/* Parsers */
-app.use(express.json({ limit: "2mb" }));
-app.use(express.urlencoded({ extended: true, limit: "2mb" }));
-
-/* Monta rutas D-ID */
-app.use("/api/did", didRouter);
-
-/* ====== ENV & helpers genéricos ====== */
+/* ============ ENV & HELPERS ============ */
 const _fetch = (...args) =>
   (globalThis.fetch ? globalThis.fetch(...args) : nodeFetch(...args));
 
@@ -36,15 +19,28 @@ const PUBLIC_BASE_URL =
   process.env.PUBLIC_BASE_URL ||
   "https://jesus-backend-production-1cf4.up.railway.app";
 
-/* ====== LOGS de arranque ====== */
-const DID_API_KEY = process.env.DID_API_KEY || "";
-const DID_USER    = process.env.DID_USERNAME || "";
-const DID_PASS    = process.env.DID_PASSWORD || "";
-console.log("[BOOT] PUBLIC_BASE_URL:", PUBLIC_BASE_URL || "(default)");
-console.log(
-  "[BOOT] DID auth mode:",
-  DID_API_KEY ? "API_KEY" : (DID_USER && DID_PASS ? "USER_PASS" : "MISSING")
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || "";
+const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || "";
+
+/* ============ LOG SENCILLO ============ */
+app.use((req, _res, next) => {
+  const t = new Date().toISOString();
+  console.log(`[${t}] ${req.method} ${req.originalUrl}`);
+  next();
+});
+
+/* ============ CORS + Body Parsers ============ */
+const allowedOrigin = process.env.CORS_ORIGIN || "*";
+app.use(
+  cors({
+    origin: allowedOrigin === "*" ? true : allowedOrigin,
+  })
 );
+app.use(express.json({ limit: "2mb" }));
+app.use(express.urlencoded({ extended: true, limit: "2mb" }));
+
+/* ============ MONTA /api/did/* (streams, sdp, ice, talk TEXT/AUDIO) ============ */
+app.use("/api/did", didRouter);
 
 /* ====== OpenAI Whisper (Transcripción) ====== */
 const upload = multer({ limits: { fileSize: 25 * 1024 * 1024 } });
@@ -56,6 +52,7 @@ app.post("/api/transcribe", upload.single("file"), async (req, res) => {
       return res.status(400).json({ error: "No se recibió ningún archivo" });
     }
 
+    // En Node 18+ existe Blob, el SDK acepta Blob (o ReadableStream)
     const fileBlob = new Blob([req.file.buffer], {
       type: req.file.mimetype || "audio/webm",
     });
@@ -79,13 +76,13 @@ app.post("/api/transcribe", upload.single("file"), async (req, res) => {
 app.all("/api/tts", async (req, res) => {
   try {
     const text =
-      req.method === "GET" ? (req.query.text ?? "") : ((req.body && req.body.text) ?? "");
+      req.method === "GET" ? (req.query.text ?? "") : (req.body?.text ?? "");
     if (!text || !String(text).trim()) {
       return res.status(400).json({ error: "no_text" });
     }
 
-    const VOICE_ID = process.env.ELEVENLABS_VOICE_ID;
-    const API_KEY  = process.env.ELEVENLABS_API_KEY;
+    const VOICE_ID = ELEVENLABS_VOICE_ID;
+    const API_KEY = ELEVENLABS_API_KEY;
 
     if (!VOICE_ID || !API_KEY) {
       return res.status(500).json({ error: "missing_elevenlabs_env" });
@@ -93,11 +90,7 @@ app.all("/api/tts", async (req, res) => {
 
     const controller = new AbortController();
     const timeoutMs = Number(process.env.TTS_TIMEOUT_MS || 30000);
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-
-    const sid  = req.method === "GET" ? (req.query.sid || "")  : (req.body?.sid || "");
-    const part = req.method === "GET" ? (req.query.part || "") : (req.body?.part || "");
-    console.log(`[TTS] ElevenLabs request len=${String(text).length} sid=${sid||"-"} part=${part||"-"}`);
+    const t = setTimeout(() => controller.abort(), timeoutMs);
 
     const url =
       `https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}/stream` +
@@ -108,7 +101,7 @@ app.all("/api/tts", async (req, res) => {
       headers: {
         "xi-api-key": API_KEY,
         "Content-Type": "application/json",
-        "Accept": "audio/mpeg",
+        Accept: "audio/mpeg",
       },
       body: JSON.stringify({
         text: String(text).slice(0, 5000),
@@ -123,7 +116,7 @@ app.all("/api/tts", async (req, res) => {
       signal: controller.signal,
     });
 
-    clearTimeout(timer);
+    clearTimeout(t);
 
     if (!r.ok || !r.body) {
       const body = await r.text().catch(() => "");
@@ -141,7 +134,7 @@ app.all("/api/tts", async (req, res) => {
       if (!res.headersSent) {
         res.status(500).json({ error: "tts_pipe_failed" });
       } else {
-        try { res.end(); } catch {}
+        res.end();
       }
     });
   } catch (err) {
@@ -152,7 +145,7 @@ app.all("/api/tts", async (req, res) => {
   }
 });
 
-/* ====== Página de prueba /api/tts ====== */
+/* ====== Endpoint de prueba simple ====== */
 app.get("/api/tts-test", (req, res) => {
   const q = String(req.query.text || "Hola, la paz sea contigo.");
   res.setHeader("Content-Type", "text/html; charset=utf-8");
@@ -172,7 +165,7 @@ app.get("/api/tts-test", (req, res) => {
 </html>`);
 });
 
-/* ====== Welcome ====== */
+/* ====== Endpoint: Bienvenida dinámica ====== */
 app.get("/api/welcome", (_req, res) => {
   const greetings = [
     "Buenos días, que la paz de Dios te acompañe hoy.",
@@ -187,10 +180,12 @@ app.get("/api/welcome", (_req, res) => {
   res.json({ text: randomGreeting });
 });
 
-/* ====== Root ====== */
-app.get("/", (_req, res) => { res.send("jesus-backend up ✅"); });
+/* ====== Raíz ====== */
+app.get("/", (_req, res) => {
+  res.send("jesus-backend up ✅");
+});
 
-/* ====== Start ====== */
+/* ====== Inicio servidor ====== */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Servidor escuchando en http://localhost:${PORT}`);
