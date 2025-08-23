@@ -2,187 +2,74 @@
 const express = require("express");
 const router = express.Router();
 const nodeFetch = require("node-fetch");
-require("dotenv").config();
+const crypto = require("crypto");
 
 const _fetch = (...args) =>
   (globalThis.fetch ? globalThis.fetch(...args) : nodeFetch(...args));
 
-/* ========= ENV ========= */
+/* ====== ENV ====== */
 const PUBLIC_BASE_URL =
   process.env.PUBLIC_BASE_URL ||
   "https://jesus-backend-production-1cf4.up.railway.app";
 
 const DID_API_KEY = process.env.DID_API_KEY || "";
-const DID_USER    = process.env.DID_USERNAME || "";
-const DID_PASS    = process.env.DID_PASSWORD || "";
+const DID_USER = process.env.DID_USERNAME || "";
+const DID_PASS = process.env.DID_PASSWORD || "";
 
-const EL_API_KEY  = process.env.ELEVENLABS_API_KEY || "";
-const EL_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || "";
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || "";
+const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || "";
 
-/* ========= Selección dinámica de base D-ID =========
-   - API key -> v1
-   - USER/PASS -> legacy (sin /v1)
-*/
+/* ====== Modo de auth y base ====== */
+function didAuthMode() {
+  if (DID_API_KEY) return "API_KEY";
+  if (DID_USER && DID_PASS) return "USER_PASS";
+  return "MISSING";
+}
 function didBase() {
-  return DID_API_KEY ? "https://api.d-id.com/v1" : "https://api.d-id.com";
-}
-function creditsUrl() {
-  return DID_API_KEY ? "https://api.d-id.com/v1/credits" : "https://api.d-id.com/credits";
+  // v1 para API KEY; legacy base para USER_PASS
+  return didAuthMode() === "API_KEY" ? "https://api.d-id.com/v1" : "https://api.d-id.com";
 }
 
-/* ========= Helpers de auth D-ID ========= */
+/* ====== Cabeceras ====== */
 function didHeaders() {
   const h = { "Content-Type": "application/json", Accept: "application/json" };
   if (DID_API_KEY) {
-    // API Key -> Basic base64("API_KEY:")
-    h.Authorization = "Basic " + Buffer.from(`${DID_API_KEY}:`).toString("base64");
+    // Soporta "simple" o "usuario:token"
+    const raw = DID_API_KEY.includes(":") ? DID_API_KEY : `${DID_API_KEY}:`;
+    const basic = Buffer.from(raw).toString("base64");
+    h.Authorization = `Basic ${basic}`;
     h["X-DID-Auth-Mode"] = "API_KEY";
   } else if (DID_USER && DID_PASS) {
-    // Legacy USER/PASS -> Basic base64("user:pass")
     h.Authorization = "Basic " + Buffer.from(`${DID_USER}:${DID_PASS}`).toString("base64");
     h["X-DID-Auth-Mode"] = "USER_PASS";
   } else {
+    console.warn("[DID] WARN: faltan credenciales DID");
     h["X-DID-Auth-Mode"] = "MISSING";
   }
   return h;
 }
 
-/* ========= Selftest credenciales ========= */
-router.get("/selftest", async (_req, res) => {
-  try {
-    const r = await _fetch(creditsUrl(), { headers: didHeaders() });
-    const data = await r.json().catch(() => ({}));
-    const mode = didHeaders()["X-DID-Auth-Mode"];
-    console.log("[DID] selftest status:", r.status, "auth:", mode, "base:", didBase());
-    return res.status(r.ok ? 200 : r.status).json({ status: r.status, authMode: mode, base: didBase(), data });
-  } catch (e) {
-    console.error("[DID] selftest error", e);
-    return res.status(500).json({ error: "selftest_failed" });
+console.log(
+  `[BOOT] DID auth mode: ${didAuthMode()} base: ${didBase()} public: ${PUBLIC_BASE_URL}`
+);
+
+/* ====== Cache de MP3 para D-ID (Content-Length) ====== */
+const ttsCache = new Map(); // key -> Buffer
+
+async function generateMp3BufferFromText(text) {
+  if (!ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) {
+    throw new Error("missing_elevenlabs_env");
   }
-});
+  const url =
+    `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}/stream` +
+    `?optimize_streaming_latency=4&output_format=mp3_22050_32`;
 
-/* ========= Crear stream (offer + ice) ========= */
-router.post("/streams", async (req, res) => {
-  try {
-    const { source_url } = req.body || {};
-    const payload = {
-      source_url:
-        source_url ||
-        "https://raw.githubusercontent.com/betomacia/jesus-backend/main/public/JESPANOL.jpeg",
-    };
-
-    const r = await _fetch(`${didBase()}/talks/streams`, {
-      method: "POST",
-      headers: didHeaders(),
-      body: JSON.stringify(payload),
-    });
-    const createJson = await r.json().catch(() => ({}));
-    if (!r.ok) {
-      console.error("[DID] offer_failed", r.status, createJson);
-      return res.status(r.status).json({ error: "offer_failed", detail: createJson });
-    }
-
-    const r2 = await _fetch(`${didBase()}/talks/streams/${createJson.id}`, {
-      method: "GET",
-      headers: didHeaders(),
-    });
-    const sdpJson = await r2.json().catch(() => ({}));
-    if (!r2.ok) {
-      console.error("[DID] sdp_fetch_failed", r2.status, sdpJson);
-      return res.status(r2.status).json({ error: "sdp_fetch_failed", detail: sdpJson });
-    }
-
-    console.log("[DID] stream created:", createJson.id, "auth:", didHeaders()["X-DID-Auth-Mode"]);
-    return res.json({
-      id: createJson.id,
-      session_id: createJson.session_id,
-      offer: sdpJson.offer,
-      ice_servers: sdpJson.ice_servers || [],
-    });
-  } catch (e) {
-    console.error("[DID] streams error", e);
-    return res.status(500).json({ error: "streams_failed" });
-  }
-});
-
-/* ========= Enviar ANSWER (SDP) ========= */
-router.post("/streams/:id/sdp", async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { answer, session_id } = req.body || {};
-    if (!id || !session_id || !answer || !answer.sdp || !answer.type) {
-      return res.status(400).json({ error: "missing_fields" });
-    }
-
-    const r = await _fetch(`${didBase()}/talks/streams/${id}/sdp`, {
-      method: "POST",
-      headers: didHeaders(),
-      body: JSON.stringify({ answer, session_id }),
-    });
-
-    const data = await r.json().catch(() => ({}));
-    return res.status(r.ok ? 200 : r.status).json(data);
-  } catch (e) {
-    console.error("[DID] sdp post error", e);
-    return res.status(500).json({ error: "sdp_failed" });
-  }
-});
-
-/* ========= Enviar ICE ========= */
-router.post("/streams/:id/ice", async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { candidate, session_id } = req.body || {};
-    if (!id || !session_id || !candidate) {
-      return res.status(400).json({ error: "missing_fields" });
-    }
-
-    const r = await _fetch(`${didBase()}/talks/streams/${id}/ice`, {
-      method: "POST",
-      headers: didHeaders(),
-      body: JSON.stringify({ candidate, session_id }),
-    });
-
-    const data = await r.json().catch(() => ({}));
-    return res.status(r.ok ? 200 : r.status).json(data);
-  } catch (e) {
-    console.error("[DID] ice post error", e);
-    return res.status(500).json({ error: "ice_failed" });
-  }
-});
-
-/* ========= Cache in-memory de MP3 (para D-ID) ========= */
-const ttsCache = new Map(); // key -> { buf:Buffer, len:number, ctype:string, ts:number }
-function makeKey(text) {
-  const raw = Buffer.from(`${EL_VOICE_ID}|${text}`, "utf8").toString("base64");
-  return raw.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/,"");
-}
-
-/* Sirve el MP3 con Content-Length (GET/HEAD) */
-router.all("/tts-cache/:key", async (req, res) => {
-  const { key } = req.params || {};
-  const item = key ? ttsCache.get(key) : null;
-  if (!item) return res.status(404).end();
-
-  res.setHeader("Content-Type", item.ctype || "audio/mpeg");
-  res.setHeader("Content-Length", String(item.len));
-  res.setHeader("Cache-Control", "public, max-age=600");
-  res.setHeader("Accept-Ranges", "bytes");
-
-  if (req.method === "HEAD") return res.status(200).end();
-  return res.status(200).end(item.buf);
-});
-
-/* Genera MP3 completo (no stream) desde ElevenLabs */
-async function elevenMp3Buffer(text) {
-  if (!EL_API_KEY || !EL_VOICE_ID) throw new Error("missing_elevenlabs_env");
-  const url = `https://api.elevenlabs.io/v1/text-to-speech/${EL_VOICE_ID}`;
   const r = await _fetch(url, {
     method: "POST",
     headers: {
-      "xi-api-key": EL_API_KEY,
+      "xi-api-key": ELEVENLABS_API_KEY,
       "Content-Type": "application/json",
-      "Accept": "audio/mpeg",
+      Accept: "audio/mpeg",
     },
     body: JSON.stringify({
       text: String(text).slice(0, 5000),
@@ -195,58 +82,226 @@ async function elevenMp3Buffer(text) {
       },
     }),
   });
+
   if (!r.ok) {
-    const body = await r.text().catch(()=> "");
-    throw new Error(`elevenlabs_failed ${r.status}: ${body}`);
+    const txt = await r.text().catch(() => "");
+    throw new Error(`elevenlabs_failed ${r.status} ${txt}`);
   }
-  const buf = await r.buffer(); // node-fetch v2
-  return buf;
+
+  // Soportar global fetch (arrayBuffer) y node-fetch v2 (buffer)
+  if (typeof r.arrayBuffer === "function") {
+    const ab = await r.arrayBuffer();
+    return Buffer.from(ab);
+  } else if (typeof r.buffer === "function") {
+    return await r.buffer();
+  } else {
+    // fallback stream→buffer
+    const chunks = [];
+    return await new Promise((resolve, reject) => {
+      r.body.on("data", (c) => chunks.push(c));
+      r.body.on("end", () => resolve(Buffer.concat(chunks)));
+      r.body.on("error", reject);
+    });
+  }
 }
 
-/* ========= Talk (texto o audio_url) =========
-   Intercepta audio_url de /api/tts?text=...  -> genera MP3 con Content-Length
-============================================ */
-router.post("/streams/:id/talk", async (req, res) => {
+// Sirve el MP3 con Content-Length (D-ID lo requiere)
+router.get("/tts-cache/:key", async (req, res) => {
+  const key = req.params.key;
+  const buf = ttsCache.get(key);
+  if (!buf) return res.status(404).json({ error: "not_found" });
+
+  res.setHeader("Content-Type", "audio/mpeg");
+  res.setHeader("Content-Length", String(buf.length));
+  res.setHeader("Accept-Ranges", "bytes");
+  res.setHeader("Cache-Control", "public, max-age=3600");
+  res.end(buf);
+});
+
+/* ====== Selftest y créditos ====== */
+router.get("/selftest", async (_req, res) => {
+  try {
+    const base = didBase();
+    const r = await _fetch(`${base}/credits`, { headers: didHeaders() });
+    const data = await r.json().catch(() => ({}));
+    return res.status(r.status).json({
+      status: r.status,
+      authMode: didAuthMode(),
+      base,
+      data,
+    });
+  } catch (e) {
+    return res.status(500).json({ status: 500, authMode: didAuthMode(), error: String(e) });
+  }
+});
+
+router.get("/credits", async (_req, res) => {
+  try {
+    const base = didBase();
+    const r = await _fetch(`${base}/credits`, { headers: didHeaders() });
+    const data = await r.json().catch(() => ({}));
+    return res.status(r.ok ? 200 : r.status).json(data);
+  } catch (e) {
+    console.error("credits error", e);
+    return res.status(500).json({ error: "credits_failed" });
+  }
+});
+
+/* ====== Crear stream WebRTC ====== */
+router.post("/streams", async (req, res) => {
+  try {
+    const { source_url } = req.body || {};
+    const src =
+      source_url ||
+      "https://raw.githubusercontent.com/betomacia/jesus-backend/main/public/JESPANOL.jpeg";
+
+    const base = didBase();
+    const h = didHeaders();
+
+    // 1) Crear el stream
+    const createResponse = await _fetch(`${base}/talks/streams`, {
+      method: "POST",
+      headers: h,
+      body: JSON.stringify({ source_url: src }),
+    });
+
+    const createJson = await createResponse.json().catch(() => ({}));
+    if (!createResponse.ok) {
+      console.error("[DID] streams create failed", createResponse.status, createJson);
+      return res.status(createResponse.status).json({ error: "streams_create_failed", detail: createJson });
+    }
+
+    // 2) Obtener oferta/ICE (en algunos planes viene directo en el create; lo pedimos igual)
+    const sdpResponse = await _fetch(`${base}/talks/streams/${createJson.id}`, {
+      method: "GET",
+      headers: h,
+    });
+
+    const sdpJson = await sdpResponse.json().catch(() => ({}));
+    if (!sdpResponse.ok) {
+      console.error("[DID] sdp fetch failed", sdpResponse.status, sdpJson);
+      return res.status(sdpResponse.status).json({ error: "sdp_fetch_failed", detail: sdpJson });
+    }
+
+    console.log(`[DID] stream created: ${createJson.id} auth: ${didAuthMode()}`);
+
+    return res.json({
+      id: createJson.id,
+      session_id: createJson.session_id,
+      offer: sdpJson.offer || createJson.offer,
+      ice_servers: sdpJson.ice_servers || createJson.ice_servers || [],
+    });
+  } catch (e) {
+    console.error("streams error", e);
+    return res.status(500).json({ error: "streams_failed" });
+  }
+});
+
+/* ====== Enviar SDP de answer ====== */
+router.post("/streams/:id/sdp", async (req, res) => {
   try {
     const { id } = req.params;
-    let { session_id, script } = req.body || {};
-    if (!id || !session_id || !script) {
+    const { answer, session_id } = req.body || {};
+    if (!id || !answer || !session_id) {
       return res.status(400).json({ error: "missing_fields" });
     }
 
-    // Interceptar cuando el front-end pasa nuestro /api/tts?text=...
-    if (script.type === "audio" && typeof script.audio_url === "string") {
-      try {
-        const u = new URL(script.audio_url, PUBLIC_BASE_URL);
-        if (u.pathname.startsWith("/api/tts") && u.searchParams.get("text")) {
-          const text = decodeURIComponent(u.searchParams.get("text"));
-          console.log("[DID] Intercept audio_url -> generar MP3 fijo (len) len(text)=", text.length);
-
-          const buf = await elevenMp3Buffer(text);
-          const key = makeKey(text);
-          ttsCache.set(key, { buf, len: buf.length, ctype: "audio/mpeg", ts: Date.now() });
-
-          const cachedUrl = `${PUBLIC_BASE_URL}/api/did/tts-cache/${key}`;
-          script = { type: "audio", audio_url: cachedUrl };
-          console.log("[DID] audio_url reescrito a", cachedUrl);
-        }
-      } catch (e) {
-        console.warn("[DID] no se pudo interceptar audio_url, sigo con el original:", e.message);
-      }
-    }
-
-    const r = await _fetch(`${didBase()}/talks/streams/${id}`, {
+    const base = didBase();
+    const r = await _fetch(`${base}/talks/streams/${id}/sdp`, {
       method: "POST",
       headers: didHeaders(),
-      body: JSON.stringify({ session_id, script }),
+      body: JSON.stringify({ answer, session_id }),
     });
 
     const data = await r.json().catch(() => ({}));
-    if (!r.ok) console.error("[DID] talk failed", r.status, data);
-    return res.status(r.ok ? 200 : r.status).json(data);
+    if (!r.ok) {
+      console.error("[DID] send sdp failed", r.status, data);
+      return res.status(r.status).json({ error: "sdp_failed", detail: data });
+    }
+    return res.json(data);
   } catch (e) {
-    console.error("[DID] talk error", e);
-    return res.status(500).json({ error: "talk_failed", detail: String(e.message || e) });
+    console.error("sdp post error", e);
+    return res.status(500).json({ error: "sdp_failed" });
+  }
+});
+
+/* ====== Enviar ICE candidate ====== */
+router.post("/streams/:id/ice", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { candidate, session_id } = req.body || {};
+    if (!id || !candidate || !session_id) {
+      return res.status(400).json({ error: "missing_fields" });
+    }
+
+    const base = didBase();
+    await _fetch(`${base}/talks/streams/${id}/ice`, {
+      method: "POST",
+      headers: didHeaders(),
+      body: JSON.stringify({ candidate, session_id }),
+    }).catch((e) => {
+      console.warn("ice post warn", String(e));
+    });
+
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error("ice post error", e);
+    return res.status(500).json({ error: "ice_failed" });
+  }
+});
+
+/* ====== TALK (text/audio) con intercept para audio_url ====== */
+router.post("/streams/:id/talk", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { session_id, script } = req.body || {};
+    if (!id || !session_id || !script || !script.type) {
+      return res.status(400).json({ error: "missing_fields" });
+    }
+
+    let payload = { session_id, script };
+
+    // Interceptar audio_url y convertirlo a MP3 cacheado con Content-Length
+    if (script.type === "audio" && typeof script.audio_url === "string") {
+      try {
+        const u = new URL(script.audio_url, PUBLIC_BASE_URL);
+        // solo interceptamos si apunta a nuestro /api/tts?text=...
+        if (/\/api\/tts$/i.test(u.pathname) && u.searchParams.get("text")) {
+          const text = u.searchParams.get("text") || "";
+          console.log(`[DID] Intercept audio_url -> generar MP3 fijo (len) len(text)=${text.length}`);
+
+          const buf = await generateMp3BufferFromText(text);
+          const key = crypto.createHash("sha1").update(text + "|" + ELEVENLABS_VOICE_ID).digest("hex");
+          ttsCache.set(key, buf);
+
+          const rewritten = `${PUBLIC_BASE_URL}/api/did/tts-cache/${key}`;
+          payload = {
+            session_id,
+            script: { type: "audio", audio_url: rewritten },
+          };
+          console.log(`[DID] audio_url reescrito a ${rewritten}`);
+        }
+      } catch (e) {
+        console.warn("[DID] intercept audio_url warning:", String(e));
+      }
+    }
+
+    const base = didBase();
+    const r = await _fetch(`${base}/talks/streams/${id}`, {
+      method: "POST",
+      headers: didHeaders(),
+      body: JSON.stringify(payload),
+    });
+
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      console.error("[DID] talk failed", r.status, data);
+      return res.status(r.status).json({ error: "talk_failed", detail: data });
+    }
+    return res.json(data);
+  } catch (e) {
+    console.error("talk error", e);
+    return res.status(500).json({ error: "talk_failed" });
   }
 });
 
