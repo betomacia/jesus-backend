@@ -1,10 +1,10 @@
-// index.js — backend robusto para TTS OpenAI streaming + D-ID + Whisper
+// index.js — backend robusto para TTS OpenAI streaming + D-ID + Whisper + OpenAI→D-ID audio
 const express = require("express");
 const cors = require("cors");
 const compression = require("compression");
-const nodeFetch = require("node-fetch"); // v2 (Readable de Node)
 require("dotenv").config();
 const multer = require("multer");
+const nodeFetch = require("node-fetch"); // v2 (Readable de Node)
 const { Readable } = require("stream");
 const https = require("https");
 const { OpenAI } = require("openai");
@@ -30,10 +30,7 @@ app.use(
   })
 );
 
-/* ============ COMPRESIÓN ============
-   Comprime respuestas (incluye JSON/HTML).
-   El audio ya va en binario/stream; se envía tal cual.
-===================================== */
+/* ============ COMPRESIÓN ============ */
 app.use(compression({ threshold: 0 }));
 
 /* ============ BODY PARSERS ============ */
@@ -77,9 +74,6 @@ app.post("/api/transcribe", upload.single("file"), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: "No se recibió ningún archivo" });
 
     const fileName = req.file.originalname || "audio.webm";
-
-    // openai@4 acepta Blob/File. En Node, creamos un File-like desde el buffer.
-    // Si tu runtime no trae global File, construimos vía objeto { name, type, data }.
     const resp = await openai.audio.transcriptions.create({
       file: { name: fileName, data: req.file.buffer, type: req.file.mimetype || "audio/webm" },
       model: "whisper-1",
@@ -96,24 +90,20 @@ app.post("/api/transcribe", upload.single("file"), async (req, res) => {
    OPENAI TTS STREAMING — /api/tts-openai-stream
    - GET  /api/tts-openai-stream?text=Hola&voice=verse&format=mp3|opus&lang=es
    - POST /api/tts-openai-stream { text, voice?, format?, lang? }
-   • model: gpt-4o-mini-tts
-   • Accept (según format):
-       mp3  -> audio/mpeg
-       opus -> audio/ogg (contiene Opus; ~menor latencia/bitrate)
-   • Timeout duro a 8s: si OpenAI tarda, devolvemos 504 y el front puede fallbackear.
+   model: gpt-4o-mini-tts
 ============================================================================= */
 function normalizeTTSParams(method, req) {
   const src = method === "GET" ? req.query : req.body || {};
   const text = String(src.text || "").trim();
   const voice = String(src.voice || "verse").trim();
   const format = String(src.format || "mp3").toLowerCase().trim();
-  const lang = String(src.lang || "es").trim(); // no se usa aquí, pero útil si luego personalizas voz por idioma
+  const lang = String(src.lang || "es").trim();
   return { text, voice, format, lang };
 }
 
 function acceptForFormat(fmt) {
-  if (fmt === "opus") return "audio/ogg"; // OGG/Opus
-  return "audio/mpeg"; // MP3 por compatibilidad universal
+  if (fmt === "opus") return "audio/ogg"; // OGG (Opus)
+  return "audio/mpeg"; // MP3
 }
 
 app.all("/api/tts-openai-stream", async (req, res) => {
@@ -125,8 +115,6 @@ app.all("/api/tts-openai-stream", async (req, res) => {
     if (!OPENAI_KEY) return res.status(500).json({ error: "missing_openai_key" });
 
     const accept = acceptForFormat(format);
-
-    // Timeout duro (8s) para no colgar la UX.
     const { signal, done } = withAbortTimeout(Number(process.env.OPENAI_TTS_TIMEOUT_MS || 8000));
 
     const r = await fetch("https://api.openai.com/v1/audio/speech", {
@@ -140,9 +128,6 @@ app.all("/api/tts-openai-stream", async (req, res) => {
         model: "gpt-4o-mini-tts",
         voice: voice,
         input: text.slice(0, 5000),
-        // En el endpoint oficial, el formato de salida se infiere por Accept;
-        // si quisieras forzar contenedor, puedes incluir "format": "mp3"|"opus"
-        // pero con Accept basta para obtener el mime adecuado.
       }),
       agent: httpsAgent,
       signal,
@@ -154,12 +139,10 @@ app.all("/api/tts-openai-stream", async (req, res) => {
       return res.status(r.status || 502).json({ error: "openai_tts_failed", detail });
     }
 
-    // Cabeceras de streaming
     res.setHeader("Content-Type", accept);
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("Accept-Ranges", "bytes");
 
-    // node-fetch v2 -> r.body es Node Readable
     const body = r.body;
     if (body && typeof body.pipe === "function") {
       body.pipe(res);
@@ -169,7 +152,6 @@ app.all("/api/tts-openai-stream", async (req, res) => {
         else res.end();
       });
     } else if (body && typeof body.getReader === "function") {
-      // WebStream -> convertir a Node Readable
       const nodeReadable = Readable.fromWeb(body);
       nodeReadable.pipe(res);
       nodeReadable.on("error", (e) => {
@@ -178,7 +160,6 @@ app.all("/api/tts-openai-stream", async (req, res) => {
         else res.end();
       });
     } else {
-      // Fallback a buffer completo (menos eficiente pero seguro)
       const buf = await r.buffer();
       res.end(buf);
     }
@@ -231,6 +212,121 @@ app.get("/api/diag/openai", async (_req, res) => {
   }
 });
 
+/* =========================================================================
+   OpenAI MP3 buffer + servidor temporal para D-ID (audio_url)
+   - /api/tmp-audio/:id.mp3 sirve el buffer en memoria
+   - openaiTTSBuffer(text) genera MP3 con OpenAI
+   - /api/did/talk-openai-audio: orquesta OpenAI→D-ID (script.type=audio)
+========================================================================= */
+const tmpStore = new Map(); // id -> Buffer
+
+app.get("/api/tmp-audio/:id.mp3", (req, res) => {
+  try {
+    const id = String(req.params.id || "");
+    const buf = tmpStore.get(id);
+    if (!buf) return res.status(404).json({ error: "not_found" });
+    res.setHeader("Content-Type", "audio/mpeg");
+    res.setHeader("Content-Length", buf.length);
+    res.setHeader("Cache-Control", "no-store");
+    res.end(buf);
+  } catch (e) {
+    console.error("serve tmp-audio error", e);
+    res.status(500).json({ error: "serve_failed" });
+  }
+});
+
+async function openaiTTSBuffer(text, voice = "verse") {
+  const { signal, done } = withAbortTimeout(Number(process.env.OPENAI_TTS_TIMEOUT_MS || 8000));
+  try {
+    const r = await fetch("https://api.openai.com/v1/audio/speech", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${OPENAI_KEY}`,
+        "Content-Type": "application/json",
+        Accept: "audio/mpeg",
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini-tts",
+        voice,
+        input: String(text).slice(0, 5000),
+      }),
+      agent: httpsAgent,
+      signal,
+    });
+    done();
+    if (!r.ok) {
+      const detail = await r.text().catch(() => "");
+      throw new Error(`openai_tts_failed ${r.status}: ${detail}`);
+    }
+    const buf = await r.buffer();
+    return buf;
+  } catch (e) {
+    done();
+    throw e;
+  }
+}
+
+/**
+ * POST /api/did/talk-openai-audio
+ * body: { id, session_id, text, voice? }
+ * Genera MP3 con OpenAI y lo entrega a D-ID (script.type="audio") para animación.
+ */
+app.post("/api/did/talk-openai-audio", async (req, res) => {
+  try {
+    const { id, session_id, text, voice } = req.body || {};
+    if (!id || !session_id || !text || !String(text).trim()) {
+      return res.status(400).json({ error: "missing_fields" });
+    }
+
+    // 1) TTS con OpenAI (MP3)
+    const buf = await openaiTTSBuffer(String(text), voice || "verse");
+
+    // 2) Publica el MP3 temporal para que D-ID lo lea
+    const audioId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    tmpStore.set(audioId, buf);
+    // (Opcional: limpiar viejos cada X minutos)
+    const audioUrl = `${PUBLIC_BASE_URL}/api/tmp-audio/${audioId}.mp3`;
+
+    // 3) POST a D-ID (script.type=audio)
+    const didHeaders = {};
+    if (process.env.DID_API_KEY) {
+      didHeaders.Authorization = "Basic " + Buffer.from(`${process.env.DID_API_KEY}:`).toString("base64");
+    } else if (process.env.DID_USERNAME && process.env.DID_PASSWORD) {
+      didHeaders.Authorization = "Basic " + Buffer.from(`${process.env.DID_USERNAME}:${process.env.DID_PASSWORD}`).toString("base64");
+    } else {
+      console.warn("[D-ID] Faltan credenciales");
+    }
+
+    const rr = await fetch(`https://api.d-id.com/talks/streams/${encodeURIComponent(id)}`, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        ...didHeaders,
+      },
+      body: JSON.stringify({
+        session_id,
+        script: {
+          type: "audio",
+          audio_url: audioUrl
+        }
+      }),
+      agent: httpsAgent,
+    });
+
+    const data = await rr.json().catch(() => ({}));
+    if (!rr.ok) {
+      console.error("D-ID talk-openai-audio error", rr.status, data);
+      return res.status(rr.status).json(data);
+    }
+
+    return res.json({ ok: true, data });
+  } catch (e) {
+    console.error("talk-openai-audio fatal", e);
+    return res.status(500).json({ error: "talk_openai_audio_failed", detail: String(e?.message || e) });
+  }
+});
+
 /* =========================
    Bienvenida dinámica
    ========================= */
@@ -267,9 +363,8 @@ app.listen(PORT, () => {
    NOTAS:
    - OPENAI_API_KEY se normaliza (.replace(/\r|\n/g,'').trim()) para evitar
      el error "is not a legal HTTP header value".
-   - /api/tts-openai-stream usa Accept según ?format=mp3|opus.
-     En front ya estás auto-detectando: Safari=iOS -> mp3, Chrome/Android -> opus.
-   - Timeout 8s: UX no se cuelga si OpenAI tiene picos; tu front puede hacer fallback.
-   - compression + keep-alive ayudan a bajar TTFB y latencia en general.
-   - Mantuvimos rutas D-ID desde ./routes/did (streams/sdp/ice/talk).
+   - /api/tts-openai-stream: Accept según ?format=mp3|opus (front autodetecta).
+   - /api/did/talk-openai-audio: genera MP3 con OpenAI y D-ID lo usa para animar.
+   - compression + keep-alive + timeouts cortos => menor latencia y UX estable.
+   - Asegura PUBLIC_BASE_URL (https) accesible públicamente para audio_url de D-ID.
 ====================================================================== */
