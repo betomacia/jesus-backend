@@ -1,4 +1,4 @@
-// index.js — Backend Express con SSE, TTS y D-ID Streaming ACTIVADO
+// index.js — backend completo con D-ID ACTIVADO + CORS/OPTIONS + logs
 require('dotenv').config();
 
 const express = require('express');
@@ -11,31 +11,39 @@ const https = require('https');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+/* ---------- Middlewares base ---------- */
 app.use(cors({ origin: '*', credentials: false }));
+app.options('*', cors());                           // maneja preflight en TODAS las rutas
 app.use(express.json({ limit: '2mb' }));
 
-// Keep-alive para conexiones largas
+// Logger mínimo para ver método y ruta en logs (Railway)
+app.use((req, _res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl}`);
+  next();
+});
+
+/* ---------- Keep-alive ---------- */
 const httpAgent  = new http.Agent({ keepAlive: true, maxSockets: 80 });
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 80 });
+const agentFor = (url) => (url.startsWith('https:') ? httpsAgent : httpAgent);
 
-// ---------- OpenAI ----------
+// fetch compatible en Node
+const nodeFetch = async (...args) => {
+  const f = (global.fetch || (await import('node-fetch')).default);
+  return f(...args);
+};
+
+/* ---------- OpenAI ---------- */
 const openai = new OpenAI({
   apiKey: (process.env.OPENAI_API_KEY || '').trim(),
   baseURL: process.env.OPENAI_BASE_URL || undefined,
 });
 
-// ---------- Utils ----------
-const nodeFetch = async (...args) => {
-  const f = (global.fetch || (await import('node-fetch')).default);
-  return f(...args);
-};
-const agentFor = (url) => (url.startsWith('https:') ? httpsAgent : httpAgent);
-
-app.get('/healthz', (req, res) => res.json({ ok: true }));
+app.get('/healthz', (_req, res) => res.json({ ok: true }));
 
 /* =======================================================================
-   1) SSE de texto — /api/guide-sse  (front llama por POST)
-   Emite eventos: start, delta, sentence, done, error
+   1) SSE de texto — /api/guide-sse (POST)
+   Eventos: start, delta, sentence, done, error
    ======================================================================= */
 app.post('/api/guide-sse', async (req, res) => {
   try {
@@ -116,14 +124,10 @@ app.post('/api/guide-sse', async (req, res) => {
 
         fullText += delta;
         sentenceBuf += delta;
-
         res.write(sseEvent('delta', { text: delta }));
 
         if (endOfSentence(sentenceBuf)) {
-          const sentences = flushSentences();
-          for (const s of sentences) {
-            if (s) res.write(sseEvent('sentence', { text: s }));
-          }
+          for (const s of flushSentences()) res.write(sseEvent('sentence', { text: s }));
         }
       }
     }
@@ -138,7 +142,6 @@ app.post('/api/guide-sse', async (req, res) => {
     } catch {}
   }
 });
-
 function sseHeaders() {
   return {
     'Content-Type': 'text/event-stream; charset=utf-8',
@@ -154,7 +157,6 @@ function sseEvent(event, payload) {
 /* =======================================================================
    2) TTS OpenAI — /api/tts-openai-stream  (GET y POST)
    Query/body: text, voice, lang, format(mp3|wav|opus), dl(0|1)
-   Si dl=1 → descarga completa y envía; si no → chunked streaming
    ======================================================================= */
 app.get('/api/tts-openai-stream', (req, res) => handleTTS(req, res));
 app.post('/api/tts-openai-stream', (req, res) => handleTTS(req, res));
@@ -181,11 +183,7 @@ async function handleTTS(req, res) {
     res.setHeader('Cache-Control', 'no-store');
 
     const response = await openai.audio.speech.create({
-      model,
-      voice,
-      input: text,
-      format: audioFormat,
-      language: lang,
+      model, voice, input: text, format: audioFormat, language: lang,
     }, {
       fetch: (url, opts) => nodeFetch(url, { ...opts, agent: agentFor(url) }),
     });
@@ -193,7 +191,7 @@ async function handleTTS(req, res) {
     const body = response.body || response;
 
     if (dl) {
-      // descarga completa (robusto)
+      // descarga completa
       if (body?.arrayBuffer) {
         const ab = await body.arrayBuffer();
         return res.end(Buffer.from(ab));
@@ -208,7 +206,7 @@ async function handleTTS(req, res) {
       return;
     }
 
-    // streaming chunked (rápido)
+    // streaming chunked
     res.setHeader('Transfer-Encoding', 'chunked');
     if (res.flushHeaders) res.flushHeaders();
 
@@ -224,9 +222,7 @@ async function handleTTS(req, res) {
             if (value) passthrough.write(Buffer.from(value));
           }
           passthrough.end();
-        } catch (e) {
-          passthrough.destroy(e);
-        }
+        } catch (e) { passthrough.destroy(e); }
       })();
     } else if (body && typeof body.pipe === 'function') {
       body.pipe(passthrough);
@@ -250,60 +246,50 @@ async function handleTTS(req, res) {
 }
 
 /* =======================================================================
-   3) D-ID Streaming ACTIVADO
-   Rutas: /api/did/streams, /api/did/streams/:id/sdp, /api/did/streams/:id/ice,
-          /api/did/talk-stream
-   Nota: Requiere DID_API_KEY. Usamos autenticación Basic: base64("<key>:")
+   3) D-ID Streaming ACTIVADO — router /api/did/*
+   Requiere DID_API_KEY. Autenticación Basic "<key>:"
    ======================================================================= */
-function requireDID(res) {
-  if (!process.env.DID_API_KEY?.trim()) {
-    res.status(501).json({ error: 'did_disabled', hint: 'Define DID_API_KEY para habilitar D-ID.' });
-    return false;
-  }
-  return true;
+const didRouter = express.Router();
+
+function didEnabled() {
+  return !!process.env.DID_API_KEY?.trim();
 }
 function didAuthHeader() {
-  // D-ID usa Basic con "<KEY>:" (sin password)
   const b64 = Buffer.from(`${process.env.DID_API_KEY}:`).toString('base64');
   return `Basic ${b64}`;
 }
 
-/** Crear stream: devuelve { id, session_id, offer, ice_servers } */
-app.post('/api/did/streams', async (req, res) => {
+// Probe rápido para ver estado
+didRouter.get('/ping', (_req, res) => {
+  res.json({ did: didEnabled() ? 'enabled' : 'disabled' });
+});
+
+// Crear stream
+didRouter.post('/streams', async (_req, res) => {
+  if (!didEnabled()) return res.status(501).json({ error: 'did_disabled', hint: 'Define DID_API_KEY' });
   try {
-    if (!requireDID(res)) return;
-    const url = 'https://api.d-id.com/v1/streams';
-    const r = await nodeFetch(url, {
+    const r = await nodeFetch('https://api.d-id.com/v1/streams', {
       method: 'POST',
-      headers: {
-        Authorization: didAuthHeader(),
-        'Content-Type': 'application/json',
-      },
-      // body vacío está bien
+      headers: { Authorization: didAuthHeader(), 'Content-Type': 'application/json' },
       agent: (u) => agentFor(u),
     });
     const text = await r.text();
     if (!r.ok) return res.status(r.status).send(text);
-    // D-ID ya responde con JSON con {id, session_id, offer, ice_servers}
     return res.status(200).send(text);
   } catch (e) {
     return res.status(502).json({ error: 'did_streams_failed', detail: e?.message || String(e) });
   }
 });
 
-/** Enviar SDP answer */
-app.post('/api/did/streams/:id/sdp', async (req, res) => {
+// Enviar SDP answer
+didRouter.post('/streams/:id/sdp', async (req, res) => {
+  if (!didEnabled()) return res.status(501).json({ error: 'did_disabled' });
+  const { id } = req.params;
+  const { answer, session_id } = req.body || {};
   try {
-    if (!requireDID(res)) return;
-    const { id } = req.params;
-    const { answer, session_id } = req.body || {};
-    const url = `https://api.d-id.com/v1/streams/${encodeURIComponent(id)}/sdp`;
-    const r = await nodeFetch(url, {
+    const r = await nodeFetch(`https://api.d-id.com/v1/streams/${encodeURIComponent(id)}/sdp`, {
       method: 'POST',
-      headers: {
-        Authorization: didAuthHeader(),
-        'Content-Type': 'application/json',
-      },
+      headers: { Authorization: didAuthHeader(), 'Content-Type': 'application/json' },
       body: JSON.stringify({ answer, session_id }),
       agent: (u) => agentFor(u),
     });
@@ -315,19 +301,15 @@ app.post('/api/did/streams/:id/sdp', async (req, res) => {
   }
 });
 
-/** Enviar ICE candidate */
-app.post('/api/did/streams/:id/ice', async (req, res) => {
+// Enviar ICE
+didRouter.post('/streams/:id/ice', async (req, res) => {
+  if (!didEnabled()) return res.status(501).json({ error: 'did_disabled' });
+  const { id } = req.params;
+  const { candidate, session_id } = req.body || {};
   try {
-    if (!requireDID(res)) return;
-    const { id } = req.params;
-    const { candidate, session_id } = req.body || {};
-    const url = `https://api.d-id.com/v1/streams/${encodeURIComponent(id)}/ice`;
-    const r = await nodeFetch(url, {
+    const r = await nodeFetch(`https://api.d-id.com/v1/streams/${encodeURIComponent(id)}/ice`, {
       method: 'POST',
-      headers: {
-        Authorization: didAuthHeader(),
-        'Content-Type': 'application/json',
-      },
+      headers: { Authorization: didAuthHeader(), 'Content-Type': 'application/json' },
       body: JSON.stringify({ candidate, session_id }),
       agent: (u) => agentFor(u),
     });
@@ -339,45 +321,32 @@ app.post('/api/did/streams/:id/ice', async (req, res) => {
   }
 });
 
-/**
- * Hablar (texto→voz) dentro del stream.
- * Front manda: { id, session_id, text, lang, voice_id, style, rate, pitch }
- * Proxy a D-ID: POST /v1/streams/:id/talk
- * Body (comúnmente aceptado): script + provider microsoft y voz
- */
-app.post('/api/did/talk-stream', async (req, res) => {
+// Hablar (Microsoft)
+didRouter.post('/talk-stream', async (req, res) => {
+  if (!didEnabled()) return res.status(501).json({ error: 'did_disabled' });
+  const { id, session_id, text, lang, voice_id, style, rate, pitch } = req.body || {};
+  if (!id || !session_id || !text || !voice_id) {
+    return res.status(400).json({ error: 'bad_request', detail: 'id, session_id, text, voice_id requeridos' });
+  }
   try {
-    if (!requireDID(res)) return;
-    const { id, session_id, text, lang, voice_id, style, rate, pitch } = req.body || {};
-    if (!id || !session_id || !text || !voice_id) {
-      return res.status(400).json({ error: 'bad_request', detail: 'id, session_id, text y voice_id son obligatorios' });
-    }
-
-    const url = `https://api.d-id.com/v1/streams/${encodeURIComponent(id)}/talk`;
-    // Cuerpo basado en el esquema de D-ID Streams (proveedor Microsoft)
-    const body = {
-      session_id,
-      script: {
-        type: 'text',
-        input: String(text),
-        provider: {
-          type: 'microsoft',
-          voice_id: String(voice_id),
-          ...(lang ? { language: String(lang) } : {}),
-          ...(style ? { style: String(style) } : {}),
-          ...(rate ? { rate: String(rate) } : {}),
-          ...(pitch ? { pitch: String(pitch) } : {}),
-        },
-      },
-    };
-
-    const r = await nodeFetch(url, {
+    const r = await nodeFetch(`https://api.d-id.com/v1/streams/${encodeURIComponent(id)}/talk`, {
       method: 'POST',
-      headers: {
-        Authorization: didAuthHeader(),
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(body),
+      headers: { Authorization: didAuthHeader(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id,
+        script: {
+          type: 'text',
+          input: String(text),
+          provider: {
+            type: 'microsoft',
+            voice_id: String(voice_id),
+            ...(lang ? { language: String(lang) } : {}),
+            ...(style ? { style: String(style) } : {}),
+            ...(rate ? { rate: String(rate) } : {}),
+            ...(pitch ? { pitch: String(pitch) } : {}),
+          },
+        },
+      }),
       agent: (u) => agentFor(u),
     });
     const textRes = await r.text();
@@ -388,13 +357,25 @@ app.post('/api/did/talk-stream', async (req, res) => {
   }
 });
 
+// Monta el router bajo /api/did
+app.use('/api/did', didRouter);
+
 /* =======================================================================
    4) Stubs de memoria (evitan 404 mientras no implementes persistencia)
    ======================================================================= */
-app.post('/api/memory/sync', (req, res) => res.json({ ok: true }));
-app.post('/api/memory/extract', (req, res) => res.json({ ok: true, notes: [], topics: [], mood: null }));
+app.post('/api/memory/sync', (_req, res) => res.json({ ok: true }));
+app.post('/api/memory/extract', (_req, res) => res.json({ ok: true, notes: [], topics: [], mood: null }));
 
-// ---------- Start ----------
+/* ---------- 404 debug helper ---------- */
+app.use((req, res) => {
+  res.status(404).json({
+    error: 'not_found',
+    path: req.originalUrl,
+    hint: 'Revisa método/ruta. Rutas válidas: /healthz, POST /api/guide-sse, GET/POST /api/tts-openai-stream, /api/did/*, /api/memory/*'
+  });
+});
+
+/* ---------- Start ---------- */
 app.listen(PORT, () => {
   console.log(`Server listening on :${PORT}`);
 });
