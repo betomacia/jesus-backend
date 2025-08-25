@@ -1,15 +1,18 @@
-// index.js
+// index.js — backend robusto para TTS OpenAI streaming + D-ID + Whisper
 const express = require("express");
 const cors = require("cors");
-const nodeFetch = require("node-fetch"); // v2
+const compression = require("compression");
+const nodeFetch = require("node-fetch"); // v2 (Readable de Node)
 require("dotenv").config();
 const multer = require("multer");
 const { Readable } = require("stream");
+const https = require("https");
 const { OpenAI } = require("openai");
 
 /* ============ RUTAS D-ID (WebRTC) ============ */
 const didRouter = require("./routes/did");
 
+/* ============ APP ============ */
 const app = express();
 
 /* ============ LOG SENCILLO ============ */
@@ -27,141 +30,58 @@ app.use(
   })
 );
 
-// Body parsers
+/* ============ COMPRESIÓN ============
+   Comprime respuestas (incluye JSON/HTML).
+   El audio ya va en binario/stream; se envía tal cual.
+===================================== */
+app.use(compression({ threshold: 0 }));
+
+/* ============ BODY PARSERS ============ */
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true, limit: "2mb" }));
 
 /* ============ MONTA /api/did/* (streams, sdp, ice, talk TEXT/AUDIO) ============ */
 app.use("/api/did", didRouter);
 
-/* ============ ENV & HELPERS ============ */
-const fetch = (...args) => nodeFetch(...args); // fuerza node-fetch v2
+/* ============ HELPERS GLOBALES ============ */
+const fetch = (...args) => nodeFetch(...args); // forzamos node-fetch v2
 
 const PUBLIC_BASE_URL =
   process.env.PUBLIC_BASE_URL ||
   "https://jesus-backend-production-1cf4.up.railway.app";
 
-/* ====== OpenAI SDK ====== */
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+/* ============ KEEP-ALIVE AGENT ============ */
+const httpsAgent = new https.Agent({ keepAlive: true });
 
-/* ======================================================================
-   A) CHAT PROXY — /api/guidance  (robusto y sin CORS/clave en el front)
-   ====================================================================== */
-app.post("/api/guidance", async (req, res) => {
-  try {
-    const { persona, prompt, history } = req.body || {};
-    if (!persona || !prompt) {
-      return res.status(400).json({ error: "missing_fields", need: ["persona", "prompt"] });
-    }
-    if (!process.env.OPENAI_API_KEY) {
-      return res.status(501).json({ error: "missing_openai_key" });
-    }
+function withAbortTimeout(ms) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), ms);
+  return { signal: controller.signal, done: () => clearTimeout(t) };
+}
 
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      temperature: 0.6,
-      messages: [
-        { role: "system", content: persona },
-        ...(Array.isArray(history)
-          ? history.slice(-8).map((h) => ({ role: "system", content: `[HIST] ${h}` }))
-          : []),
-        { role: "user", content: prompt },
-      ],
-    });
+/* ============ OPENAI (key normalizada) ============ */
+const RAW_OPENAI_KEY = process.env.OPENAI_API_KEY || "";
+const OPENAI_KEY = RAW_OPENAI_KEY.replace(/\r|\n/g, "").trim();
 
-    const message = completion.choices?.[0]?.message?.content?.trim() || "";
-    return res.json({ message });
-  } catch (e) {
-    const status = e?.status || e?.response?.status || 500;
-    let detail = e?.message || "";
-    if (e?.response?.text) {
-      try {
-        detail = await e.response.text();
-      } catch {}
-    }
-    console.error("openai chat error:", status, detail);
-    return res.status(status).json({ error: "openai_chat_failed", detail });
-  }
-});
+if (!OPENAI_KEY) {
+  console.warn("[WARN] OPENAI_API_KEY vacío o no seteado");
+}
 
-/* =======================================================================================
-   B) TTS OPENAI STREAM (baja latencia) — /api/tts-openai-stream  (mp3/opus/aac/wav)
-   ======================================================================================= */
-app.all("/api/tts-openai-stream", async (req, res) => {
-  try {
-    const text = req.method === "GET" ? (req.query.text ?? "") : (req.body?.text ?? "");
-    const voice = req.method === "GET" ? (req.query.voice ?? "verse") : (req.body?.voice ?? "verse");
-    const format = (req.method === "GET" ? (req.query.format ?? "mp3") : (req.body?.format ?? "mp3")).toString();
+const openai = new OpenAI({ apiKey: OPENAI_KEY });
 
-    const input = String(text || "").trim();
-    if (!input) return res.status(400).json({ error: "no_text" });
-    if (!process.env.OPENAI_API_KEY) return res.status(501).json({ error: "missing_openai_key" });
-
-    const endpoint = "https://api.openai.com/v1/audio/speech";
-    const accept =
-      format === "opus" ? "audio/ogg" :
-      format === "aac"  ? "audio/aac" :
-      format === "wav"  ? "audio/wav" :
-                          "audio/mpeg";
-
-    const r = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-        Accept: accept, // clave para streaming progresivo
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini-tts",
-        voice: String(voice),
-        input,
-        format, // mp3 | opus | aac | wav
-      }),
-    });
-
-    if (!r.ok || !r.body) {
-      const detail = await r.text().catch(() => "");
-      console.error("openai tts stream error", r.status, detail);
-      return res.status(r.status || 502).json({ error: "openai_tts_failed", detail });
-    }
-
-    const contentType =
-      format === "opus" ? "audio/ogg" :
-      format === "aac"  ? "audio/aac" :
-      format === "wav"  ? "audio/wav" :
-                          "audio/mpeg";
-    res.setHeader("Content-Type", contentType);
-    res.setHeader("Cache-Control", "no-store");
-
-    // node-fetch v2: body es Readable
-    const body = r.body;
-    body.pipe(res);
-    body.on("error", (e) => {
-      console.error("tts pipe error", e);
-      if (!res.headersSent) res.status(500).json({ error: "tts_pipe_failed" });
-      else res.end();
-    });
-  } catch (e) {
-    console.error("tts-openai-stream fatal", e?.message || e);
-    return res.status(500).json({ error: "openai_tts_failed_generic" });
-  }
-});
-
-/* =======================================================================================
-   C) TRANSCRIPCIÓN (Whisper) — /api/transcribe
-   ======================================================================================= */
+/* ============ WHISPER (Transcripción) ============ */
 const upload = multer({ limits: { fileSize: 25 * 1024 * 1024 } });
 
 app.post("/api/transcribe", upload.single("file"), async (req, res) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({ error: "No se recibió ningún archivo" });
-    }
+    if (!req.file) return res.status(400).json({ error: "No se recibió ningún archivo" });
+
     const fileName = req.file.originalname || "audio.webm";
 
-    // En tu versión te funcionaba así; lo conservamos:
+    // openai@4 acepta Blob/File. En Node, creamos un File-like desde el buffer.
+    // Si tu runtime no trae global File, construimos vía objeto { name, type, data }.
     const resp = await openai.audio.transcriptions.create({
-      file: { name: fileName, data: req.file.buffer }, // Buffer directo
+      file: { name: fileName, data: req.file.buffer, type: req.file.mimetype || "audio/webm" },
       model: "whisper-1",
     });
 
@@ -172,66 +92,75 @@ app.post("/api/transcribe", upload.single("file"), async (req, res) => {
   }
 });
 
-/* =======================================================================================
-   D) ElevenLabs TTS (compatibilidad) — /api/tts  (opcional)
-   ======================================================================================= */
-app.all("/api/tts", async (req, res) => {
+/* =============================================================================
+   OPENAI TTS STREAMING — /api/tts-openai-stream
+   - GET  /api/tts-openai-stream?text=Hola&voice=verse&format=mp3|opus&lang=es
+   - POST /api/tts-openai-stream { text, voice?, format?, lang? }
+   • model: gpt-4o-mini-tts
+   • Accept (según format):
+       mp3  -> audio/mpeg
+       opus -> audio/ogg (contiene Opus; ~menor latencia/bitrate)
+   • Timeout duro a 8s: si OpenAI tarda, devolvemos 504 y el front puede fallbackear.
+============================================================================= */
+function normalizeTTSParams(method, req) {
+  const src = method === "GET" ? req.query : req.body || {};
+  const text = String(src.text || "").trim();
+  const voice = String(src.voice || "verse").trim();
+  const format = String(src.format || "mp3").toLowerCase().trim();
+  const lang = String(src.lang || "es").trim(); // no se usa aquí, pero útil si luego personalizas voz por idioma
+  return { text, voice, format, lang };
+}
+
+function acceptForFormat(fmt) {
+  if (fmt === "opus") return "audio/ogg"; // OGG/Opus
+  return "audio/mpeg"; // MP3 por compatibilidad universal
+}
+
+app.all("/api/tts-openai-stream", async (req, res) => {
   try {
-    const text =
-      req.method === "GET" ? req.query.text ?? "" : (req.body && req.body.text) ?? "";
-    if (!text || !String(text).trim()) {
-      return res.status(400).json({ error: "no_text" });
-    }
+    const method = req.method.toUpperCase();
+    const { text, voice, format } = normalizeTTSParams(method, req);
 
-    const VOICE_ID = process.env.ELEVENLABS_VOICE_ID;
-    const API_KEY = process.env.ELEVENLABS_API_KEY;
+    if (!text) return res.status(400).json({ error: "no_text" });
+    if (!OPENAI_KEY) return res.status(500).json({ error: "missing_openai_key" });
 
-    if (!VOICE_ID || !API_KEY) {
-      return res.status(500).json({ error: "missing_elevenlabs_env" });
-    }
+    const accept = acceptForFormat(format);
 
-    // Timeout opcional
-    const controller = new AbortController();
-    const timeoutMs = Number(process.env.TTS_TIMEOUT_MS || 30000);
-    const to = setTimeout(() => controller.abort(), timeoutMs);
+    // Timeout duro (8s) para no colgar la UX.
+    const { signal, done } = withAbortTimeout(Number(process.env.OPENAI_TTS_TIMEOUT_MS || 8000));
 
-    const url =
-      `https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}/stream` +
-      `?optimize_streaming_latency=4&output_format=mp3_22050_32`;
-
-    const r = await fetch(url, {
+    const r = await fetch("https://api.openai.com/v1/audio/speech", {
       method: "POST",
       headers: {
-        "xi-api-key": API_KEY,
+        Authorization: `Bearer ${OPENAI_KEY}`,
         "Content-Type": "application/json",
-        Accept: "audio/mpeg",
+        Accept: accept,
       },
       body: JSON.stringify({
-        text: String(text).slice(0, 5000),
-        model_id: "eleven_multilingual_v2",
-        voice_settings: {
-          stability: 0.3,
-          similarity_boost: 0.7,
-          style: 0,
-          use_speaker_boost: false,
-        },
+        model: "gpt-4o-mini-tts",
+        voice: voice,
+        input: text.slice(0, 5000),
+        // En el endpoint oficial, el formato de salida se infiere por Accept;
+        // si quisieras forzar contenedor, puedes incluir "format": "mp3"|"opus"
+        // pero con Accept basta para obtener el mime adecuado.
       }),
-      signal: controller.signal,
-    });
+      agent: httpsAgent,
+      signal,
+    }).finally(done);
 
-    clearTimeout(to);
-
-    if (!r.ok) {
-      const body = await r.text().catch(() => "");
-      console.error("elevenlabs stream error", r.status, body);
-      return res.status(502).json({ error: "elevenlabs_failed", detail: body });
+    if (!r.ok || !r.body) {
+      const detail = await r.text().catch(() => "");
+      console.error("openai tts error", r.status, detail);
+      return res.status(r.status || 502).json({ error: "openai_tts_failed", detail });
     }
 
-    res.setHeader("Content-Type", "audio/mpeg");
+    // Cabeceras de streaming
+    res.setHeader("Content-Type", accept);
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("Accept-Ranges", "bytes");
 
-    const body = r.body; // Readable
+    // node-fetch v2 -> r.body es Node Readable
+    const body = r.body;
     if (body && typeof body.pipe === "function") {
       body.pipe(res);
       body.on("error", (e) => {
@@ -239,7 +168,8 @@ app.all("/api/tts", async (req, res) => {
         if (!res.headersSent) res.status(500).json({ error: "tts_pipe_failed" });
         else res.end();
       });
-    } else if (body && typeof body.getReader === "function" && Readable.fromWeb) {
+    } else if (body && typeof body.getReader === "function") {
+      // WebStream -> convertir a Node Readable
       const nodeReadable = Readable.fromWeb(body);
       nodeReadable.pipe(res);
       nodeReadable.on("error", (e) => {
@@ -248,51 +178,62 @@ app.all("/api/tts", async (req, res) => {
         else res.end();
       });
     } else {
+      // Fallback a buffer completo (menos eficiente pero seguro)
       const buf = await r.buffer();
       res.end(buf);
     }
-  } catch (err) {
-    console.error("tts stream error", err);
-    const msg = (err && err.message) || "";
-    const code = msg.includes("The operation was aborted") ? 504 : 500;
-    return res.status(code).json({ error: "tts_failed", detail: msg });
+  } catch (e) {
+    const aborted = e && (e.name === "AbortError" || String(e).includes("aborted"));
+    if (aborted) {
+      console.error("openai tts timeout");
+      return res.status(504).json({ error: "openai_tts_timeout" });
+    }
+    console.error("openai tts fatal", e);
+    return res.status(500).json({ error: "openai_tts_failed_generic", detail: String(e?.message || e) });
   }
 });
 
-/* =======================================================================================
-   E) Páginas/utilidades de prueba
-   ======================================================================================= */
-app.get("/api/tts-test", (req, res) => {
+/* =========================
+   Endpoint de prueba rápida de TTS
+   ========================= */
+app.get("/api/tts-openai-test", (req, res) => {
   const q = String(req.query.text || "Hola, la paz sea contigo.");
-  const fmt = String(req.query.format || "mp3");
-  const voice = String(req.query.voice || "verse");
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.end(`<!doctype html>
 <html>
-<head><meta charset="utf-8"><title>TTS OpenAI Stream Test</title></head>
+<head><meta charset="utf-8"><title>TTS OpenAI Test</title></head>
 <body style="font-family:sans-serif;padding:24px">
-  <h1>TTS OpenAI Stream Test</h1>
-  <form method="GET" action="/api/tts-test">
+  <h1>TTS OpenAI Test</h1>
+  <form method="GET" action="/api/tts-openai-test">
     <label>Texto:</label>
     <input type="text" name="text" value="${q.replace(/"/g, "&quot;")}" style="width: 420px" />
-    <label>Formato:</label>
-    <select name="format">
-      <option ${fmt==="mp3"?"selected":""}>mp3</option>
-      <option ${fmt==="opus"?"selected":""}>opus</option>
-      <option ${fmt==="aac"?"selected":""}>aac</option>
-      <option ${fmt==="wav"?"selected":""}>wav</option>
-    </select>
-    <label>Voz:</label>
-    <input type="text" name="voice" value="${voice.replace(/"/g, "&quot;")}" />
     <button type="submit">Reproducir</button>
   </form>
-  <p>Endpoint (stream): <code>/api/tts-openai-stream?text=...&voice=${voice}&format=${fmt}</code></p>
-  <audio id="player" controls autoplay src="/api/tts-openai-stream?text=${encodeURIComponent(q)}&voice=${encodeURIComponent(voice)}&format=${encodeURIComponent(fmt)}"></audio>
+  <p>Endpoint: <code>/api/tts-openai-stream?text=...</code></p>
+  <audio id="player" controls autoplay src="/api/tts-openai-stream?format=mp3&voice=verse&text=${encodeURIComponent(q)}"></audio>
 </body>
 </html>`);
 });
 
-/* ====== Endpoint: Bienvenida dinámica ====== */
+/* =========================
+   Diag simple para Chat (SDK)
+   ========================= */
+app.get("/api/diag/openai", async (_req, res) => {
+  try {
+    const resp = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [{ role: "user", content: "Di solo: OK" }],
+    });
+    res.json({ ok: true, message: resp.choices?.[0]?.message?.content || "" });
+  } catch (e) {
+    console.error("diag/openai error:", e);
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+/* =========================
+   Bienvenida dinámica
+   ========================= */
 app.get("/api/welcome", (_req, res) => {
   const greetings = [
     "Buenos días, que la paz de Dios te acompañe hoy.",
@@ -307,13 +248,28 @@ app.get("/api/welcome", (_req, res) => {
   res.json({ text: randomGreeting });
 });
 
-/* ====== Raíz ====== */
+/* =========================
+   Raíz
+   ========================= */
 app.get("/", (_req, res) => {
   res.send("jesus-backend up ✅");
 });
 
-/* ====== Inicio servidor ====== */
+/* =========================
+   Inicio servidor
+   ========================= */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Servidor escuchando en http://localhost:${PORT}`);
 });
+
+/* ======================================================================
+   NOTAS:
+   - OPENAI_API_KEY se normaliza (.replace(/\r|\n/g,'').trim()) para evitar
+     el error "is not a legal HTTP header value".
+   - /api/tts-openai-stream usa Accept según ?format=mp3|opus.
+     En front ya estás auto-detectando: Safari=iOS -> mp3, Chrome/Android -> opus.
+   - Timeout 8s: UX no se cuelga si OpenAI tiene picos; tu front puede hacer fallback.
+   - compression + keep-alive ayudan a bajar TTFB y latencia en general.
+   - Mantuvimos rutas D-ID desde ./routes/did (streams/sdp/ice/talk).
+====================================================================== */
