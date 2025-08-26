@@ -1,16 +1,18 @@
 // routes/did.js
 const express = require("express");
 const nodeFetch = require("node-fetch");
+
 const router = express.Router();
 
 const DID_API_KEY = process.env.DID_API_KEY || "";
 const DID_USER = process.env.DID_USERNAME || "";
 const DID_PASS = process.env.DID_PASSWORD || "";
 
-// Para Streams usar base sin /v1
+// OJO: para Streams la base es SIN /v1
 const DID_BASE = process.env.DID_BASE || "https://api.d-id.com";
 const fetch = (...args) => nodeFetch(...args);
 
+// === Auth header ===
 const authMode = DID_API_KEY
   ? "API_KEY"
   : (DID_USER && DID_PASS ? "USER_PASS" : "MISSING");
@@ -18,201 +20,309 @@ const authMode = DID_API_KEY
 const didHeaders = () => {
   const h = { "Content-Type": "application/json", Accept: "application/json" };
   if (authMode === "API_KEY") {
+    // Basic base64("APIKEY:")
     h.Authorization = "Basic " + Buffer.from(`${DID_API_KEY}:`).toString("base64");
   } else if (authMode === "USER_PASS") {
+    // Basic base64("user:pass")
     h.Authorization = "Basic " + Buffer.from(`${DID_USER}:${DID_PASS}`).toString("base64");
   }
   return h;
 };
 
-// ---------- Debug rápido
+// === Cookie jar en memoria por streamId (para stickiness del ALB) ===
+const cookieJar = new Map(); // streamId -> cookie (string)
+
+// Utilidades
+const validSess = (s) => typeof s === "string" && /^sess_/i.test(s);
+
+// Selftest/diagnóstico rápido
 router.get("/selftest", async (_req, res) => {
   try {
     const r = await fetch(`${DID_BASE}/credits`, { headers: didHeaders() });
     const data = await r.json().catch(() => ({}));
     res.status(r.ok ? 200 : r.status).json({ status: r.status, authMode, base: DID_BASE, data });
   } catch (e) {
-    res.status(500).json({ status: 500, authMode, base: DID_BASE, error: String(e?.message || e) });
+    res.status(500).json({ status: 500, authMode, base: DID_BASE, error: String(e && e.message || e) });
   }
 });
 
-/* ========= 1) CREAR STREAM =========
-POST /api/did/streams { source_url }
--> POST https://api.d-id.com/talks/streams
-   FIX: robust parsing + session_id fallback
-*/
+/* =========================================================
+   1) CREAR STREAM  (maneja redirecciones y guarda cookie)
+   POST /api/did/streams { source_url }
+   -> POST https://api.d-id.com/talks/streams
+   ========================================================= */
 router.post("/streams", async (req, res) => {
   try {
     const { source_url } = req.body || {};
     if (!source_url) return res.status(400).json({ error: "missing_source_url" });
 
-    const r = await fetch(`${DID_BASE}/talks/streams`, {
+    const baseReq = {
       method: "POST",
       headers: didHeaders(),
-      body: JSON.stringify({ source_url })
-    });
+      body: JSON.stringify({ source_url }),
+      redirect: "manual", // seguiremos manualmente si hay 3xx
+    };
 
-    const raw = await r.text(); // <-- leemos texto crudo
-    let data = {};
-    try { data = JSON.parse(raw); } catch { data = {}; }
+    let attempt = 0, maxAttempts = 3, lastStatus = 0, lastBody = "";
+    /** Ejecuta una solicitud y resuelve redirecciones 3xx manualmente */
+    const doRequest = async (url) => {
+      let r = await fetch(url, baseReq);
+      // Saneamos posibles 3xx (ALB/region hop)
+      if (r.status >= 300 && r.status < 400) {
+        const loc = r.headers.get("location");
+        if (loc) r = await fetch(loc, baseReq);
+      }
+      return r;
+    };
 
-    // Campos esperados
-    let { id, session_id, offer, ice_servers } = data || {};
+    let r = await doRequest(`${DID_BASE}/talks/streams`);
 
-    // Hotfix: a veces session_id llega con cookies AWSALB :(
-    const headerSession = r.headers.get("x-session-id");
-    const regexSession = raw && raw.match(/sess_[A-Za-z0-9_-]+/);
-    if (!session_id || !String(session_id).startsWith("sess_")) {
-      session_id = headerSession || (regexSession ? regexSession[0] : session_id);
-      if (!session_id || !String(session_id).startsWith("sess_")) {
-        console.warn("[DID] WARNING: invalid session_id from upstream:", session_id || raw.slice(0, 160));
-        return res.status(502).json({
-          error: "invalid_upstream_session_id",
-          detail: "Upstream returned a non sess_* session_id",
-          upstream_status: r.status,
-          snippet: raw.slice(0, 200)
+    // Si devuelve 5xx o sesión rara, reintenta hasta 3 veces
+    while (attempt < maxAttempts) {
+      lastStatus = r.status;
+      const setCookie = r.headers.get("set-cookie") || "";
+      let data = null;
+      const text = await r.text().catch(() => "");
+      lastBody = text;
+
+      try { data = text ? JSON.parse(text) : null; } catch { data = null; }
+
+      if (r.ok && data && data.id && data.offer) {
+        // Captura cookie de stickiness (si viene)
+        let cookie = "";
+        if (setCookie) {
+          // Nos quedamos con la primera pareja "NOMBRE=valor"
+          cookie = setCookie.split(",")[0].split(";")[0].trim();
+        }
+
+        // D-ID a veces devuelve AWSALB en session_id (bug aguas arriba)
+        if (!validSess(data.session_id)) {
+          console.warn("[DID] WARNING: invalid session_id from upstream:", data.session_id || "(empty)");
+        }
+
+        // Guarda cookie por streamId para reenviarla en sdp/ice
+        if (cookie) cookieJar.set(data.id, cookie);
+
+        return res.json({
+          ...data,
+          // Para debug opcional del cliente
+          cookie: cookie || undefined,
+          upstream_status: lastStatus
         });
       }
+
+      // No OK: pequeño backoff y reintento
+      attempt++;
+      if (attempt >= maxAttempts) break;
+      await new Promise(r => setTimeout(r, 250 * attempt));
+      r = await doRequest(`${DID_BASE}/talks/streams`);
     }
 
-    // También normalizamos offer si vino como string
-    if (offer && typeof offer === "string") {
-      offer = { type: "offer", sdp: offer };
-    }
-
-    return res.status(r.ok ? 200 : r.status).json({ id, session_id, offer, ice_servers });
+    console.error("[DID] streams create failed", lastStatus, lastBody || "");
+    return res.status(502).json({ error: "streams_create_failed", upstream_status: lastStatus, detail: safeJSON(lastBody) });
   } catch (e) {
     console.error("streams create error", e);
     return res.status(500).json({ error: "streams_create_error" });
   }
 });
 
-/* ========= 2) ENVIAR SDP ANSWER =========
-POST /api/did/streams/:id/sdp { answer, session_id }
--> POST https://api.d-id.com/talks/streams/{id}/sdp
-*/
+/* =========================================================
+   2) ENVIAR SDP ANSWER
+   POST /api/did/streams/:id/sdp { answer, session_id }
+   -> POST https://api.d-id.com/talks/streams/{id}/sdp
+   ========================================================= */
 router.post("/streams/:id/sdp", async (req, res) => {
   try {
     const { id } = req.params;
     const { answer, session_id } = req.body || {};
     if (!id || !answer || !session_id) return res.status(400).json({ error: "missing_fields" });
 
-    if (!String(session_id).startsWith("sess_")) {
+    const cookie = cookieJar.get(id) || "";
+    if (!validSess(session_id)) {
       console.warn("[DID] BAD session_id on /sdp POST:", session_id);
-      return res.status(400).json({ error: "bad_session_id" });
     }
 
     const r = await fetch(`${DID_BASE}/talks/streams/${id}/sdp`, {
       method: "POST",
-      headers: didHeaders(),
+      headers: {
+        ...didHeaders(),
+        ...(cookie ? { Cookie: cookie } : {}),
+      },
       body: JSON.stringify({ answer, session_id })
     });
 
-    const data = await r.json().catch(() => ({}));
-    return res.status(r.ok ? 200 : r.status).json(data);
+    const txt = await r.text().catch(() => "");
+    const data = parseJSON(txt);
+    return res.status(r.ok ? 200 : r.status).json(data ?? { raw: txt });
   } catch (e) {
     console.error("sdp post error", e);
     return res.status(500).json({ error: "sdp_failed" });
   }
 });
 
-/* ========= 3) ENVIAR ICE LOCAL =========
-POST /api/did/streams/:id/ice { candidate, sdpMid?, sdpMLineIndex?, session_id }
--> POST https://api.d-id.com/talks/streams/{id}/ice
-*/
+/* =========================================================
+   3) ENVIAR ICE (local -> upstream)
+   POST /api/did/streams/:id/ice { candidate, sdpMid, sdpMLineIndex, session_id }
+   -> POST https://api.d-id.com/talks/streams/{id}/ice
+   ========================================================= */
 router.post("/streams/:id/ice", async (req, res) => {
   try {
     const { id } = req.params;
     const { candidate, sdpMid, sdpMLineIndex, session_id } = req.body || {};
-    if (!id || !candidate || !session_id) return res.status(400).json({ error: "missing_fields" });
-
-    if (!String(session_id).startsWith("sess_")) {
-      console.warn("[DID] BAD session_id on /ice POST:", session_id);
-      return res.status(400).json({ error: "bad_session_id" });
+    if (!id || !candidate || session_id == null) {
+      return res.status(400).json({ error: "missing_fields" });
     }
 
     const payload = { candidate, session_id };
     if (sdpMid != null) payload.sdpMid = sdpMid;
     if (sdpMLineIndex != null) payload.sdpMLineIndex = sdpMLineIndex;
 
+    const cookie = cookieJar.get(id) || "";
+    if (!validSess(session_id)) {
+      console.warn("[DID] BAD session_id on /ice POST:", session_id);
+    }
+
     const r = await fetch(`${DID_BASE}/talks/streams/${id}/ice`, {
       method: "POST",
-      headers: didHeaders(),
+      headers: {
+        ...didHeaders(),
+        ...(cookie ? { Cookie: cookie } : {}),
+      },
       body: JSON.stringify(payload)
     });
 
-    const data = await r.json().catch(() => ({}));
-    return res.status(r.ok ? 200 : r.status).json(data);
+    const txt = await r.text().catch(() => "");
+    const data = parseJSON(txt);
+    return res.status(r.ok ? 200 : r.status).json(data ?? { raw: txt });
   } catch (e) {
     console.error("ice post error", e);
     return res.status(500).json({ error: "ice_failed" });
   }
 });
 
-/* ========= 3.b) RECIBIR ICE REMOTO (POLL) =========
-GET /api/did/streams/:id/ice?session_id=sess_...
--> GET https://api.d-id.com/talks/streams/{id}/ice?session_id=...
-*/
+/* =========================================================
+   3b) OBTENER ICE REMOTO (algunos ejemplos de D-ID lo usan)
+   GET /api/did/streams/:id/ice?session_id=...
+   -> GET https://api.d-id.com/talks/streams/{id}/ice?session_id=...
+   ========================================================= */
 router.get("/streams/:id/ice", async (req, res) => {
   try {
     const { id } = req.params;
-    const session_id = String(req.query.session_id || "");
-    if (!id || !session_id) return res.status(400).json({ error: "missing_fields" });
-    if (!session_id.startsWith("sess_")) {
+    const { session_id } = req.query || {};
+    if (!id || !session_id) {
+      return res.status(400).json({ error: "missing_fields" });
+    }
+    const cookie = cookieJar.get(id) || "";
+    if (!validSess(String(session_id))) {
       console.warn("[DID] BAD session_id on /ice GET:", session_id);
-      return res.status(400).json({ error: "bad_session_id" });
     }
 
-    const url = `${DID_BASE}/talks/streams/${id}/ice?session_id=${encodeURIComponent(session_id)}`;
-    const r = await fetch(url, { headers: didHeaders() });
+    const url = `${DID_BASE}/talks/streams/${id}/ice?session_id=${encodeURIComponent(String(session_id))}`;
+    const r = await fetch(url, {
+      method: "GET",
+      headers: {
+        ...didHeaders(),
+        ...(cookie ? { Cookie: cookie } : {}),
+      }
+    });
 
-    // D-ID devuelve { candidates: [...] }
-    const data = await r.json().catch(() => ({}));
-    return res.status(r.ok ? 200 : r.status).json(data);
+    // El upstream devuelve JSON o texto NDJSON: preservamos tal cual
+    const txt = await r.text().catch(() => "");
+    res.status(r.ok ? 200 : r.status).send(txt);
   } catch (e) {
     console.error("ice get error", e);
     return res.status(500).json({ error: "ice_get_failed" });
   }
 });
 
-/* ========= 4) HABLAR (texto o audio_url) =========
-POST /api/did/streams/:id/talk  { session_id, script:{...} }
--> POST https://api.d-id.com/talks/streams/{id}
-*/
+/* =========================================================
+   4) HABLAR (texto o audio_url)
+   POST /api/did/streams/:id/talk { session_id, script:{...} }
+   -> POST https://api.d-id.com/talks/streams/{id}
+   ========================================================= */
 router.post("/streams/:id/talk", async (req, res) => {
   try {
     const { id } = req.params;
     const { session_id, script } = req.body || {};
-    if (!id || !session_id || !script) return res.status(400).json({ error: "missing_fields" });
-    if (!String(session_id).startsWith("sess_")) {
+    if (!id || !session_id || !script) {
+      return res.status(400).json({ error: "missing_fields" });
+    }
+
+    const cookie = cookieJar.get(id) || "";
+    if (!validSess(session_id)) {
       console.warn("[DID] BAD session_id on /talk POST:", session_id);
-      return res.status(400).json({ error: "bad_session_id" });
     }
 
     const r = await fetch(`${DID_BASE}/talks/streams/${id}`, {
       method: "POST",
-      headers: didHeaders(),
+      headers: {
+        ...didHeaders(),
+        ...(cookie ? { Cookie: cookie } : {}),
+      },
       body: JSON.stringify({ session_id, script })
     });
 
-    const data = await r.json().catch(() => ({}));
-    return res.status(r.ok ? 200 : r.status).json(data);
+    const txt = await r.text().catch(() => "");
+    const data = parseJSON(txt);
+    return res.status(r.ok ? 200 : r.status).json(data ?? { raw: txt });
   } catch (e) {
     console.error("talk post error", e);
     return res.status(500).json({ error: "talk_failed" });
   }
 });
 
-/* ========= 5) CRÉDITOS ========= */
+/* =========================================================
+   5) CERRAR STREAM
+   DELETE /api/did/streams/:id  { session_id }
+   -> DELETE https://api.d-id.com/talks/streams/{id}
+   ========================================================= */
+router.delete("/streams/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { session_id } = req.body || {};
+    if (!id || !session_id) {
+      return res.status(400).json({ error: "missing_fields" });
+    }
+    const cookie = cookieJar.get(id) || "";
+
+    const r = await fetch(`${DID_BASE}/talks/streams/${id}`, {
+      method: "DELETE",
+      headers: {
+        ...didHeaders(),
+        ...(cookie ? { Cookie: cookie } : {}),
+      },
+      body: JSON.stringify({ session_id })
+    });
+
+    // Limpia cookie jar
+    cookieJar.delete(id);
+
+    const txt = await r.text().catch(() => "");
+    const data = parseJSON(txt);
+    return res.status(r.ok ? 200 : r.status).json(data ?? { raw: txt });
+  } catch (e) {
+    console.error("delete stream error", e);
+    return res.status(500).json({ error: "delete_stream_failed" });
+  }
+});
+
+/* =========================================================
+   6) CRÉDITOS (debug)
+   ========================================================= */
 router.get("/credits", async (_req, res) => {
   try {
     const r = await fetch(`${DID_BASE}/credits`, { headers: didHeaders() });
-    const data = await r.json().catch(() => ({}));
-    return res.status(r.ok ? 200 : r.status).json(data);
+    const txt = await r.text().catch(() => "");
+    const data = parseJSON(txt);
+    return res.status(r.ok ? 200 : r.status).json(data ?? { raw: txt });
   } catch (e) {
     console.error("credits error", e);
     return res.status(500).json({ error: "credits_failed" });
   }
 });
+
+/* Helpers */
+function parseJSON(s) { try { return JSON.parse(s); } catch { return null; } }
+function safeJSON(s) { try { return JSON.parse(s); } catch { return s; } }
 
 module.exports = router;
