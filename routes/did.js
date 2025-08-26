@@ -201,7 +201,7 @@ router.post("/streams/:id/ice", async (req, res) => {
 });
 
 /* =========================================================
-   3b) OBTENER ICE REMOTO (algunos ejemplos de D-ID lo usan)
+   3b) OBTENER ICE REMOTO
    GET /api/did/streams/:id/ice?session_id=...
    -> GET https://api.d-id.com/talks/streams/{id}/ice?session_id=...
    ========================================================= */
