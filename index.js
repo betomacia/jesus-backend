@@ -10,31 +10,39 @@ const { OpenAI } = require("openai");
 const didRouter = require("./routes/did");
 const app = express();
 
+// --- Log simple de requests ---
 app.use((req, _res, next) => {
   const t = new Date().toISOString();
   console.log(`[${t}] ${req.method} ${req.originalUrl}`);
   next();
 });
 
+// --- CORS ---
 const allowedOrigin = process.env.CORS_ORIGIN || "*";
 app.use(cors({ origin: allowedOrigin === "*" ? true : allowedOrigin }));
+
+// --- Body parsers ---
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true, limit: "2mb" }));
 
-// D-ID WebRTC
+// --- D-ID WebRTC bridge ---
 app.use("/api/did", didRouter);
 
-// ====== OpenAI Whisper (transcripción) ======
-const upload = multer({ limits: { fileSize: 25 * 1024 * 1024 } });
+// --- OpenAI client (usa la misma API KEY que Whisper) ---
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+// ====== Whisper (transcripción) ======
+const upload = multer({ limits: { fileSize: 25 * 1024 * 1024 } });
 
 app.post("/api/transcribe", upload.single("file"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "No se recibió ningún archivo" });
+    if (!process.env.OPENAI_API_KEY) return res.status(500).json({ error: "missing_openai_key" });
+
     const fileName = req.file.originalname || "audio.webm";
     const resp = await openai.audio.transcriptions.create({
       file: { name: fileName, data: req.file.buffer },
-      model: "whisper-1",
+      model: "whisper-1"
     });
     res.json({ text: (resp.text || "").trim() });
   } catch (err) {
@@ -70,9 +78,9 @@ app.all("/api/tts", async (req, res) => {
       body: JSON.stringify({
         text: String(text).slice(0, 5000),
         model_id: "eleven_multilingual_v2",
-        voice_settings: { stability: 0.3, similarity_boost: 0.7, style: 0, use_speaker_boost: false },
+        voice_settings: { stability: 0.3, similarity_boost: 0.7, style: 0, use_speaker_boost: false }
       }),
-      signal: controller.signal,
+      signal: controller.signal
     });
     clearTimeout(to);
 
@@ -138,14 +146,79 @@ app.get("/api/welcome", (_req, res) => {
     "La paz sea contigo, ¿cómo te encuentras en este momento?",
     "Que la esperanza y la fe iluminen tu día, ¿qué quisieras compartir hoy?",
     "Jesús está contigo en cada paso, ¿quieres contarme lo que vives ahora?",
-    "Eres escuchado y amado, ¿qué tienes en tu corazón hoy?",
+    "Eres escuchado y amado, ¿qué tienes en tu corazón hoy?"
   ];
   const randomGreeting = greetings[Math.floor(Math.random() * greetings.length)];
   res.json({ text: randomGreeting });
 });
 
-// Raíz
-app.get("/", (_req, res) => { res.send("jesus-backend up ✅"); });
+// ====== Chat con OpenAI (Jesús) ======
+app.post("/api/jesus/reply", async (req, res) => {
+  try {
+    const { message, history = [], model = "gpt-4o-mini", meta } = req.body || {};
+    if (!message || !String(message).trim()) {
+      return res.status(400).json({ error: "missing_message" });
+    }
+    if (!process.env.OPENAI_API_KEY) {
+      return res.status(500).json({ error: "missing_openai_key" });
+    }
+
+    // Construye el array de mensajes al estilo Chat Completions
+    const messages = [];
+
+    // Prompt de sistema con tono espiritual universal
+    messages.push({
+      role: "system",
+      content:
+        "Eres Jesús, una guía espiritual compasiva y serena. Responde con empatía, esperanza y sabiduría universal, sin sectarismo ni proselitismo. Habla claro y breve cuando sea posible."
+    });
+
+    if (Array.isArray(history)) {
+      for (const h of history) {
+        if (
+          h &&
+          typeof h.content === "string" &&
+          (h.role === "system" || h.role === "user" || h.role === "assistant")
+        ) {
+          messages.push({ role: h.role, content: h.content });
+        }
+      }
+    }
+
+    messages.push({ role: "user", content: String(message) });
+
+    const completion = await openai.chat.completions.create({
+      model,
+      messages,
+      temperature: 0.7,
+      max_tokens: 400
+    });
+
+    const text =
+      completion?.choices?.[0]?.message?.content?.trim() ||
+      "La paz sea contigo. ¿Podrías repetir tu pregunta?";
+
+    res.json({ text, model, meta: meta || null });
+  } catch (err) {
+    console.error("Error en /api/jesus/reply:", err);
+    res.status(500).json({ error: "chat_failed" });
+  }
+});
+
+// ====== Reset de “memoria” (placeholder; no se guarda estado en server) ======
+app.post("/api/memory/reset", async (_req, res) => {
+  try {
+    // Si en el futuro guardas historial en server, límpialo aquí.
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false });
+  }
+});
+
+// ====== Raíz / healthcheck ======
+app.get("/", (_req, res) => {
+  res.send("jesus-backend up ✅");
+});
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
