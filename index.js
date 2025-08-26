@@ -1,7 +1,7 @@
 // index.js
 const express = require("express");
 const cors = require("cors");
-const nodeFetch = require("node-fetch"); // Usamos SIEMPRE node-fetch v2 (Readable de Node)
+const nodeFetch = require("node-fetch"); // node-fetch v2
 require("dotenv").config();
 const multer = require("multer");
 const { Readable } = require("stream");
@@ -31,11 +31,11 @@ app.use(
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true, limit: "2mb" }));
 
-/* ============ MONTA /api/did/* (streams, sdp, ice, talk TEXT/AUDIO) ============ */
+/* ============ MONTA /api/did/* (streams, sdp, ice, talk, talk-el) ============ */
 app.use("/api/did", didRouter);
 
 /* ============ ENV & HELPERS ============ */
-const fetch = (...args) => nodeFetch(...args); // fuerza node-fetch v2
+const fetch = (...args) => nodeFetch(...args); // node-fetch v2
 
 const PUBLIC_BASE_URL =
   process.env.PUBLIC_BASE_URL ||
@@ -51,12 +51,8 @@ app.post("/api/transcribe", upload.single("file"), async (req, res) => {
       return res.status(400).json({ error: "No se recibió ningún archivo" });
     }
 
-    // OpenAI SDK acepta Buffer directamente mediante File en Node >=18, pero
-    // en CJS sencillo creamos un objeto parecido a File usando form-data internamente.
-    // Para evitar líos, usamos el método base: pasamos el Buffer dentro de un Blob-like.
     const fileName = req.file.originalname || "audio.webm";
 
-    // La lib openai@4 acepta Buffer:
     const resp = await openai.audio.transcriptions.create({
       file: { name: fileName, data: req.file.buffer },
       model: "whisper-1",
@@ -88,7 +84,6 @@ app.all("/api/tts", async (req, res) => {
       return res.status(500).json({ error: "missing_elevenlabs_env" });
     }
 
-    // Timeout opcional para evitar cuelgues
     const controller = new AbortController();
     const timeoutMs = Number(process.env.TTS_TIMEOUT_MS || 30000);
     const to = setTimeout(() => controller.abort(), timeoutMs);
@@ -125,13 +120,10 @@ app.all("/api/tts", async (req, res) => {
       return res.status(502).json({ error: "elevenlabs_failed", detail: body });
     }
 
-    // Cabeceras para entregar MP3 por streaming
     res.setHeader("Content-Type", "audio/mpeg");
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("Accept-Ranges", "bytes");
 
-    // node-fetch v2 -> r.body es Node Readable
-    // Si en algún futuro llegara a ser WebStream, lo convertimos.
     const body = r.body;
     if (body && typeof body.pipe === "function") {
       body.pipe(res);
@@ -141,7 +133,6 @@ app.all("/api/tts", async (req, res) => {
         else res.end();
       });
     } else if (body && typeof body.getReader === "function") {
-      // Web Stream -> convertir a Node Readable
       const nodeReadable = Readable.fromWeb(body);
       nodeReadable.pipe(res);
       nodeReadable.on("error", (e) => {
@@ -150,7 +141,6 @@ app.all("/api/tts", async (req, res) => {
         else res.end();
       });
     } else {
-      // Fallback: buffer completo (menos eficiente, pero seguro)
       const buf = await r.buffer();
       res.end(buf);
     }
@@ -162,7 +152,7 @@ app.all("/api/tts", async (req, res) => {
   }
 });
 
-/* ====== Endpoint de prueba para escuchar fácilmente ====== */
+/* ====== Endpoint de prueba para escuchar ====== */
 app.get("/api/tts-test", (req, res) => {
   const q = String(req.query.text || "Hola, la paz sea contigo.");
   res.setHeader("Content-Type", "text/html; charset=utf-8");
