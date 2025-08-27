@@ -1,144 +1,248 @@
-import express from "express";
+// routes/did.js  (CommonJS)
+const express = require("express");
+const nodeFetch = require("node-fetch");
 
 const router = express.Router();
-const DID_BASE = "https://api.d-id.com/talks/streams";
-const AUTH = "Basic " + Buffer.from((process.env.DID_API_KEY || "") + ":").toString("base64");
 
-// Guardamos streamId -> sessionId (sess_...)
-const streamSessions = new Map<string, string>();
+const DID_API_KEY = process.env.DID_API_KEY || "";
+const DID_USER = process.env.DID_USERNAME || "";
+const DID_PASS = process.env.DID_PASSWORD || "";
+const DID_BASE = process.env.DID_BASE || "https://api.d-id.com";
+const fetch = (...args) => nodeFetch(...args);
 
-async function didFetch(path: string, init?: RequestInit) {
-  const r = await fetch(`${DID_BASE}${path}`, {
-    ...init,
-    headers: {
-      "Authorization": AUTH,
-      "Content-Type": "application/json",
-      ...(init?.headers || {}),
-    },
-  });
-  return r;
-}
+// === Auth header ===
+const authMode = DID_API_KEY
+  ? "API_KEY"
+  : (DID_USER && DID_PASS ? "USER_PASS" : "MISSING");
 
-// Crear stream
-router.post("/streams", async (req, res) => {
+const didHeaders = () => {
+  const h = { "Content-Type": "application/json", Accept: "application/json" };
+  if (authMode === "API_KEY") {
+    h.Authorization = "Basic " + Buffer.from(`${DID_API_KEY}:`).toString("base64");
+  } else if (authMode === "USER_PASS") {
+    h.Authorization = "Basic " + Buffer.from(`${DID_USER}:${DID_PASS}`).toString("base64");
+  }
+  return h;
+};
+
+// Cookie jar en memoria por streamId
+const cookieJar = new Map();
+const validSess = (s) => typeof s === "string" && /^sess_/i.test(s);
+
+router.get("/selftest", async (_req, res) => {
   try {
-    const { source_url } = req.body || {};
-    const r = await didFetch("", {
-      method: "POST",
-      body: JSON.stringify({ source_url }),
-    });
-    const data = await r.json();
-    // data esperado: { id, offer, ice_servers, session_id }
-    // Asegurar que obtengamos el verdadero sess_...
-    let sess = data?.session_id as string | undefined;
-
-    if (!sess || !/^sess_/i.test(sess)) {
-      // Algunos proxies no pasan session_id en JSON; intenta extraer de Set-Cookie si existiera
-      const setCookie = r.headers.get("set-cookie") || "";
-      const m = setCookie.match(/(sess_[^;]+)/i);
-      if (m) sess = m[1];
-    }
-    if (!sess || !/^sess_/i.test(sess)) {
-      console.warn("[DID] create: no valid session_id in response");
-    }
-
-    if (data?.id && sess) streamSessions.set(String(data.id), sess);
-
-    res.status(r.status).json({
-      id: data?.id,
-      offer: data?.offer,
-      ice_servers: data?.ice_servers,
-      session_id: sess, // devolvemos el sess_… correcto
-    });
-  } catch (e: any) {
-    res.status(500).json({ error: "streams_create_failed", detail: e?.message || String(e) });
+    const r = await fetch(`${DID_BASE}/credits`, { headers: didHeaders() });
+    const data = await r.json().catch(() => ({}));
+    res.status(r.ok ? 200 : r.status).json({ status: r.status, authMode, base: DID_BASE, data });
+  } catch (e) {
+    res.status(500).json({ status: 500, authMode, base: DID_BASE, error: String(e && e.message || e) });
   }
 });
 
-// Postear SDP answer
+router.post("/streams", async (req, res) => {
+  try {
+    const { source_url } = req.body || {};
+    if (!source_url) return res.status(400).json({ error: "missing_source_url" });
+
+    const baseReq = {
+      method: "POST",
+      headers: didHeaders(),
+      body: JSON.stringify({ source_url }),
+      redirect: "manual",
+    };
+
+    const doRequest = async (url) => {
+      let r = await fetch(url, baseReq);
+      if (r.status >= 300 && r.status < 400) {
+        const loc = r.headers.get("location");
+        if (loc) r = await fetch(loc, baseReq);
+      }
+      return r;
+    };
+
+    let attempt = 0, maxAttempts = 3, lastStatus = 0, lastBody = "";
+    let r = await doRequest(`${DID_BASE}/talks/streams`);
+
+    while (attempt < maxAttempts) {
+      lastStatus = r.status;
+      const setCookie = r.headers.get("set-cookie") || "";
+      const text = await r.text().catch(() => "");
+      lastBody = text;
+
+      let data = null;
+      try { data = text ? JSON.parse(text) : null; } catch { data = null; }
+
+      if (r.ok && data && data.id && data.offer) {
+        let cookie = "";
+        if (setCookie) cookie = setCookie.split(",")[0].split(";")[0].trim();
+
+        if (!validSess(data.session_id)) {
+          console.warn("[DID] WARNING: invalid session_id from upstream y no hay sess_ en cookies:", setCookie || "(sin set-cookie)");
+        }
+        if (cookie) cookieJar.set(data.id, cookie);
+
+        return res.json({
+          ...data,
+          cookie: cookie || undefined,
+          upstream_status: lastStatus
+        });
+      }
+
+      attempt++;
+      if (attempt >= maxAttempts) break;
+      await new Promise(r => setTimeout(r, 250 * attempt));
+      r = await doRequest(`${DID_BASE}/talks/streams`);
+    }
+
+    console.error("[DID] streams create failed", lastStatus, lastBody || "");
+    return res.status(502).json({ error: "streams_create_failed", upstream_status: lastStatus, detail: safeJSON(lastBody) });
+  } catch (e) {
+    console.error("streams create error", e);
+    return res.status(500).json({ error: "streams_create_error" });
+  }
+});
+
 router.post("/streams/:id/sdp", async (req, res) => {
   try {
     const { id } = req.params;
     const { answer, session_id } = req.body || {};
-    const sid = session_id || streamSessions.get(id);
-    if (!sid) return res.status(400).json({ error: "missing_session_id" });
+    if (!id || !answer || !session_id) return res.status(400).json({ error: "missing_fields" });
 
-    const r = await didFetch(`/${id}/sdp?session_id=${encodeURIComponent(sid)}`, {
+    const cookie = cookieJar.get(id) || "";
+    if (!validSess(session_id)) {
+      console.warn("[DID] BAD session_id on /sdp POST:", session_id);
+    }
+
+    const r = await fetch(`${DID_BASE}/talks/streams/${id}/sdp`, {
       method: "POST",
-      body: JSON.stringify({ answer }),
+      headers: { ...didHeaders(), ...(cookie ? { Cookie: cookie } : {}) },
+      body: JSON.stringify({ answer, session_id })
     });
-    const txt = await r.text();
-    res.status(r.status).type(r.headers.get("content-type") || "text/plain").send(txt);
-  } catch (e: any) {
-    res.status(500).json({ error: "sdp_failed", detail: e?.message || String(e) });
+
+    const txt = await r.text().catch(() => "");
+    const data = parseJSON(txt);
+    return res.status(r.ok ? 200 : r.status).json(data ?? { raw: txt });
+  } catch (e) {
+    console.error("sdp post error", e);
+    return res.status(500).json({ error: "sdp_failed" });
   }
 });
 
-// Enviar ICE LOCAL (del browser) a D-ID
 router.post("/streams/:id/ice", async (req, res) => {
   try {
     const { id } = req.params;
-    const { candidate, session_id } = req.body || {};
-    const sid = session_id || streamSessions.get(id);
-    if (!sid) return res.status(400).json({ error: "missing_session_id" });
+    const { candidate, sdpMid, sdpMLineIndex, session_id } = req.body || {};
+    if (!id || !candidate || session_id == null) return res.status(400).json({ error: "missing_fields" });
 
-    const r = await didFetch(`/${id}/ice?session_id=${encodeURIComponent(sid)}`, {
+    const payload = { candidate, session_id };
+    if (sdpMid != null) payload.sdpMid = sdpMid;
+    if (sdpMLineIndex != null) payload.sdpMLineIndex = sdpMLineIndex;
+
+    const cookie = cookieJar.get(id) || "";
+    if (!validSess(session_id)) {
+      console.warn("[DID] BAD session_id on /ice POST:", session_id);
+    }
+
+    const r = await fetch(`${DID_BASE}/talks/streams/${id}/ice`, {
       method: "POST",
-      body: JSON.stringify({ candidate }),
+      headers: { ...didHeaders(), ...(cookie ? { Cookie: cookie } : {}) },
+      body: JSON.stringify(payload)
     });
-    const txt = await r.text();
-    res.status(r.status).type(r.headers.get("content-type") || "text/plain").send(txt);
-  } catch (e: any) {
-    res.status(500).json({ error: "ice_post_failed", detail: e?.message || String(e) });
+
+    const txt = await r.text().catch(() => "");
+    const data = parseJSON(txt);
+    return res.status(r.ok ? 200 : r.status).json(data ?? { raw: txt });
+  } catch (e) {
+    console.error("ice post error", e);
+    return res.status(500).json({ error: "ice_failed" });
   }
 });
 
-// Obtener ICE REMOTOs de D-ID (para agregar en el RTCPeerConnection)
 router.get("/streams/:id/ice", async (req, res) => {
   try {
     const { id } = req.params;
-    const sid =
-      (req.query.session_id as string | undefined) ||
-      streamSessions.get(id);
+    const { session_id } = req.query || {};
+    if (!id || !session_id) return res.status(400).json({ error: "missing_fields" });
 
-    if (!sid) {
-      // Sin session no hay candidatos remotos
-      return res.json({ candidates: [] });
+    const cookie = cookieJar.get(id) || "";
+    if (!validSess(String(session_id))) {
+      console.warn("[DID] BAD session_id on /ice GET:", session_id);
     }
 
-    const r = await didFetch(`/${id}/ice?session_id=${encodeURIComponent(sid)}`, {
-      method: "GET",
-    });
+    const url = `${DID_BASE}/talks/streams/${id}/ice?session_id=${encodeURIComponent(String(session_id))}`;
+    const r = await fetch(url, { method: "GET", headers: { ...didHeaders(), ...(cookie ? { Cookie: cookie } : {}) } });
 
-    if (!r.ok) {
-      const txt = await r.text();
-      console.warn("[DID] get ICE not ok:", r.status, txt);
-      return res.json({ candidates: [] });
-    }
-    const data = await r.json(); // { candidates: [...] }
-    res.json(data || { candidates: [] });
-  } catch (e: any) {
-    res.status(200).json({ candidates: [] });
+    const txt = await r.text().catch(() => "");
+    // D-ID puede devolver NDJSON; lo reenviamos tal cual (texto)
+    res.status(r.ok ? 200 : r.status).send(txt);
+  } catch (e) {
+    console.error("ice get error", e);
+    return res.status(500).json({ error: "ice_get_failed" });
   }
 });
 
-// Hablar por texto
-router.post("/streams/:id/talk", async (req, res) => {
+router.post("/streams/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    const { script, session_id } = req.body || {};
-    const sid = session_id || streamSessions.get(id);
-    if (!sid) return res.status(400).json({ error: "missing_session_id" });
+    const { session_id, script } = req.body || {};
+    if (!id || !session_id || !script) return res.status(400).json({ error: "missing_fields" });
 
-    const r = await didFetch(`/${id}?session_id=${encodeURIComponent(sid)}`, {
+    const cookie = cookieJar.get(id) || "";
+    if (!validSess(session_id)) {
+      console.warn("[DID] BAD session_id on /talk POST:", session_id);
+    }
+
+    const r = await fetch(`${DID_BASE}/talks/streams/${id}`, {
       method: "POST",
-      body: JSON.stringify({ script }),
+      headers: { ...didHeaders(), ...(cookie ? { Cookie: cookie } : {}) },
+      body: JSON.stringify({ session_id, script })
     });
-    const txt = await r.text();
-    res.status(r.status).type(r.headers.get("content-type") || "text/plain").send(txt);
-  } catch (e: any) {
-    res.status(500).json({ error: "talk_failed", detail: e?.message || String(e) });
+
+    const txt = await r.text().catch(() => "");
+    const data = parseJSON(txt);
+    return res.status(r.ok ? 200 : r.status).json(data ?? { raw: txt });
+  } catch (e) {
+    console.error("talk post error", e);
+    return res.status(500).json({ error: "talk_failed" });
   }
 });
 
-export default router;
+router.delete("/streams/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { session_id } = req.body || {};
+    if (!id || !session_id) return res.status(400).json({ error: "missing_fields" });
+
+    const cookie = cookieJar.get(id) || "";
+    const r = await fetch(`${DID_BASE}/talks/streams/${id}`, {
+      method: "DELETE",
+      headers: { ...didHeaders(), ...(cookie ? { Cookie: cookie } : {}) },
+      body: JSON.stringify({ session_id })
+    });
+
+    cookieJar.delete(id);
+    const txt = await r.text().catch(() => "");
+    const data = parseJSON(txt);
+    return res.status(r.ok ? 200 : r.status).json(data ?? { raw: txt });
+  } catch (e) {
+    console.error("delete stream error", e);
+    return res.status(500).json({ error: "delete_stream_failed" });
+  }
+});
+
+router.get("/credits", async (_req, res) => {
+  try {
+    const r = await fetch(`${DID_BASE}/credits`, { headers: didHeaders() });
+    const txt = await r.text().catch(() => "");
+    const data = parseJSON(txt);
+    return res.status(r.ok ? 200 : r.status).json(data ?? { raw: txt });
+  } catch (e) {
+    console.error("credits error", e);
+    return res.status(500).json({ error: "credits_failed" });
+  }
+});
+
+function parseJSON(s) { try { return JSON.parse(s); } catch { return null; } }
+function safeJSON(s) { try { return JSON.parse(s); } catch { return s; } }
+
+module.exports = router;
