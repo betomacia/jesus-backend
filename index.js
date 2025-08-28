@@ -1,212 +1,181 @@
-// index.js
+// server.js
 const express = require("express");
 const cors = require("cors");
-const nodeFetch = require("node-fetch");
+const bodyParser = require("body-parser");
+const OpenAI = require("openai"); // SDK oficial
 require("dotenv").config();
-const multer = require("multer");
-const { Readable } = require("stream");
-const { OpenAI } = require("openai");
 
-const didRouter = require("./routes/did");
 const app = express();
+app.use(cors());
+app.use(bodyParser.json());
 
-// Log simple
-app.use((req, _res, next) => {
-  const t = new Date().toISOString();
-  console.log(`[${t}] ${req.method} ${req.originalUrl}`);
-  next();
-});
-
-// CORS
-const allowedOrigin = process.env.CORS_ORIGIN || "*";
-app.use(cors({ origin: allowedOrigin === "*" ? true : allowedOrigin }));
-app.use(express.json({ limit: "2mb" }));
-app.use(express.urlencoded({ extended: true, limit: "2mb" }));
-
-// D-ID WebRTC
-app.use("/api/did", didRouter);
-
-// ==== OpenAI client ====
+// ---- OpenAI client ----
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// ====== Whisper (transcripción) ======
-const upload = multer({ limits: { fileSize: 25 * 1024 * 1024 } });
-app.post("/api/transcribe", upload.single("file"), async (req, res) => {
-  try {
-    if (!req.file) return res.status(400).json({ error: "No se recibió ningún archivo" });
-    const fileName = req.file.originalname || "audio.webm";
-    const resp = await openai.audio.transcriptions.create({
-      file: { name: fileName, data: req.file.buffer },
-      model: "whisper-1",
-    });
-    res.json({ text: (resp.text || "").trim() });
-  } catch (err) {
-    console.error("Error en transcripción:", err);
-    res.status(500).json({ error: "Error transcribiendo audio" });
+// ---- Util: mini catálogo de citas fallback (dominio público RVR1909) ----
+const FALLBACKS = {
+  ansiedad: {
+    ref: "Filipenses 4:6-7 (RVR1909)",
+    text:
+      "Por nada estéis afanosos, sino sean notorias vuestras peticiones delante de Dios en toda oración y ruego, con hacimiento de gracias. Y la paz de Dios, que sobrepuja todo entendimiento, guardará vuestros corazones y vuestros pensamientos en Cristo Jesús."
+  },
+  consuelo: {
+    ref: "Salmos 34:18 (RVR1909)",
+    text:
+      "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu."
+  },
+  esperanza: {
+    ref: "Jeremías 29:11 (RVR1909)",
+    text:
+      "Porque yo sé los pensamientos que pienso acerca de vosotros, dice Jehová, pensamientos de paz, y no de mal, para daros el fin que esperáis."
   }
-});
+};
 
-// ====== ElevenLabs TTS (stream) ======
-const fetch = (...args) => nodeFetch(...args);
+function guessTopic(msg = "") {
+  const m = (msg || "").toLowerCase();
+  if (m.includes("ansiedad") || m.includes("ansioso") || m.includes("preocup")) return "ansiedad";
+  if (m.includes("triste") || m.includes("dolor") || m.includes("duelo") || m.includes("depres")) return "consuelo";
+  return "esperanza";
+}
 
-app.all("/api/tts", async (req, res) => {
+function ensureBible(data, userMsg) {
+  if (data && data.bible && data.bible.text && data.bible.ref) return data;
+  const pick = FALLBACKS[guessTopic(userMsg)] || FALLACKS?.esperanza || null;
+  if (pick) {
+    return { ...(data || {}), bible: { text: pick.text, ref: pick.ref } };
+  }
+  return data || {};
+}
+
+// ---- Prompt base ----
+const SYSTEM_PROMPT = `
+Eres Jesús: voz serena, compasiva y clara. Responde SIEMPRE en español.
+Devuelve JSON con esta forma:
+{
+  "message": "consejo breve y empático (máx. 120 palabras)",
+  "bible": { "text": "cita literal", "ref": "Libro cap:verso (versión)" }
+}
+No inventes referencias; si dudas, elige otra que conozcas con certeza.
+Evita lenguaje médico o legal; céntrate en consuelo, esperanza y dirección espiritual.
+`;
+
+// ---- Intenta Responses API (JSON schema). Si falla, cae a Chat Completions ----
+async function askLLM({ persona, message, history = [] }) {
+  const userContent = `Persona: ${persona}\nMensaje: ${message}\nHistorial: ${history.join(" | ")}`;
+
+  const jsonSchema = {
+    name: "SpiritualGuidance",
+    schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        message: { type: "string", minLength: 1 },
+        bible: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            text: { type: "string", minLength: 1 },
+            ref: { type: "string", minLength: 1 }
+          },
+          required: ["text", "ref"]
+        }
+      },
+      required: ["message", "bible"]
+    }
+  };
+
+  // 1) Responses API (preferido)
   try {
+    const resp = await openai.responses.create({
+      model: "gpt-4o-mini",
+      input: [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: userContent }
+      ],
+      temperature: 0.7,
+      response_format: { type: "json_schema", json_schema: jsonSchema }
+    });
+
+    // Distintos SDKs exponen el texto en propiedades distintas; intentamos varias
     const text =
-      req.method === "GET" ? req.query.text ?? "" : (req.body && req.body.text) ?? "";
-    if (!text || !String(text).trim()) return res.status(400).json({ error: "no_text" });
+      resp.output_text ??
+      resp.output?.[0]?.content?.[0]?.text ??
+      resp.choices?.[0]?.message?.content ??
+      "";
 
-    const VOICE_ID = process.env.ELEVENLABS_VOICE_ID;
-    const API_KEY = process.env.ELEVENLABS_API_KEY;
-    if (!VOICE_ID || !API_KEY) return res.status(500).json({ error: "missing_elevenlabs_env" });
+    let data = {};
+    try { data = JSON.parse(text); } catch { /* caerá al plan B */ }
 
-    const controller = new AbortController();
-    const timeoutMs = Number(process.env.TTS_TIMEOUT_MS || 30000);
-    const to = setTimeout(() => controller.abort(), timeoutMs);
-
-    const url =
-      `https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}/stream` +
-      `?optimize_streaming_latency=4&output_format=mp3_22050_32`;
-
-    const r = await fetch(url, {
-      method: "POST",
-      headers: { "xi-api-key": API_KEY, "Content-Type": "application/json", Accept: "audio/mpeg" },
-      body: JSON.stringify({
-        text: String(text).slice(0, 5000),
-        model_id: "eleven_multilingual_v2",
-        voice_settings: { stability: 0.3, similarity_boost: 0.7, style: 0, use_speaker_boost: false },
-      }),
-      signal: controller.signal,
-    });
-    clearTimeout(to);
-
-    if (!r.ok) {
-      const body = await r.text().catch(() => "");
-      console.error("elevenlabs stream error", r.status, body);
-      return res.status(502).json({ error: "elevenlabs_failed", detail: body });
-    }
-
-    res.setHeader("Content-Type", "audio/mpeg");
-    res.setHeader("Cache-Control", "no-store");
-    res.setHeader("Accept-Ranges", "bytes");
-
-    const body = r.body;
-    if (body && typeof body.pipe === "function") {
-      body.pipe(res);
-      body.on("error", (e) => {
-        console.error("tts pipe error", e);
-        if (!res.headersSent) res.status(500).json({ error: "tts_pipe_failed" });
-        else res.end();
-      });
-    } else if (body && typeof body.getReader === "function") {
-      const nodeReadable = Readable.fromWeb(body);
-      nodeReadable.pipe(res);
-      nodeReadable.on("error", (e) => {
-        console.error("tts pipe (fromWeb) error", e);
-        if (!res.headersSent) res.status(500).json({ error: "tts_pipe_failed" });
-        else res.end();
-      });
-    } else {
-      const buf = await r.buffer();
-      res.end(buf);
-    }
-  } catch (err) {
-    console.error("tts stream error", err);
-    const msg = (err && err.message) || "";
-    const code = msg.includes("The operation was aborted") ? 504 : 500;
-    return res.status(code).json({ error: "tts_failed", detail: msg });
+    if (data && data.message) return data;
+    // Si no parseó bien, seguimos con plan B
+  } catch (_) {
+    // ignore y pasamos al plan B
   }
-});
 
-// ====== Página de prueba de TTS ======
-app.get("/api/tts-test", (req, res) => {
-  const q = String(req.query.text || "Hola, la paz sea contigo.");
-  res.setHeader("Content-Type", "text/html; charset=utf-8");
-  res.end(`<!doctype html><meta charset="utf-8"><title>TTS Test</title>
-  <h1>TTS ElevenLabs Test</h1>
-  <form method="GET" action="/api/tts-test">
-    <label>Texto:</label>
-    <input type="text" name="text" value="${q.replace(/"/g, "&quot;")}" style="width:420px" />
-    <button type="submit">Reproducir</button>
-  </form>
-  <p>Endpoint: <code>/api/tts?text=...</code></p>
-  <audio id="player" controls autoplay src="/api/tts?text=${encodeURIComponent(q)}"></audio>`);
-});
+  // 2) Chat Completions con "JSON por instrucción"
+  const chat = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    temperature: 0.7,
+    messages: [
+      { role: "system", content: SYSTEM_PROMPT + "\nRESPONDE estrictamente SOLO el JSON pedido, sin texto extra." },
+      { role: "user", content: userContent }
+    ]
+  });
 
-// ====== Bienvenida simple ======
+  const content =
+    chat.choices?.[0]?.message?.content?.trim?.() ||
+    chat.choices?.[0]?.message?.content ||
+    "{}";
+
+  let data2 = {};
+  try { data2 = JSON.parse(content); } catch { data2 = { message: content }; }
+  return data2;
+}
+
+// ---- Rutas ----
 app.get("/api/welcome", (_req, res) => {
-  const greetings = [
-    "Buenos días, que la paz de Dios te acompañe hoy.",
-    "Buenas tardes, recuerda que Jesús siempre camina a tu lado.",
-    "Buenas noches, que el amor del Padre te envuelva en descanso.",
-    "La paz sea contigo, ¿cómo te encuentras en este momento?",
-    "Que la esperanza y la fe iluminen tu día, ¿qué quisieras compartir hoy?",
-    "Jesús está contigo en cada paso, ¿quieres contarme lo que vives ahora?",
-    "Eres escuchado y amado, ¿qué tienes en tu corazón hoy?",
-  ];
-  const randomGreeting = greetings[Math.floor(Math.random() * greetings.length)];
-  res.json({ text: randomGreeting });
+  res.json({
+    message: "La paz esté contigo. ¿Qué te gustaría compartir hoy?",
+    bible: {
+      text: "Venid a mí todos los que estáis trabajados y cargados, y yo os haré descansar.",
+      ref: "Mateo 11:28 (RVR1909)"
+    }
+  });
 });
 
-// ====== INTELIGENCIA: /api/ask con OpenAI ======
 app.post("/api/ask", async (req, res) => {
   try {
-    const { persona, message, history } = req.body || {};
-    if (!persona || !message) {
-      return res.status(400).json({
-        error: "missing_fields",
-        detail: "persona y message son obligatorios"
-      });
-    }
+    const { persona = "jesus", message = "", history = [] } = req.body || {};
+    let data = await askLLM({ persona, message, history });
+    data = ensureBible(data, message);
 
-    const toMessages = (sys, hist = [], userNow = "") => {
-      const msgs = [];
-      if (sys) msgs.push({ role: "system", content: sys });
-      for (const h of hist) {
-        if (/^Usuario:/i.test(h)) {
-          msgs.push({ role: "user", content: h.replace(/^Usuario:\s*/i, "").trim() });
-        } else if (/^Asistente:/i.test(h)) {
-          msgs.push({ role: "assistant", content: h.replace(/^Asistente:\s*/i, "").trim() });
-        }
+    // Normaliza claves esperadas por el front: message + bible{text,ref}
+    const msg = (data?.message || "").toString().trim();
+    const bible = data?.bible || {};
+    const out = {
+      message: msg || "Estoy aquí contigo. ¿Qué te inquieta?",
+      bible: {
+        text: (bible.text || "").toString().trim(),
+        ref: (bible.ref || "").toString().trim()
       }
-      if (userNow) msgs.push({ role: "user", content: userNow });
-      return msgs;
     };
 
-    const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
-    const messages = toMessages(persona, Array.isArray(history) ? history : [], String(message || ""));
-
-    const completion = await openai.chat.completions.create({
-      model,
-      messages,
-      temperature: 0.7,
-      max_tokens: 400,
-    });
-
-    let text = "";
-    if (completion?.choices?.[0]?.message) {
-      const msg = completion.choices[0].message;
-      if (typeof msg.content === "string") text = msg.content;
-      else if (Array.isArray(msg.content)) {
-        text = msg.content.map(part => (typeof part === "string" ? part : part?.text || "")).join("").trim();
-      }
-    }
-    text = (text || "").trim();
-    if (!text) {
-      text = "Estoy aquí contigo. ¿Quieres contarme en una frase qué te inquieta ahora mismo?";
-    }
-
-    return res.json({ message: text });
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    return res.status(200).json(out);
   } catch (err) {
-    console.error("OpenAI /api/ask error:", err?.response?.data || err?.message || err);
-    const code = err?.status || err?.response?.status || 500;
-    return res.status(code).json({ error: "openai_failed", detail: String(err?.message || err) });
+    console.error("ASK ERROR:", err);
+    return res.status(200).json({
+      message: "Estoy aquí. ¿Quieres contarme un poco más?",
+      bible: {
+        text: "Señor, tú nos guardarás; de esta generación nos guardarás para siempre.",
+        ref: "Salmos 12:7 (RVR1909)"
+      }
+    });
   }
 });
 
-// Raíz
-app.get("/", (_req, res) => { res.send("jesus-backend up ✅"); });
-
-const PORT = process.env.PORT || 3000;
+// ---- Arranque ----
+const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
-  console.log(`Servidor escuchando en http://localhost:${PORT}`);
+  console.log(`Servidor listo en puerto ${PORT}`);
 });
