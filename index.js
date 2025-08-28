@@ -12,7 +12,7 @@ app.use(bodyParser.json());
 // ---- OpenAI client ----
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// ---- Util: mini catálogo de citas fallback (dominio público RVR1909) ----
+// ---- Citas de fallback (RVR1909 - dominio público) ----
 const FALLBACKS = {
   ansiedad: {
     ref: "Filipenses 4:6-7 (RVR1909)",
@@ -31,6 +31,7 @@ const FALLBACKS = {
   }
 };
 
+// ---- Helpers ----
 function guessTopic(msg = "") {
   const m = (msg || "").toLowerCase();
   if (m.includes("ansiedad") || m.includes("ansioso") || m.includes("preocup")) return "ansiedad";
@@ -40,11 +41,11 @@ function guessTopic(msg = "") {
 
 function ensureBible(data, userMsg) {
   if (data && data.bible && data.bible.text && data.bible.ref) return data;
-  const pick = FALLBACKS[guessTopic(userMsg)] || FALLACKS?.esperanza || null;
-  if (pick) {
-    return { ...(data || {}), bible: { text: pick.text, ref: pick.ref } };
-  }
-  return data || {};
+  const pick = FALLBACKS[guessTopic(userMsg)] || FALLBACKS.esperanza; // ✅ FIX aplicado
+  return {
+    ...(data || {}),
+    bible: { text: pick.text, ref: pick.ref }
+  };
 }
 
 // ---- Prompt base ----
@@ -59,77 +60,32 @@ No inventes referencias; si dudas, elige otra que conozcas con certeza.
 Evita lenguaje médico o legal; céntrate en consuelo, esperanza y dirección espiritual.
 `;
 
-// ---- Intenta Responses API (JSON schema). Si falla, cae a Chat Completions ----
+// ---- Llamada al modelo ----
 async function askLLM({ persona, message, history = [] }) {
   const userContent = `Persona: ${persona}\nMensaje: ${message}\nHistorial: ${history.join(" | ")}`;
 
-  const jsonSchema = {
-    name: "SpiritualGuidance",
-    schema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        message: { type: "string", minLength: 1 },
-        bible: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            text: { type: "string", minLength: 1 },
-            ref: { type: "string", minLength: 1 }
-          },
-          required: ["text", "ref"]
-        }
-      },
-      required: ["message", "bible"]
-    }
-  };
-
-  // 1) Responses API (preferido)
   try {
-    const resp = await openai.responses.create({
+    const chat = await openai.chat.completions.create({
       model: "gpt-4o-mini",
-      input: [
+      temperature: 0.7,
+      messages: [
         { role: "system", content: SYSTEM_PROMPT },
         { role: "user", content: userContent }
-      ],
-      temperature: 0.7,
-      response_format: { type: "json_schema", json_schema: jsonSchema }
+      ]
     });
 
-    // Distintos SDKs exponen el texto en propiedades distintas; intentamos varias
-    const text =
-      resp.output_text ??
-      resp.output?.[0]?.content?.[0]?.text ??
-      resp.choices?.[0]?.message?.content ??
-      "";
+    const content =
+      chat.choices?.[0]?.message?.content?.trim?.() ||
+      chat.choices?.[0]?.message?.content ||
+      "{}";
 
     let data = {};
-    try { data = JSON.parse(text); } catch { /* caerá al plan B */ }
-
-    if (data && data.message) return data;
-    // Si no parseó bien, seguimos con plan B
-  } catch (_) {
-    // ignore y pasamos al plan B
+    try { data = JSON.parse(content); } catch { data = { message: content }; }
+    return data;
+  } catch (err) {
+    console.error("OpenAI ERROR:", err);
+    return { message: "Estoy aquí contigo." };
   }
-
-  // 2) Chat Completions con "JSON por instrucción"
-  const chat = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    temperature: 0.7,
-    messages: [
-      { role: "system", content: SYSTEM_PROMPT + "\nRESPONDE estrictamente SOLO el JSON pedido, sin texto extra." },
-      { role: "user", content: userContent }
-    ]
-  });
-
-  const content =
-    chat.choices?.[0]?.message?.content?.trim?.() ||
-    chat.choices?.[0]?.message?.content ||
-    "{}";
-
-  let data2 = {};
-  try { data2 = JSON.parse(content); } catch { data2 = { message: content }; }
-  return data2;
 }
 
 // ---- Rutas ----
@@ -146,29 +102,31 @@ app.get("/api/welcome", (_req, res) => {
 app.post("/api/ask", async (req, res) => {
   try {
     const { persona = "jesus", message = "", history = [] } = req.body || {};
+
+    // 1) Pregunta al LLM
     let data = await askLLM({ persona, message, history });
+
+    // 2) Garantiza que haya cita
     data = ensureBible(data, message);
 
-    // Normaliza claves esperadas por el front: message + bible{text,ref}
-    const msg = (data?.message || "").toString().trim();
-    const bible = data?.bible || {};
+    // 3) Normaliza salida
     const out = {
-      message: msg || "Estoy aquí contigo. ¿Qué te inquieta?",
+      message: (data?.message || "Estoy aquí contigo. ¿Qué te inquieta?").toString().trim(),
       bible: {
-        text: (bible.text || "").toString().trim(),
-        ref: (bible.ref || "").toString().trim()
+        text: (data?.bible?.text || "Venid a mí todos los que estáis trabajados y cargados, y yo os haré descansar.").toString().trim(),
+        ref:  (data?.bible?.ref  || "Mateo 11:28 (RVR1909)").toString().trim()
       }
     };
 
     res.setHeader("Content-Type", "application/json; charset=utf-8");
-    return res.status(200).json(out);
+    res.status(200).json(out);
   } catch (err) {
     console.error("ASK ERROR:", err);
-    return res.status(200).json({
+    res.status(200).json({
       message: "Estoy aquí. ¿Quieres contarme un poco más?",
       bible: {
-        text: "Señor, tú nos guardarás; de esta generación nos guardarás para siempre.",
-        ref: "Salmos 12:7 (RVR1909)"
+        text: "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu.",
+        ref: "Salmos 34:18 (RVR1909)"
       }
     });
   }
