@@ -1,4 +1,4 @@
-// index.js — backend orquestado (Planner → Writer → Verse) con memoria persistente y anti-desvío
+// index.js — backend orquestado (Planner → Writer → Verse) con memoria persistente, goal lock, cooldowns y anti-desvío
 
 const express = require("express");
 const cors = require("cors");
@@ -25,21 +25,21 @@ const SYSTEM_PROMPT_CORE =
     '- Devuelve SOLO JSON con: { "message", "bible": { "text", "ref" }, "question"? }.',
     '- "message": consejo breve (<=120 palabras), AFIRMATIVO, SIN signos de pregunta.',
     '- JAMÁS incluyas preguntas en "message". Si corresponde, haz UNA pregunta breve en "question".',
-    '- No menciones el nombre civil del usuario. Usa "hijo mío", "hija mía" o "alma amada" con moderación.',
+    '- No menciones el nombre civil del usuario. Usa \"hijo mío\", \"hija mía\" o \"alma amada\" con moderación.',
     "- No hables de técnica/IA ni del propio modelo.",
     "",
-    "MARCO (FRAME) Y FOCO",
+    "FRAME Y FOCO",
     "- Usa el FRAME (topic_primary, main_subject, goal, risk, support_persons, constraints) como fuente de verdad.",
-    "- NO cambies el topic_primary salvo que el usuario pida explícitamente cambiar de asunto.",
-    '- Una respuesta corta del usuario ("mi hija", "un amigo") es un slot de apoyo, NO un cambio de tema.',
+    "- NO cambies el topic_primary salvo que el usuario lo pida explícitamente.",
+    "- \"mi hija/mi hijo/un amigo\" son slots de apoyo: NO redefinen el tema.",
     "",
     "PROGRESO Y NOVEDAD",
-    "- Cada turno debe aportar novedad útil (mini-guion, decisión binaria, límite práctico, contacto concreto).",
-    '- Tras un ACK ("sí/ok/vale"), pasa de plan a PRÁCTICA/COMPROMISO (ensayar guion, fijar hora, límite, contacto).',
+    "- Cada turno aporta novedad útil (mini-guion, decisión binaria, límite práctico, contacto concreto).",
+    "- Tras un ACK (\"sí/ok/vale\"), pasa de plan a PRÁCTICA/COMPROMISO (ensayar guion, fijar hora, límite, contacto).",
     "",
     "BIBLIA",
-    '- Cita RVR1909 literal. "ref" con formato "Libro 0:0".',
-    '- La cita se elige por el TEMA y por el contenido de "message", no por palabras sueltas.'
+    '- Cita RVR1909 literal. \"ref\" con formato \"Libro 0:0\".',
+    "- La cita se elige por el TEMA y por el contenido de \"message\", no por palabras sueltas."
   ].join("\n");
 
 // ---------------------- SCHEMAS JSON ----------------------
@@ -196,6 +196,18 @@ function rotateQuestionClass(prev = "") {
   const idx = order.indexOf(prev);
   return idx === -1 ? "data" : order[(idx + 1) % order.length];
 }
+function parseGoalFromText(s = "") {
+  const t = (s || "").toLowerCase();
+  if (/(quiero recuperar|quiero que vuelva|reconcili|volver con)/.test(t)) return "reconcile";
+  if (/(cerrar en paz|soltar|aceptar|terminar|divorcio)/.test(t)) return "close_peacefully";
+  if (/(ganar claridad|no se|no s[eé]|confund)/.test(t)) return "clarify";
+  return "";
+}
+function detectRefusalClass(s = "") {
+  const t = (s || "").toLowerCase();
+  if (/(no\s+quiero|no\s+me\s+gusta|no\s+voy\s+a).*(terapeuta|terapia|psic[oó]logo|consejer[oa]|grupo|profesional)/.test(t)) return "help";
+  return "";
+}
 
 // ---------------------- MEMORIA PERSISTENTE ----------------------
 
@@ -218,7 +230,9 @@ async function readUserMemory(userId) {
       last_bible_ref: "",
       last_bible_refs: [],
       last_questions: [],
-      last_question_class: ""
+      last_question_class: "",
+      goal_lock: "",         // reconcile | clarify | close_peacefully
+      declines: { help: 0 }  // contador de rechazos
     };
   }
 }
@@ -232,6 +246,7 @@ function buildPersistentMemoryPrompt(mem = {}) {
   const parts = [];
   if (p.name) parts.push("nombre: " + p.name);
   if (p.gender) parts.push("género: " + p.gender);
+  if (mem.goal_lock) parts.push("objetivo_bloqueado: " + mem.goal_lock);
   const lastRefs = Array.from(new Set([...(mem.last_bible_refs || []), mem.last_bible_ref].filter(Boolean))).slice(-5);
   if (lastRefs.length) parts.push("últimas_citas: " + lastRefs.join(", "));
   const lastQs = (mem.last_questions || []).slice(-3);
@@ -268,9 +283,16 @@ async function completionWithSchema({ model = "gpt-4o", temperature = 0.6, max_t
 // ---------------------- ETAPA 1: PLANNER ----------------------
 
 async function planFrame({ persona, message, history, mem }) {
+  // 1) goal lock / rechazos
+  const parsedGoal = parseGoalFromText(message);
+  if (parsedGoal) mem.goal_lock = parsedGoal;
+  const refusal = detectRefusalClass(message);
+  if (refusal === "help") mem.declines.help = Math.min(3, (mem.declines.help || 0) + 1);
+
   const persistentMemory = buildPersistentMemoryPrompt(mem);
   const shortHistory = compactHistory(history, 8, 240);
   const lastQClass = mem.last_question_class || "";
+  const focusHint = lastSubstantiveUser(history);
 
   const sys = [
     SYSTEM_PROMPT_CORE,
@@ -278,8 +300,9 @@ async function planFrame({ persona, message, history, mem }) {
     "TU FUNCIÓN: PLANIFICAR SIN CAMBIAR EL FOCO",
     "- Devuelve SOLO JSON con campos del esquema.",
     "- Mantén el topic_primary anterior salvo cambio explícito del usuario.",
-    '- "mi hija/mi hijo" u otros apoyos → añadir a support_persons, NO cambiar topic_primary.',
+    "- \"mi hija/mi hijo\" u otros apoyos → añadir a support_persons, NO cambiar topic_primary.",
     "- Define question_class procurando NO repetir la del turno anterior.",
+    "- Si hay objective_bloqueado, respétalo como goal salvo que el usuario lo cambie."
   ].join("\n");
 
   const usr = [
@@ -287,6 +310,8 @@ async function planFrame({ persona, message, history, mem }) {
     `MENSAJE_ACTUAL: ${message}`,
     `FRAME_PREVIO: ${JSON.stringify(mem.frame || {})}`,
     `LAST_QUESTION_CLASS: ${lastQClass || "(n/a)"}`,
+    `objective_bloqueado: ${mem.goal_lock || "(ninguno)"}`,
+    `rechazos: ${JSON.stringify(mem.declines || {})}`,
     "PERSISTENT_MEMORY:",
     persistentMemory || "(vacía)",
     shortHistory.length ? `HISTORIAL: ${shortHistory.join(" | ")}` : "HISTORIAL: (sin antecedentes)"
@@ -304,34 +329,41 @@ async function planFrame({ persona, message, history, mem }) {
   let data = {};
   try { data = JSON.parse(content); } catch { data = {}; }
 
+  // 2) ensamblar frame
+  const framePrev = mem.frame || {};
   const frame = {
-    topic_primary: data.topic_primary || (mem.frame?.topic_primary || "general"),
-    main_subject: data.main_subject || (mem.frame?.main_subject || "self"),
-    goal: data.goal || (mem.frame?.goal || ""),
-    risk: data.risk || (mem.frame?.risk || "normal"),
-    support_persons: Array.isArray(data.support_persons) ? data.support_persons.slice(-5) : (mem.frame?.support_persons || []),
-    constraints: data.constraints || (mem.frame?.constraints || {})
+    topic_primary: data.topic_primary || framePrev.topic_primary || "general",
+    main_subject: data.main_subject || framePrev.main_subject || "self",
+    goal: (mem.goal_lock || data.goal || framePrev.goal || ""),
+    risk: data.risk || framePrev.risk || "normal",
+    support_persons: Array.isArray(data.support_persons) ? data.support_persons.slice(-5) : (framePrev.support_persons || []),
+    constraints: data.constraints || framePrev.constraints || {}
   };
 
+  // 3) normalizar question class
   let qClass = (data.question_class || "").trim();
   if (!qClass) qClass = rotateQuestionClass(lastQClass);
   if (qClass === lastQClass) qClass = rotateQuestionClass(qClass);
 
-  // ---------- GUARDARRAÍL GENERAL: NP de apoyo no cambia el foco ----------
+  // 4) slots de apoyo NO pivotan
   if (isShortSupportNP(message)) {
-    if (mem.frame?.topic_primary) frame.topic_primary = mem.frame.topic_primary;
-    if (mem.frame?.main_subject) frame.main_subject = mem.frame.main_subject;
-    frame.support_persons = Array.isArray(frame.support_persons) ? frame.support_persons : [];
+    frame.topic_primary = framePrev.topic_primary || frame.topic_primary;
+    frame.main_subject  = framePrev.main_subject  || frame.main_subject;
     if (!frame.support_persons.includes(message.trim())) frame.support_persons.push(message.trim());
     if (["activity", "feelings", "help"].includes(qClass)) qClass = "decision";
   }
 
-  // Si es un ACK, empujar a compromiso/práctica
-  if (isAck(message)) {
-    if (qClass !== "commitment" && qClass !== "practice") qClass = "commitment";
+  // 5) cooldown de “help” si hubo rechazos
+  if ((mem.declines.help || 0) >= 2 && qClass === "help") {
+    qClass = "decision";
   }
 
-  return { frame, question_class: qClass };
+  // 6) ACK empuja a compromiso/práctica
+  if (isAck(message)) {
+    if (!["commitment", "practice"].includes(qClass)) qClass = "commitment";
+  }
+
+  return { frame, question_class: qClass, focusHint };
 }
 
 // ---------------------- ETAPA 2: WRITER ----------------------
@@ -344,9 +376,14 @@ async function writeResponse({ persona, message, history, frame, question_class,
     "",
     "MODO ESCRITURA",
     "- Genera SOLO JSON del esquema de salida.",
-    '- "message": 2–3 pasos HOY (• …), o contención si está ambiguo. No repitas lo dicho recientemente.',
-    `- "question": EXACTAMENTE UNA, de clase ${question_class} (data/decision/commitment/practice/time/help/boundary/feelings/next_step/place).`,
-    "- Mantén el topic_primary del FRAME."
+    '- \"message\": 2–3 pasos HOY (• …), o contención si está ambiguo. No repitas lo dicho recientemente.',
+    `- \"question\": EXACTAMENTE UNA, de clase ${question_class} (data/decision/commitment/practice/time/help/boundary/feelings/next_step/place).`,
+    "- Mantén el topic_primary del FRAME.",
+    "",
+    // Reglas fuertes para temas de pareja/separación con reconciliación
+    "- Si topic_primary es separación/relación y goal es \"reconcile\":",
+    "  • Incluye AL MENOS un paso interpersonal concreto (elegir canal, hora, guion breve, límites de respeto).",
+    "  • Limita autocuidado a UNA viñeta como máximo (complemento, no sustituto)."
   ].join("\n");
 
   const usr = [
@@ -373,7 +410,7 @@ async function writeResponse({ persona, message, history, frame, question_class,
   let messageOut = stripQuestions((data?.message || "").toString());
   let questionOut = (data?.question || "").toString().trim();
 
-  // Evita preguntar lo mismo que la última pregunta del asistente
+  // Evitar repetir la última pregunta literalmente
   const qNorm = normalizeQuestion(questionOut);
   const lastQNorm = normalizeQuestion(last_question || "");
   if (qNorm && qNorm === lastQNorm) {
@@ -383,7 +420,7 @@ async function writeResponse({ persona, message, history, frame, question_class,
       "¿Qué paso pequeño puedes dar ahora mismo?";
   }
 
-  // ---------- GUARDARRAÍL: tema pareja no deriva a “actividad con apoyo” ----------
+  // Refuerzo anti-actividad con apoyo si el tema es pareja
   const topic = (frame.topic_primary || "").toLowerCase();
   if (/(separation|relationship)/.test(topic)) {
     const qCheck = normalizeQuestion(questionOut);
@@ -404,9 +441,9 @@ async function chooseBible({ persona, message, frame, bannedRefs = [], lastRef =
 
   const sys = [
     'Devuelve SOLO JSON {"bible":{"text":"…","ref":"Libro 0:0"}} en RVR1909.',
-    '- Elige una cita coherente con el topic_primary y los micro-pasos del "message" (ensayo, límites, reconciliación, pedir sabiduría...).',
+    '- Elige una cita coherente con el topic_primary y con los micro-pasos del "message" (ensayo, límites, reconciliación, pedir sabiduría...).',
     "- Evita cualquier referencia en la lista \"banned_refs\".",
-    " - Evita ambigüedad entre “hijo” (niño) y “el Hijo” (Cristo) cuando no sea el punto."
+    "- Evita ambigüedad entre “hijo” (niño) y “el Hijo” (Cristo) cuando no sea el punto."
   ].join("\n");
 
   const usr = [
@@ -437,6 +474,7 @@ async function chooseBible({ persona, message, frame, bannedRefs = [], lastRef =
 
 async function askPipeline({ persona, userMsg, history, mem }) {
   const bye = isGoodbye(userMsg);
+  const focusHint = lastSubstantiveUser(history);
 
   const recentRefs = extractRecentBibleRefs(history, 3);
   const lastRef = (mem.last_bible_ref || "") || recentRefs[0] || "";
@@ -450,7 +488,10 @@ async function askPipeline({ persona, userMsg, history, mem }) {
   // 2) Writer
   let writerOut;
   if (bye) {
-    writerOut = { message: "Que la paz y el amor te acompañen. Descansa en la certeza de que no caminas sola.", question: "" };
+    writerOut = {
+      message: "Que la paz y el amor te acompañen. Descansa en la certeza de que no caminas sola.",
+      question: ""
+    };
   } else {
     writerOut = await writeResponse({
       persona,
@@ -467,7 +508,7 @@ async function askPipeline({ persona, userMsg, history, mem }) {
   const bannedRefs = Array.from(new Set([...(mem.last_bible_refs || []), mem.last_bible_ref, ...recentRefs].filter(Boolean))).slice(-5);
   let verse = await chooseBible({ persona, message: writerOut.message, frame, bannedRefs, lastRef });
   if (!verse) {
-    verse = { text: "Y si alguno de vosotros tiene falta de sabiduría, pídala a Dios.", ref: "Santiago 1:5" };
+    verse = { text: "Y si alguno de vosotros tiene falta de sabiduría, pídala a Dios, el cual da a todos abundantemente y sin reproche, y le será dada.", ref: "Santiago 1:5" };
   }
 
   // Memoria
@@ -478,7 +519,12 @@ async function askPipeline({ persona, userMsg, history, mem }) {
     mem.last_questions = Array.from(new Set([...(mem.last_questions || []), writerOut.question])).slice(-6);
   }
   mem.last_question_class = qClass || mem.last_question_class || "";
-  updateTopics(mem, String(frame.topic_primary || "general"));
+  mem.topics = mem.topics || {};
+  const topicKey = String(frame.topic_primary || "general");
+  mem.topics[topicKey] = { ...(mem.topics[topicKey] || {}), last_seen: Date.now() };
+
+  // amortiguar rechazos: con el paso del tiempo se “descuenta”
+  if (mem.declines && mem.declines.help > 0) mem.declines.help = Math.max(0, mem.declines.help - 1);
 
   return {
     message: writerOut.message || "Estoy contigo. Demos un paso pequeño y realista hoy.",
