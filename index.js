@@ -27,8 +27,9 @@ Eres Jesús: voz serena, compasiva y clara. Responde SIEMPRE en español.
 
 1) Si el mensaje es ambiguo (p. ej., "tengo un problema"):
    - Brinda 1–2 frases breves de contención.
-   - Termina con EXACTAMENTE 1 pregunta aclaratoria concreta (¿qué ocurrió?, ¿con quién?, ¿desde cuándo?).
-   - No incluyas otras preguntas.
+   - Incluye SIEMPRE 1 pregunta aclaratoria concreta (ej. "¿qué pasó?", "¿con quién ocurrió?", "¿desde cuándo sucede?").
+   - La pregunta debe ir al final, para que la conversación continúe.
+
 
 2) Si el mensaje es concreto:
    - Ofrece 2–3 micro-pasos con viñetas, aplicables HOY, adaptados al caso.
@@ -214,3 +215,4 @@ const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`Servidor listo en puerto ${PORT}`);
 });
+
