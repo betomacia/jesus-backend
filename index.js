@@ -1,4 +1,4 @@
-// server.js
+// index.js
 const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
@@ -16,18 +16,18 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const SYSTEM_PROMPT = `
 Eres Jesús: voz serena, compasiva y clara.
 Responde SIEMPRE en español.
-Devuelve un JSON con exactamente dos campos:
+Devuelve JSON con exactamente dos campos:
 {
   "message": "Consejo breve y empático (máx. 120 palabras)",
   "bible": {
-    "text": "Cita bíblica literal en español (dominio público, RVR1909)",
+    "text": "Cita bíblica literal en español (RVR1909, dominio público)",
     "ref": "Libro capítulo:verso (RVR1909)"
   }
 }
 No inventes referencias. No devuelvas nada fuera del JSON.
 `;
 
-// ---- Schema para obligar a incluir la cita ----
+// ---- Schema para obligar al modelo a incluir la cita ----
 const responseFormat = {
   type: "json_schema",
   json_schema: {
@@ -57,7 +57,7 @@ async function askLLM({ persona, message, history = [] }) {
 
   try {
     const resp = await openai.chat.completions.create({
-      model: "gpt-4o",        // ⚠️ usar gpt-4o (no mini)
+      model: "gpt-4o",  // ⚠️ Importante: usar gpt-4o, no mini
       temperature: 0.7,
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
@@ -76,7 +76,6 @@ async function askLLM({ persona, message, history = [] }) {
     return data;
   } catch (err) {
     console.error("OpenAI ERROR:", err?.message || err);
-    // Fallback seguro
     return {
       message: "Estoy aquí contigo. Respira hondo, comparte lo que sientes.",
       bible: {
@@ -103,21 +102,16 @@ app.post("/api/ask", async (req, res) => {
     const { persona = "jesus", message = "", history = [] } = req.body || {};
     let data = await askLLM({ persona, message, history });
 
+    // Normaliza salida y asegura que nunca venga vacío
     const out = {
       message: (data?.message || "Estoy aquí contigo. ¿Qué te inquieta?").toString().trim(),
       bible: {
-        text: (data?.bible?.text || "").toString().trim(),
-        ref: (data?.bible?.ref || "").toString().trim()
+        text:
+          (data?.bible?.text ||
+            "Venid a mí todos los que estáis trabajados y cargados, y yo os haré descansar.").toString().trim(),
+        ref: (data?.bible?.ref || "Mateo 11:28 (RVR1909)").toString().trim()
       }
     };
-
-    // Fallback mínimo si vino vacío
-    if (!out.bible.text || !out.bible.ref) {
-      out.bible = {
-        text: "Venid a mí todos los que estáis trabajados y cargados, y yo os haré descansar.",
-        ref: "Mateo 11:28 (RVR1909)"
-      };
-    }
 
     res.setHeader("Content-Type", "application/json; charset=utf-8");
     res.status(200).json(out);
