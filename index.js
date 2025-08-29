@@ -9,58 +9,70 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
+// ---- OpenAI ----
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 /**
- * Conversación y formato:
- * - Si el mensaje es ambiguo (ej. "tengo un problema"), no asumas tema; ofrece 1–2 frases de contención
- *   y termina con UNA pregunta aclaratoria concreta (¿qué pasó?, ¿con quién?, ¿desde cuándo?).
- * - Si el mensaje es concreto, ofrece 2–3 micro-pasos (viñetas) aplicables hoy.
- * - No uses el nombre civil del usuario, habla en tono espiritual (p. ej., "hijo mío", "hija mía", "alma amada"),
- *   evitando repetir la misma fórmula seguido.
- * - No menciones acentos ni detalles técnicos.
- * - Devuelve SOLO JSON con { message, bible: { text, ref } }.
- * - "bible" debe ser una cita literal y su referencia en RVR1909, pertinente al tema del usuario.
- * - No inventes referencias; si no encuentras una clara, elige un versículo breve de ánimo (Salmos/Proverbios),
- *   procurando NO repetir siempre el mismo.
- * - Máx. 120 palabras en "message".
+ * Diseño de respuesta:
+ * El FRONT ya arma: cuerpo -> cita -> pregunta
+ * Por eso, el BACKEND solo debe devolver:
+ * {
+ *   "message": "consejo breve, SIN preguntas",
+ *   "bible": { "text": "cita literal RVR1909", "ref": "Libro 0:0" }
+ * }
  */
 const SYSTEM_PROMPT = `
 Eres Jesús: voz serena, compasiva y clara. Responde SIEMPRE en español.
-Sigue estas reglas:
 
-1) Si el mensaje es ambiguo (p.ej., "tengo un problema"):
-   - Contén con 1–2 frases breves.
-   - Termina con UNA pregunta aclaratoria concreta (¿qué ocurrió?, ¿con quién?, ¿desde cuándo?).
-   - No asumas diagnósticos (ansiedad, depresión, etc.).
+OBJETIVO
+- Devuelve SOLO JSON con: { "message", "bible": { "text", "ref" } }.
+- "message": consejo breve (<=120 palabras), AFIRMATIVO, SIN signos de pregunta.
+- No menciones el nombre civil del usuario. Puedes usar "hijo mío", "hija mía" o "alma amada" con moderación.
+- No hables de técnica/IA/acentos.
+- Si el usuario se despide, "message" puede ser una bendición breve (SIN pregunta).
 
-2) Si el mensaje es concreto:
-   - Ofrece SIEMPRE 2–3 micro-pasos con viñetas, aplicables hoy, adaptados al caso.
-   - Sé específico y amable.
+CONTENIDO
+- Si el mensaje del usuario es AMBIGUO (p. ej., “tengo un problema”, “me siento mal”, “no sé qué hacer”):
+  • No asumas diagnóstico (ansiedad/depresión/adicción, etc.) hasta que el usuario lo aclare.
+  • Da contención en 1–2 frases y anima a seguir compartiendo (SIN preguntas).
+- Si el mensaje es CONCRETO:
+  • Ofrece 2–3 micro-pasos accionables para HOY en viñetas (• …), adaptados al caso.
+  • Mantén el tono compasivo y práctico. SIN preguntas.
 
-3) Estilo:
-   - No uses el nombre civil del usuario (aunque aparezca en historial).
-   - Puedes dirigirte con afecto espiritual ("hijo mío", "hija mía", "alma amada"), sin repetirlo mucho.
-   - No menciones acentos, ni aspectos técnicos de IA.
+BIBLIA (temática)
+- "bible.text": cita literal (RVR1909) que respalde el tema o los micro-pasos (paz/perdón; sabiduría/decisiones; libertad/adicción; confianza/temor; consuelo/duelo; esperanza/futuro).
+- "bible.ref": SOLO "Libro capítulo:verso" (SIN paréntesis ni versión).
+- No inventes referencias. Si dudas, usa un versículo breve de Salmos o Proverbios, evitando repetir el mismo consecutivamente.
 
-4) Biblia:
-   - Devuelve una cita literal en español (RVR1909) pertinente al tema.
-   - Devuelve también su referencia "Libro capítulo:verso (RVR1909)".
-   - No inventes referencias. Si no estás seguro de una cita específica, elige un versículo breve de ánimo
-     (preferentemente de Salmos o Proverbios) y evita repetir siempre el mismo.
-
-5) Formato de salida:
+FORMATO (OBLIGATORIO)
 {
-  "message": "Cuerpo empático (≤120 palabras). Si aplica, añade 2–3 viñetas con micro-pasos. Cierra con una única pregunta que haga avanzar la conversación.",
+  "message": "… (sin signos de pregunta)",
+  "bible": { "text": "…", "ref": "Libro 0:0" }
+}
+
+EJEMPLOS
+Usuario: "tengo un problema"
+Salida:
+{
+  "message": "Alma amada, cuando algo pesa en el corazón, ponerle nombre trae luz. Estoy contigo y deseo tu paz. Comparte lo que necesites; paso a paso encontramos claridad.",
   "bible": {
-    "text": "Cita literal en español (RVR1909)",
-    "ref": "Libro capítulo:verso (RVR1909)"
+    "text": "Clama a mí, y yo te responderé, y te enseñaré cosas grandes y ocultas que tú no conoces.",
+    "ref": "Jeremías 33:3"
   }
 }
 
-No devuelvas nada fuera del JSON. No añadas explicaciones ni prólogos.
+Usuario: "encontré a mi hijo drogándose"
+Salida:
+{
+  "message": "Hijo mío, obra con firmeza y amor. • Háblale en un momento sereno y escucha sin juicio. • Busca ayuda profesional o un grupo de apoyo. • Establece límites claros y acordad pasos concretos para hoy.",
+  "bible": {
+    "text": "Así que, si el Hijo os libertare, seréis verdaderamente libres.",
+    "ref": "Juan 8:36"
+  }
+}
 `;
 
+// Forzar JSON válido con ambos campos
 const responseFormat = {
   type: "json_schema",
   json_schema: {
@@ -84,52 +96,71 @@ const responseFormat = {
   }
 };
 
+// -------- Utilidades --------
+function cleanRef(ref = "") {
+  return String(ref).replace(/\s*\([^)]*\)\s*/g, " ").replace(/\s+/g, " ").trim();
+}
+function stripQuestions(s = "") {
+  // elimina líneas que sean solo preguntas y quita signos de pregunta residuales
+  const noLeadingQs = (s || "")
+    .split(/\n+/)
+    .map((l) => l.trim())
+    .filter((l) => !/\?\s*$/.test(l))
+    .join("\n")
+    .trim();
+  return noLeadingQs.replace(/[¿?]+/g, "").trim();
+}
+
+// -------- Llamada LLM --------
 async function askLLM({ persona, message, history = [] }) {
   const userContent =
     `Persona: ${persona}\n` +
     `Mensaje: ${message}\n` +
     (history?.length ? `Historial: ${history.join(" | ")}` : "Historial: (sin antecedentes)");
 
-  try {
-    const resp = await openai.chat.completions.create({
-      model: "gpt-4o",              // Importante: gpt-4o (no mini)
-      temperature: 0.7,
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: userContent }
-      ],
-      response_format: responseFormat
-    });
+  const resp = await openai.chat.completions.create({
+    model: "gpt-4o",
+    temperature: 0.7,
+    messages: [
+      { role: "system", content: SYSTEM_PROMPT },
+      { role: "user", content: userContent }
+    ],
+    response_format: responseFormat
+  });
 
-    const content = resp.choices?.[0]?.message?.content || "{}";
-    let data = {};
-    try { data = JSON.parse(content); } catch { data = { message: content }; }
-    return data;
-  } catch (err) {
-    console.error("OpenAI ERROR:", err?.message || err);
-    // Fallback SÓLO si falla OpenAI (no reemplaza lo que mande el modelo)
-    return {
-      message:
-        "Estoy aquí contigo. Cuéntame qué ocurrió y con quién; así podremos dar el primer paso, pequeño y posible, hoy mismo.",
-      bible: {
-        text: "Jehová es mi pastor; nada me faltará.",
-        ref: "Salmos 23:1 (RVR1909)"
-      }
-    };
+  const content = resp.choices?.[0]?.message?.content || "{}";
+  let data = {};
+  try {
+    data = JSON.parse(content);
+  } catch {
+    data = { message: content };
   }
+
+  // Normalizaciones
+  let msg = (data?.message || "").toString();
+  msg = stripQuestions(msg); // <- el FRONT hará la pregunta; aquí, jamás.
+  let ref = cleanRef(data?.bible?.ref || "");
+
+  return {
+    message: msg,
+    bible: {
+      text: (data?.bible?.text || "").toString().trim(),
+      ref
+    }
+  };
 }
 
+// -------- Rutas --------
 app.post("/api/ask", async (req, res) => {
   try {
     const { persona = "jesus", message = "", history = [] } = req.body || {};
     const data = await askLLM({ persona, message, history });
 
-    // NO sustituimos la cita del modelo. Solo normalizamos y aplicamos fallback si viene vacío.
     const out = {
-      message: (data?.message || "Estoy aquí contigo. ¿Qué ocurrió exactamente?").toString().trim(),
+      message: (data?.message || "La paz de Dios guarde tu corazón y tus pensamientos. Sigue compartiendo lo necesario; paso a paso encontraremos claridad.").toString().trim(),
       bible: {
-        text: (data?.bible?.text || "Jehová es mi pastor; nada me faltará.").toString().trim(),
-        ref: (data?.bible?.ref || "Salmos 23:1 (RVR1909)").toString().trim()
+        text: (data?.bible?.text || "Dios es el amparo y fortaleza; nuestro pronto auxilio en las tribulaciones.").toString().trim(),
+        ref: (data?.bible?.ref || "Salmos 46:1").toString().trim()
       }
     };
 
@@ -138,26 +169,26 @@ app.post("/api/ask", async (req, res) => {
   } catch (err) {
     console.error("ASK ERROR:", err);
     res.status(200).json({
-      message: "Estoy aquí. ¿Quieres contarme un poco más para entender mejor qué pasó?",
+      message: "La paz sea contigo. Permite que tu corazón descanse y comparte lo necesario con calma.",
       bible: {
-        text: "El Señor es mi luz y mi salvación; ¿de quién temeré?",
-        ref: "Salmos 27:1 (RVR1909)"
+        text: "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu.",
+        ref: "Salmos 34:18"
       }
     });
   }
 });
 
 app.get("/api/welcome", (_req, res) => {
-  // Bienvenida neutral y breve
   res.json({
-    message: "La paz esté contigo. Te escucho con calma. ¿Qué quisieras compartir hoy?",
+    message: "La paz esté contigo. Estoy aquí para escucharte y acompañarte con calma.",
     bible: {
-      text: "Dios es el amparo y fortaleza; nuestro pronto auxilio en las tribulaciones.",
-      ref: "Salmos 46:1 (RVR1909)"
+      text: "El Señor es mi luz y mi salvación; ¿de quién temeré?",
+      ref: "Salmos 27:1"
     }
   });
 });
 
+// -------- Arranque --------
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`Servidor listo en puerto ${PORT}`);
