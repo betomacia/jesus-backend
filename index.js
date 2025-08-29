@@ -134,18 +134,21 @@ function stripQuestions(s = "") {
 
 // -------- Llamada LLM --------
 // -------- Llamada LLM --------
+// 1) Helpers simples y livianos
+const ACK_TIMEOUT_MS = 6000; // 6s: ACK = respuesta rápida, sin colgar
+
 function isAck(msg = "") {
-  return /^\s*(si|sí|ok|okay|vale|dale|de acuerdo|perfecto|genial|bien)\s*\.?$/i.test(msg.trim());
+  return /^\s*(si|sí|ok|okay|vale|dale|de acuerdo|perfecto|genial|bien)\s*\.?$/i.test((msg || "").trim());
 }
 
 function extractLastBibleRef(history = []) {
   const rev = [...(history || [])].reverse();
   for (const h of rev) {
-    const str = String(h);
+    const s = String(h);
     const m =
-      str.match(/—\s*([A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+\s+\d+:\d+)/) ||
-      str.match(/-\s*([A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+\s+\d+:\d+)/) ||
-      str.match(/\(\s*([A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+\s+\d+:\d+)\s*\)/);
+      s.match(/—\s*([A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+\s+\d+:\d+)/) ||
+      s.match(/-\s*([A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+\s+\d+:\d+)/) ||
+      s.match(/\(\s*([A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+\s+\d+:\d+)\s*\)/);
     if (m && m[1]) return m[1].trim();
   }
   return "";
@@ -161,75 +164,37 @@ function lastSubstantiveUser(history = []) {
   return "";
 }
 
-function extractRecentAssistantBullets(history = [], maxMsgs = 2) {
-  const rev = [...(history || [])].reverse();
-  const bullets = [];
-  let seen = 0;
-  for (const h of rev) {
-    if (/^Asistente:/i.test(h)) {
-      const text = h.replace(/^Asistente:\s*/i, "");
-      const lines = text.split(/\n+/);
-      for (const l of lines) {
-        const m = l.match(/^\s*•\s*(.+)$/);
-        if (m && m[1]) bullets.push(m[1].trim().toLowerCase());
-      }
-      seen++;
-      if (seen >= maxMsgs) break;
-    }
-  }
-  return Array.from(new Set(bullets)).slice(0, 8);
+function compactHistory(history = [], keep = 6, maxLen = 260) {
+  const arr = Array.isArray(history) ? history : [];
+  const tail = arr.slice(-keep);
+  return tail.map(x => String(x).slice(0, maxLen));
 }
 
-async function askLLM({ persona, message, history = [] }) {
-  const ack = isAck(message);
-  const lastRef = extractLastBibleRef(history);
-  const focusHint = lastSubstantiveUser(history);
-  const avoidBullets = extractRecentAssistantBullets(history);
+// Banco mínimo para fallback bíblico sin repetir la última referencia
+const VERSE_BANK = [
+  { ref: "Juan 8:36", text: "Así que, si el Hijo os libertare, seréis verdaderamente libres." },
+  { ref: "Proverbios 22:3", text: "El avisado ve el mal, y se esconde; mas los simples pasan, y reciben el daño." },
+  { ref: "1 Juan 4:18", text: "En el amor no hay temor, sino que el perfecto amor echa fuera el temor." },
+  { ref: "Gálatas 6:1", text: "Hermanos, si alguno fuere tomado en alguna falta, vosotros que sois espirituales, restauradle con espíritu de mansedumbre." },
+  { ref: "Santiago 1:5", text: "Y si alguno de vosotros tiene falta de sabiduría, pídala a Dios, el cual da a todos abundantemente y sin reproche, y le será dada." }
+];
 
-  const userContent =
-    `Persona: ${persona}\n` +
-    `Mensaje_actual: ${message}\n` +
-    `Ack_actual: ${ack}\n` +
-    `Tema_prev_sustantivo: ${focusHint || "(sin pista)"}\n` +
-    `last_bible_ref: ${lastRef || "(n/a)"}\n` +
-    (avoidBullets.length ? `avoid_bullets:\n- ${avoidBullets.join("\n- ")}\n` : "") +
-    (history?.length ? `Historial: ${history.join(" | ")}` : "Historial: (sin antecedentes)");
-
-  const resp = await openai.chat.completions.create({
-    model: "gpt-4o",
-    temperature: 0.6,
-    frequency_penalty: 0.5,
-    presence_penalty: 0.2,
-    messages: [
-      { role: "system", content: SYSTEM_PROMPT },
-      { role: "user", content: userContent }
-    ],
-    response_format: responseFormat
-  });
-
-  const content = resp.choices?.[0]?.message?.content || "{}";
-  let data = {};
-  try {
-    data = JSON.parse(content);
-  } catch {
-    data = { message: content };
-  }
-
-  // Normalizaciones
-  let msg = (data?.message || "").toString();
-  msg = stripQuestions(msg); // message sin signos de pregunta
-  let ref = cleanRef(data?.bible?.ref || "");
-  const question = (data?.question || "").toString().trim();
-
-  return {
-    message: msg,
-    bible: {
-      text: (data?.bible?.text || "").toString().trim(),
-      ref
-    },
-    question
-  };
+function pickAltVerse(lastRef = "") {
+  const alt = VERSE_BANK.find(v => v.ref !== (lastRef || "").trim());
+  return alt || VERSE_BANK[0];
 }
+
+// Fallback on-topic para ACK (“sí/ok/vale”): pasa a práctica, sin salirse del tema
+function ackSmartFallback({ focusHint = "", lastRef = "" }) {
+  const addictionLike = /hijo|consum|droga/i.test(focusHint || "");
+  const verse = pickAltVerse(lastRef);
+  const message = addictionLike
+    ? "Hijo mío, pasemos a la práctica de esta noche. • Abre con: “Te amo y me preocupa tu bienestar”. • Nombra brevemente lo que viste sin juicio. • Propón pedir ayuda juntos y explica un límite amable si se tensa."
+    : "Alma amada, avancemos con un paso práctico. • Pon en palabras lo que necesitas. • Elige una acción pequeña para hoy. • Busca a una persona de apoyo para sostener ese paso.";
+  const question = addictionLike
+    ? "¿Quieres ensayar ahora esa frase inicial para sentirte más seguro?"
+    : "¿Cuál es el primer paso pequeño que vas a dar hoy?";
+
 
 
 // -------- Rutas --------
@@ -277,4 +242,5 @@ const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`Servidor listo en puerto ${PORT}`);
 });
+
 
