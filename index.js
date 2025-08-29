@@ -362,7 +362,7 @@ async function regenerateBibleAvoiding({ persona, message, focusHint, frame, ban
   const usr =
     `Persona: ${persona}\n` +
     `Mensaje_actual: ${message}\n` +
-    `Tema_prev_sustantivo: ${focusHint || "(sin pista)"}\n" +
+    `Tema_prev_sustantivo: ${focusHint || "(sin pista)"}\n` +   // <- aquí estaba el error: antes tenía \n" +
     `FRAME: ${JSON.stringify(frame)}\n` +
     `last_bible_ref: ${lastRef || "(n/a)"}\n` +
     `banned_refs:\n- ${bannedRefs.join("\n- ")}\n`;
@@ -381,6 +381,7 @@ async function regenerateBibleAvoiding({ persona, message, focusHint, frame, ban
   const ref = cleanRef((data?.bible?.ref || "").toString());
   return text && ref ? { text, ref } : null;
 }
+
 
 async function askLLM({ persona, message, history = [], userId = "anon", profile = {} }) {
   const mem = await readUserMemory(userId);
@@ -631,3 +632,4 @@ const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`Servidor listo en puerto ${PORT}`);
 });
+
