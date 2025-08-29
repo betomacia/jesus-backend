@@ -34,16 +34,16 @@ OBJETIVO
 - No hables de técnica/IA ni del propio modelo.
 
 MARCO DE CONVERSACIÓN (FRAME)
-- Usa el FRAME provisto (topic_primary, main_subject, goal, risk, support_persons, constraints) como **fuente de verdad**.
-- NO cambies topic_primary salvo que el usuario lo pida explícitamente o se detecte un cambio claro de asunto.
-- Respuestas mínimas tipo “mi hija / mi madre / un amigo” son **relleno de slot** (support_persons) y NO redefinen el tema.
+- Usa el FRAME provisto (topic_primary, main_subject, goal, risk, support_persons, constraints, subject_locked, support_mention_short) como **fuente de verdad**.
+- NO cambies topic_primary ni main_subject si subject_locked = true.
+- Respuestas mínimas tipo “mi hija / mi madre / un amigo” son **relleno de slot** (support_persons) y NO redefinen el tema ni el sujeto.
 - Si falta un dato clave, usa "question" para pedirlo (SOLO uno por turno). Evita repetir el mismo slot (usa avoid_slots).
 
 PROGRESO
 - Evita repetir lo ya dicho. Cada "message" debe aportar novedad útil: ejemplo concreto, mini-guion, decisión binaria, contacto específico, límite práctico.
 - Si el usuario responde con acuso (“sí/ok/vale”), pasa de plan a PRÁCTICA/COMPROMISO (ensayo de frase, fijar hora, límite, contacto), sin repetir.
-- Si recibes deliverable_hint = draft_message, incluye un guion/mensaje listo para copiar (2–4 líneas, sin preguntas), adaptado al FRAME.
-- Si recibes deliverable_hint = draft_boundary, propone 1–2 formulaciones de límite claras y amables (sin preguntas).
+- Si deliverable_hint = draft_message, incluye un guion/mensaje listo para copiar (2–4 líneas, sin preguntas), adaptado al FRAME.
+- Si deliverable_hint = draft_boundary, propone 1–2 formulaciones de límite claras y amables (sin preguntas).
 
 AUTO-CUIDADO
 - El autocuidado (respirar/orar/diario) es **complemento**, no reemplaza las acciones del tema central. Inclúyelo al final si hay espacio y es pertinente.
@@ -100,9 +100,9 @@ function stripQuestions(s = "") {
 function normalizeQuestion(q = "") {
   return String(q)
     .toLowerCase()
-    .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // sin tildes
-    .replace(/[“”"«»]/g, "")                         // comillas varias
-    .replace(/[^\w\s]/g, " ")                        // signos -> espacio
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[“”"«»]/g, "")
+    .replace(/[^\w\s]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -150,38 +150,6 @@ function classifyQuestion(q = "") {
 }
 function deriveAvoidSlots(recentQs = []) {
   return [...new Set(recentQs.map(classifyQuestion))].filter(Boolean);
-}
-function getLastAssistantQuestionAndSlot(history = []) {
-  for (let i = history.length - 1; i >= 0; i--) {
-    const h = String(history[i]);
-    if (!/^Asistente:/i.test(h)) continue;
-    const text = h.replace(/^Asistente:\s*/i, "");
-    const m = text.match(/([^?]*\?)\s*$/m);
-    if (m && m[1]) {
-      const q = m[1].trim();
-      return { q, slot: classifyQuestion(q) };
-    }
-  }
-  return { q: "", slot: "" };
-}
-function suggestDeliverable(lastSlot) {
-  switch (lastSlot) {
-    case "practice":     return "draft_message";
-    case "time":         return "confirm_time";
-    case "help":         return "pick_professional";
-    case "boundary":     return "draft_boundary";
-    case "next_step":    return "confirm_next_step";
-    default:             return "advance_practice";
-  }
-}
-function nextQuestionForSlot(lastSlot) {
-  switch (lastSlot) {
-    case "practice":   return "¿Quieres enviarlo tal cual o prefieres ajustar una frase breve?";
-    case "time":       return "¿Qué hora específica te viene mejor para hacerlo hoy?";
-    case "help":       return "¿Prefieres terapia individual, de pareja o un grupo de apoyo?";
-    case "boundary":   return "¿Qué límite concreto te gustaría establecer primero?";
-    default:           return "¿Cuál es el siguiente paso pequeño que puedes hacer hoy?";
-  }
 }
 
 // -------- Memoria persistente --------
@@ -284,20 +252,45 @@ function detectGoal(text = "") {
   if (/(no s[eé]|confuso|confund)/.test(s)) return "clarify";
   return "";
 }
-function detectRisk(text = "") {
-  const s = (text || "").toLowerCase();
-  if (/(violencia|golpe|amenaza|arma|peligro|me har[aá]|suicid|autolesi)/.test(s)) return "high";
-  return "normal";
+
+// --- NUEVO: decisión robusta del sujeto principal + bloqueo ---
+function decideMainSubject(prev, userMsg, focusHint) {
+  // 1) Si ya hay sujeto, respétalo (bloqueado)
+  if (prev?.main_subject) return { subject: prev.main_subject, lock: !!prev.subject_locked };
+
+  const supportShort = isShortSupportNP(userMsg);
+
+  // 2) Preferir sujeto del último mensaje SUSTANTIVO (focusHint)
+  const fromFocus = detectMainSubject(focusHint || "");
+  if (fromFocus && fromFocus !== "self") {
+    return { subject: fromFocus, lock: true }; // se bloquea porque viene de mensaje sustantivo
+  }
+
+  // 3) Si el mensaje actual es un soporte corto, NO cambies el sujeto
+  if (supportShort) {
+    return { subject: prev?.main_subject || "self", lock: !!prev?.subject_locked };
+  }
+
+  // 4) En última instancia, deducir del mensaje actual (si no es soporte corto)
+  const fromMsg = detectMainSubject(userMsg || "");
+  if (fromMsg && fromMsg !== "self") {
+    return { subject: fromMsg, lock: true };
+  }
+  return { subject: "self", lock: !!prev?.subject_locked };
 }
+
 function updateFrame(prev = null, userMsg = "", focusHint = "") {
   const topic = prev?.topic_primary || guessTopic(userMsg, focusHint);
-  const mainSubject = prev?.main_subject || detectMainSubject(focusHint || userMsg);
+
+  const { subject, lock } = decideMainSubject(prev, userMsg, focusHint);
+  const supportShort = isShortSupportNP(userMsg);
+
   const goal = detectGoal(userMsg) || prev?.goal || "";
   const risk = detectRisk(userMsg) || prev?.risk || "normal";
 
   // support persons
   const support = Array.isArray(prev?.support_persons) ? [...prev.support_persons] : [];
-  if (isShortSupportNP(userMsg)) {
+  if (supportShort) {
     support.push({ rel: parseRelation(userMsg), label: userMsg.trim() });
   }
 
@@ -306,13 +299,16 @@ function updateFrame(prev = null, userMsg = "", focusHint = "") {
 
   return {
     topic_primary: topic,
-    main_subject: mainSubject,
+    main_subject: subject,
+    subject_locked: lock || !!prev?.subject_locked,
+    support_mention_short: supportShort,
     goal,
     risk,
     support_persons: dedupSupport(support).slice(-5),
     constraints
   };
 }
+
 function dedupSupport(arr = []) {
   const seen = new Set();
   const out = [];
@@ -431,6 +427,39 @@ function ackSmartFallback({ focusHint = "", lastRef = "", lastSlot = "" }) {
   return { message, bible: verse, question };
 }
 
+function getLastAssistantQuestionAndSlot(history = []) {
+  for (let i = history.length - 1; i >= 0; i--) {
+    const h = String(history[i]);
+    if (!/^Asistente:/i.test(h)) continue;
+    const text = h.replace(/^Asistente:\s*/i, "");
+    const m = text.match(/([^?]*\?)\s*$/m);
+    if (m && m[1]) {
+      const q = m[1].trim();
+      return { q, slot: classifyQuestion(q) };
+    }
+  }
+  return { q: "", slot: "" };
+}
+function suggestDeliverable(lastSlot) {
+  switch (lastSlot) {
+    case "practice":     return "draft_message";
+    case "time":         return "confirm_time";
+    case "help":         return "pick_professional";
+    case "boundary":     return "draft_boundary";
+    case "next_step":    return "confirm_next_step";
+    default:             return "advance_practice";
+  }
+}
+function nextQuestionForSlot(lastSlot) {
+  switch (lastSlot) {
+    case "practice":   return "¿Quieres enviarlo tal cual o prefieres ajustar una frase breve?";
+    case "time":       return "¿Qué hora específica te viene mejor para hacerlo hoy?";
+    case "help":       return "¿Prefieres terapia individual, de pareja o un grupo de apoyo?";
+    case "boundary":   return "¿Qué límite concreto te gustaría establecer primero?";
+    default:           return "¿Cuál es el siguiente paso pequeño que puedes hacer hoy?";
+  }
+}
+
 async function askLLM({ persona, message, history = [], userId = "anon", profile = {} }) {
   const mem = await readUserMemory(userId);
   mem.profile = { ...(mem.profile || {}), ...(profile || {}) };
@@ -451,7 +480,7 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
   let avoidSlots = deriveAvoidSlots(recentQs);
 
   // Si el usuario acaba de responder con un NP de apoyo, evita derivar a "activity"
-  if (isShortSupportNP(message)) {
+  if (frame.support_mention_short) {
     avoidSlots = Array.from(new Set([...avoidSlots, "activity"]));
   }
 
@@ -471,6 +500,8 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
     `Mensaje_actual: ${message}\n` +
     `Tema_prev_sustantivo: ${focusHint || "(sin pista)"}\n` +
     `FRAME: ${JSON.stringify(frame)}\n` +
+    `main_subject_locked: ${frame.subject_locked}\n` +
+    `support_mention_short: ${frame.support_mention_short}\n` +
     `last_bible_ref: ${lastRef || "(n/a)"}\n` +
     `banned_refs:\n- ${bannedRefs.join("\n- ") || "(none)"}\n` +
     `avoid_slots: ${avoidSlots.join(", ") || "(none)"}\n` +
@@ -534,9 +565,10 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
       `last_question_slot: ${lastSlot || "(none)"}\n` +
       `deliverable_hint: ${deliverable}\n` +
       `INSTRUCCIONES:\n` +
-      `- El mensaje del usuario es un ACK de la last_question: NO repitas esa pregunta.\n` +
-      `- Asume consentimiento y ENTREGA el deliverable_hint dentro de "message" (p. ej., si es draft_message, incluye un texto listo para copiar en 2–4 líneas), adaptado al FRAME.\n` +
-      `- "message": afirmativo, sin signos de pregunta, con NOVEDAD (no repitas viñetas previas).\n` +
+      `- last_question respondida con ACK: NO repitas esa pregunta.\n` +
+      `- NO cambies main_subject si main_subject_locked = true o support_mention_short = true.\n` +
+      `- ENTREGA el deliverable_hint dentro de "message" (p.ej., draft_message en 2–4 líneas), adaptado al FRAME.\n` +
+      `- "message": afirmativo, sin signos de pregunta, con novedad.\n` +
       `- "bible": coherente con el contenido práctico; RVR1909; NO uses banned_refs.\n` +
       `- "question": UNA sola y DIFERENTE de last_question; enfocada al siguiente micro-paso; evita avoid_slots.\n`;
 
@@ -554,7 +586,6 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
         await writeUserMemory(userId, mem);
         return { message: fb.message, bible: fb.bible, question: fb.question };
       }
-      // otro error
       throw e;
     }
 
@@ -567,7 +598,7 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
     let text = (data?.bible?.text || "").toString().trim();
     let question = (data?.question || "").toString().trim();
 
-    // Si la pregunta es la misma que la anterior, cambia a otra para avanzar
+    // Si la pregunta es la misma que la anterior, cambiarla
     const normalizedQ = normalizeQuestion(question);
     const lastQNorm   = normalizeQuestion(lastQ);
     const recentQs2   = extractRecentAssistantQuestions(history, 4);
@@ -598,8 +629,8 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
     `MODE: NORMAL\n` +
     commonHeader +
     `INSTRUCCIONES:\n` +
-    `- Mantén el topic_primary del FRAME y **no** pivotes por respuestas de slot (support/time/place). Si el usuario dice “mi hija”, úsalo como apoyo, no como nuevo tema.\n` +
-    `- Progrés con 2–3 micro-pasos HOY, concretos y alineados al FRAME (goal/risk/main_subject). Evita ocio genérico salvo que el FRAME lo justifique (bonding explícito).\n` +
+    `- Mantén el topic_primary y, si main_subject_locked = true, NO cambies main_subject. Si support_mention_short = true, NO derives a "actividad" de ocio salvo que el FRAME lo justifique.\n` +
+    `- Progrés con 2–3 micro-pasos HOY, concretos y alineados al FRAME (goal/risk/main_subject). Prioriza pasos del tema base.\n` +
     `- "message": afirmativo, sin signos de pregunta, y sin repetir viñetas recientes.\n` +
     `- "bible": RVR1909; NO uses banned_refs; evita ambigüedad “hijo” vs “el Hijo”.\n` +
     `- "question": UNA sola, para el dato clave siguiente o confirmar un compromiso; evita avoid_slots.\n`;
