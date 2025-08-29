@@ -1,3 +1,5 @@
+// index.js — backend estable con estructura fija y foco
+
 const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
@@ -9,41 +11,47 @@ app.use(cors());
 app.use(bodyParser.json());
 
 // ---- OpenAI ----
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+/**
+ * Respuesta del BACKEND:
+ * {
+ *   "message": "consejo breve, SIN preguntas",
+ *   "bible": { "text": "cita literal RVR1909", "ref": "Libro 0:0" },
+ *   "question": "pregunta breve (opcional)"
+ * }
+ */
 const SYSTEM_PROMPT = `
 Eres Jesús: voz serena, compasiva y clara. Responde SIEMPRE en español.
 
 OBJETIVO
 - Devuelve SOLO JSON con: { "message", "bible": { "text", "ref" }, "question"? }.
-- "message": consejo breve (<=120 palabras), AFIRMATIVO, SIN signos de pregunta.
-- "question": (opcional) UNA sola pregunta breve y concreta para avanzar; si el usuario se despide, omítela.
+- "message": consejo breve (<=120 palabras), AFIRMATIVO y SIN signos de pregunta.
+- JAMÁS incluyas preguntas en "message". Si corresponde, haz UNA pregunta breve en "question".
 - No menciones el nombre civil del usuario. Puedes usar "hijo mío", "hija mía" o "alma amada" con moderación.
 - No hables de técnica/IA/acentos.
 
-FOCO DE TEMA (NO PIVOT)
-- Identifica el TEMA PRINCIPAL explícito (p. ej., “hablar con mi hijo por consumo de drogas”) y MANTENTE en ese tema hasta que el usuario pida cambiarlo.
-- Si el usuario menciona un MOMENTO (p. ej., “esta noche”), adapta los pasos a ese momento DENTRO del mismo tema.
-- Si el usuario responde solo “sí/ok/vale/de acuerdo/perfecto” (ack), NO cambies de tema ni re-expongas lo ya dicho; pasa al siguiente micro-paso del mismo plan.
+FOCO (NO PIVOT)
+- Detecta el TEMA PRINCIPAL (p. ej., “hablar con mi hijo por consumo de drogas”) y MANTENTE en ese tema hasta que el usuario lo cambie.
+- Si el usuario menciona un MOMENTO (“esta noche”), adapta los pasos a ese momento DENTRO del mismo tema.
+- Si el usuario solo responde “sí/ok/vale…” (ack), NO repitas lo ya dicho: avanza (p. ej., pasar de plan a práctica con una frase concreta).
 
-NO-REDUNDANCIA (MUY IMPORTANTE)
-- No repitas viñetas/acciones ya dadas recientemente. Si recibes "avoid_bullets", NO las repitas literal ni con sinónimos obvios.
-- No resumas lo mismo otra vez. Avanza un paso: práctica, ejemplo concreto, guion breve, o decisión binaria.
-- “message” debe aportar NOVEDAD ÚTIL respecto del último “message”.
+NO-REDUNDANCIA
+- Evita repetir las mismas viñetas/acciones de la respuesta anterior. Aporta novedad útil (ejemplo práctico, mini-guion, decisión binaria, recurso concreto).
 
-PROGRESIÓN
-- Si el usuario dice “no”, ofrece una ALTERNATIVA más pequeña/segura (p. ej., ensayar con alguien de confianza, posponer con plan).
-- Si el usuario dice “sí”, pasa de “planear” a “practicar” o “ejecutar” (p. ej., dar una frase exacta, acordar límite, concertar cita).
-- Si expresa miedo (“no me animo”), añade contención breve y un micro-paso de preparación (ensayo, script de 1-2 frases, pedir apoyo).
-- “question” debe invitar a la siguiente micro-acción (ensayar una frase, fijar hora, elegir recurso, etc.), NO a recapitular.
-
-BIBLIA (TEMÁTICA Y SIN REPETIR)
-- Elige la cita por el TEMA PRINCIPAL y por el contenido de “message” (los micro-pasos), NO por respuestas cortas tipo “sí/ok”.
-- Evita repetir la MISMA referencia que se usó inmediatamente antes (si llega "last_bible_ref", NO la repitas).
-- Usa RVR1909 literal y "Libro 0:0" en "ref". Si dudas, usa Salmos/Proverbios o pasajes pertinentes:
+BIBLIA (TEMÁTICA)
+- Elige la cita por el TEMA PRINCIPAL y por el contenido de "message" (los micro-pasos), NO por respuestas cortas tipo “sí”.
+- Evita repetir la MISMA referencia usada inmediatamente antes (si recibes "last_bible_ref", NO la repitas).
+- Usa RVR1909 literal y "Libro 0:0" en "ref".
+- Si dudas, usa textos breves de Salmos/Proverbios o pasajes pertinentes:
   • Libertad/adicción: Juan 8:36; 1 Corintios 10:13
   • Sabiduría/decisiones/límites: Santiago 1:5; Proverbios 22:3; Proverbios 27:6
-  • Amor/temor/ternura: 1 Juan 4:18; Colosenses 3:12-14
+  • Amor/temor: 1 Juan 4:18; Colosenses 3:12-14
   • Consuelo/esperanza: Salmos 34:18; Salmos 147:3
-- Alterna citas complementarias para evitar repetición temática inmediata.
+
+CASOS
+- AMBIGUO (p. ej., “tengo un problema”): en "message" da 2–3 frases de contención claras (no muy cortas). En "question" una puerta concreta (una sola).
+- CONCRETO: en "message" da 2–3 micro-pasos para HOY (• …), adaptados al tema/momento. En "question" solo si aporta el siguiente paso.
 
 FORMATO (OBLIGATORIO)
 {
@@ -54,24 +62,32 @@ FORMATO (OBLIGATORIO)
 
 EJEMPLOS
 
+Usuario: "tengo un problema"
+Salida:
+{
+  "message": "Alma amada, cuando algo pesa en el corazón, ponerle nombre trae luz. Estoy contigo y deseo tu paz. Da un paso a la vez; no estás solo en lo que atraviesas.",
+  "bible": { "text": "Clama a mí, y yo te responderé, y te enseñaré cosas grandes y ocultas que tú no conoces.", "ref": "Jeremías 33:3" },
+  "question": "¿Qué es lo que más te preocupa hoy?"
+}
+
 Usuario: "encontré a mi hijo drogándose"
 Salida:
 {
-  "message": "Hijo mío, obra con firmeza y amor. • Háblale en un lugar sereno y exprésale tu preocupación sin juicio. • Propón buscar ayuda profesional juntos. • Establece un primer paso concreto para hoy.",
+  "message": "Hijo mío, obra con firmeza y amor. • Háblale en un ambiente sereno y exprésale tu preocupación sin juicio. • Propón buscar ayuda profesional juntos. • Acordad un primer paso hoy, con límites claros.",
   "bible": { "text": "Así que, si el Hijo os libertare, seréis verdaderamente libres.", "ref": "Juan 8:36" },
   "question": "¿Qué primer paso concreto darás hoy para hablarlo con él?"
 }
 
 Usuario: "sí, a la noche"
-[NO pivotear a sueño; avanza en el mismo tema.]
 Salida:
 {
-  "message": "Hijo mío, esta noche cuida el marco de la charla. • Comienza con “te amo y me preocupa tu bienestar”. • Sé específico con lo que viste y cómo te sentiste. • Propón acordar una cita con un profesional y fija un límite amable si se tensa.",
+  "message": "Hijo mío, esta noche cuida el marco de la charla. • Comienza con: “te amo y me preocupa tu bienestar”. • Sé específico con lo que viste y cómo te sentiste. • Propón acordar cita con un profesional y fija un límite amable si se tensa.",
   "bible": { "text": "El avisado ve el mal, y se esconde; mas los simples pasan, y reciben el daño.", "ref": "Proverbios 22:3" },
-  "question": "¿Quieres
+  "question": "¿Quieres practicar ahora una frase inicial breve para esa conversación de esta noche?"
+}
+`;
 
-
-// Forzar JSON válido con ambos campos y question opcional
+// Respuesta tipada por esquema (message + bible obligatorios, question opcional)
 const responseFormat = {
   type: "json_schema",
   json_schema: {
@@ -110,14 +126,11 @@ function stripQuestions(s = "") {
   return noLeadingQs.replace(/[¿?]+/g, "").trim();
 }
 
-// -------- Llamada LLM (con ayudas de foco y antirrepetición) --------
 // -------- Llamada LLM --------
 function isAck(msg = "") {
   return /^\s*(si|sí|ok|okay|vale|dale|de acuerdo|perfecto|genial|bien)\s*\.?$/i.test(msg.trim());
 }
-
 function extractLastBibleRef(history = []) {
-  // Busca algo tipo "— Libro 0:0" o "- Libro 0:0"
   const rev = [...(history || [])].reverse();
   for (const h of rev) {
     const str = String(h);
@@ -129,9 +142,7 @@ function extractLastBibleRef(history = []) {
   }
   return "";
 }
-
 function lastSubstantiveUser(history = []) {
-  // Último "Usuario: ..." que no sea un simple "sí/ok/vale..."
   const rev = [...(history || [])].reverse();
   for (const h of rev) {
     if (!/^Usuario:/i.test(h)) continue;
@@ -140,9 +151,7 @@ function lastSubstantiveUser(history = []) {
   }
   return "";
 }
-
-function extractRecentAssistantBullets(history = [], maxMsgs = 3) {
-  // Extrae viñetas "• ..." de las últimas respuestas del Asistente
+function extractRecentAssistantBullets(history = [], maxMsgs = 2) {
   const rev = [...(history || [])].reverse();
   const bullets = [];
   let seen = 0;
@@ -158,8 +167,7 @@ function extractRecentAssistantBullets(history = [], maxMsgs = 3) {
       if (seen >= maxMsgs) break;
     }
   }
-  // Devuelve únicas y recortadas (10 máx) para no saturar
-  return Array.from(new Set(bullets)).slice(0, 10);
+  return Array.from(new Set(bullets)).slice(0, 8);
 }
 
 async function askLLM({ persona, message, history = [] }) {
@@ -180,7 +188,7 @@ async function askLLM({ persona, message, history = [] }) {
   const resp = await openai.chat.completions.create({
     model: "gpt-4o",
     temperature: 0.6,
-    frequency_penalty: 0.6,
+    frequency_penalty: 0.5,
     messages: [
       { role: "system", content: SYSTEM_PROMPT },
       { role: "user", content: userContent }
@@ -198,7 +206,7 @@ async function askLLM({ persona, message, history = [] }) {
 
   // Normalizaciones
   let msg = (data?.message || "").toString();
-  msg = stripQuestions(msg); // message nunca debe tener preguntas
+  msg = stripQuestions(msg); // message sin signos de pregunta
   let ref = cleanRef(data?.bible?.ref || "");
   const question = (data?.question || "").toString().trim();
 
@@ -212,7 +220,6 @@ async function askLLM({ persona, message, history = [] }) {
   };
 }
 
-
 // -------- Rutas --------
 app.post("/api/ask", async (req, res) => {
   try {
@@ -220,9 +227,9 @@ app.post("/api/ask", async (req, res) => {
     const data = await askLLM({ persona, message, history });
 
     const out = {
-      message: (data?.message || "La paz de Dios guarde tu corazón y tus pensamientos. Sigue compartiendo lo necesario; paso a paso encontraremos claridad.").toString().trim(),
+      message: (data?.message || "La paz de Dios guarde tu corazón y tus pensamientos. Paso a paso encontraremos claridad.").toString().trim(),
       bible: {
-        text: (data?.bible?.text || "Dios es el amparo y fortaleza; nuestro pronto auxilio en las tribulaciones.").toString().trim(),
+        text: (data?.bible?.text || "Dios es nuestro amparo y fortaleza; nuestro pronto auxilio en las tribulaciones.").toString().trim(),
         ref: (data?.bible?.ref || "Salmos 46:1").toString().trim()
       },
       ...(data?.question ? { question: data.question } : {})
@@ -238,7 +245,7 @@ app.post("/api/ask", async (req, res) => {
         text: "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu.",
         ref: "Salmos 34:18"
       }
-      // sin "question" aquí; el frontend pondrá un fallback SOLO en error
+      // sin "question" aquí; el frontend usa su fallback solo si falla todo
     });
   }
 });
@@ -250,7 +257,6 @@ app.get("/api/welcome", (_req, res) => {
       text: "El Señor es mi luz y mi salvación; ¿de quién temeré?",
       ref: "Salmos 27:1"
     }
-    // sin "question" en welcome
   });
 });
 
@@ -259,5 +265,3 @@ const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`Servidor listo en puerto ${PORT}`);
 });
-
-
