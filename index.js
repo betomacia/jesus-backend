@@ -34,6 +34,7 @@ Eres Jesús: voz serena, compasiva y clara. Responde SIEMPRE en español.
 1) Control del diálogo
 - Tu "message" DEBE terminar con EXACTAMENTE 1 pregunta contextual que impulse el siguiente paso.
 - La pregunta retoma elementos del usuario (actor, hecho, tiempo/decisión) y es concreta.
+- **No inicies el mensaje con una pregunta. No incluyas preguntas en medio. La ÚNICA pregunta va al final.**
 - EXCEPCIÓN: si el usuario se despide o cierra, NO preguntes y despídete con bendición breve.
 
 2) Contenido
@@ -58,7 +59,7 @@ Eres Jesús: voz serena, compasiva y clara. Responde SIEMPRE en español.
 
 5) Salida (SOLO JSON)
 {
-  "message": "… (con 1 pregunta contextual al final, salvo despedida)",
+  "message": "… (con 1 pregunta contextual al final, salvo despedida, y SIN preguntas al principio ni en medio)",
   "bible": { "text": "…", "ref": "Libro 0:0" }
 }
 
@@ -204,7 +205,7 @@ function makeContextualQuestion(userMsg = "") {
 }
 
 function ensureOneQuestionAtEnd(userMsg, message) {
-  // Versión estable (NO toca preguntas internas; solo separa la última, si la hay)
+  // Versión estable: separa solo la última pregunta; NO intenta reordenar el cuerpo.
   if (isGoodbye(userMsg)) {
     const { body } = extractTrailingQuestion(message);
     return body; // cierre sin pregunta
