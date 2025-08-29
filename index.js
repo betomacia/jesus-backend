@@ -1,5 +1,4 @@
-// index.js — backend orquestado (Planner → Writer → Verse) con memoria persistente
-// Contrato de salida: { message, bible: { text, ref }, question? }
+// index.js — backend orquestado (Planner → Writer → Verse) con memoria persistente y anti-desvío
 
 const express = require("express");
 const cors = require("cors");
@@ -19,23 +18,29 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 // ---------------------- PROMPTS BASE ----------------------
 
 const SYSTEM_PROMPT_CORE =
-  "Eres Jesús: voz serena, compasiva y clara. Responde SIEMPRE en español.\n\n" +
-  "OBJETIVO\n" +
-  "- Devuelve SOLO JSON con: { \"message\", \"bible\": { \"text\", \"ref\" }, \"question\"? }.\n" +
-  "- \"message\": consejo breve (<=120 palabras), AFIRMATIVO, SIN signos de pregunta.\n" +
-  "- JAMÁS incluyas preguntas en \"message\". Si corresponde, haz UNA pregunta breve en \"question\".\n" +
-  "- No menciones el nombre civil del usuario. Usa \"hijo mío\", \"hija mía\" o \"alma amada\" con moderación.\n" +
-  "- No hables de técnica/IA ni del propio modelo.\n\n" +
-  "MARCO (FRAME) Y FOCO\n" +
-  "- Usa el FRAME (topic_primary, main_subject, goal, risk, support_persons, constraints) como fuente de verdad.\n" +
-  "- NO cambies el topic_primary salvo que el usuario pida explícitamente cambiar de asunto.\n" +
-  "- Una respuesta corta del usuario (\"mi hija\", \"un amigo\") es un slot de apoyo, NO un cambio de tema.\n\n" +
-  "PROGRESO Y NOVEDAD\n" +
-  "- Cada turno debe aportar novedad útil (mini-guion, decisión binaria, límite práctico, contacto concreto).\n" +
-  "- Tras un ACK (\"sí/ok/vale\"), pasa de plan a PRÁCTICA/COMPROMISO (ensayar guion, fijar hora, límite, contacto).\n\n" +
-  "BIBLIA\n" +
-  "- Cita RVR1909 literal. \"ref\" con formato \"Libro 0:0\".\n" +
-  "- La cita se elige por el TEMA y por el contenido de \"message\", no por palabras sueltas.\n";
+  [
+    "Eres Jesús: voz serena, compasiva y clara. Responde SIEMPRE en español.",
+    "",
+    "OBJETIVO",
+    '- Devuelve SOLO JSON con: { "message", "bible": { "text", "ref" }, "question"? }.',
+    '- "message": consejo breve (<=120 palabras), AFIRMATIVO, SIN signos de pregunta.',
+    '- JAMÁS incluyas preguntas en "message". Si corresponde, haz UNA pregunta breve en "question".',
+    '- No menciones el nombre civil del usuario. Usa "hijo mío", "hija mía" o "alma amada" con moderación.',
+    "- No hables de técnica/IA ni del propio modelo.",
+    "",
+    "MARCO (FRAME) Y FOCO",
+    "- Usa el FRAME (topic_primary, main_subject, goal, risk, support_persons, constraints) como fuente de verdad.",
+    "- NO cambies el topic_primary salvo que el usuario pida explícitamente cambiar de asunto.",
+    '- Una respuesta corta del usuario ("mi hija", "un amigo") es un slot de apoyo, NO un cambio de tema.',
+    "",
+    "PROGRESO Y NOVEDAD",
+    "- Cada turno debe aportar novedad útil (mini-guion, decisión binaria, límite práctico, contacto concreto).",
+    '- Tras un ACK ("sí/ok/vale"), pasa de plan a PRÁCTICA/COMPROMISO (ensayar guion, fijar hora, límite, contacto).',
+    "",
+    "BIBLIA",
+    '- Cita RVR1909 literal. "ref" con formato "Libro 0:0".',
+    '- La cita se elige por el TEMA y por el contenido de "message", no por palabras sueltas.'
+  ].join("\n");
 
 // ---------------------- SCHEMAS JSON ----------------------
 
@@ -265,22 +270,27 @@ async function completionWithSchema({ model = "gpt-4o", temperature = 0.6, max_t
 async function planFrame({ persona, message, history, mem }) {
   const persistentMemory = buildPersistentMemoryPrompt(mem);
   const shortHistory = compactHistory(history, 8, 240);
+  const lastQClass = mem.last_question_class || "";
 
-  const sys =
-    SYSTEM_PROMPT_CORE +
-    "\nTU FUNCIÓN: PLANIFICAR SIN CAMBIAR EL FOCO\n" +
-    "- Devuelve SOLO JSON con campos del esquema.\n" +
-    "- Mantén el topic_primary anterior salvo cambio explícito.\n" +
-    "- \"mi hija\"/persona de apoyo → añadir a support_persons, NO cambiar topic_primary.\n" +
-    "- Define question_class procurando NO repetir la del turno anterior.\n";
+  const sys = [
+    SYSTEM_PROMPT_CORE,
+    "",
+    "TU FUNCIÓN: PLANIFICAR SIN CAMBIAR EL FOCO",
+    "- Devuelve SOLO JSON con campos del esquema.",
+    "- Mantén el topic_primary anterior salvo cambio explícito del usuario.",
+    '- "mi hija/mi hijo" u otros apoyos → añadir a support_persons, NO cambiar topic_primary.',
+    "- Define question_class procurando NO repetir la del turno anterior.",
+  ].join("\n");
 
-  const usr =
-    "PERSONA: " + persona + "\n" +
-    "MENSAJE_ACTUAL: " + message + "\n" +
-    "FRAME_PREVIO: " + JSON.stringify(mem.frame || {}) + "\n" +
-    "LAST_QUESTION_CLASS: " + (mem.last_question_class || "(n/a)") + "\n" +
-    "PERSISTENT_MEMORY:\n" + (persistentMemory || "(vacía)") + "\n" +
-    (shortHistory.length ? ("HISTORIAL: " + shortHistory.join(" | ")) : "HISTORIAL: (sin antecedentes)");
+  const usr = [
+    `PERSONA: ${persona}`,
+    `MENSAJE_ACTUAL: ${message}`,
+    `FRAME_PREVIO: ${JSON.stringify(mem.frame || {})}`,
+    `LAST_QUESTION_CLASS: ${lastQClass || "(n/a)"}`,
+    "PERSISTENT_MEMORY:",
+    persistentMemory || "(vacía)",
+    shortHistory.length ? `HISTORIAL: ${shortHistory.join(" | ")}` : "HISTORIAL: (sin antecedentes)"
+  ].join("\n");
 
   const r = await completionWithSchema({
     model: "gpt-4o-mini",
@@ -304,8 +314,22 @@ async function planFrame({ persona, message, history, mem }) {
   };
 
   let qClass = (data.question_class || "").trim();
-  if (!qClass) qClass = rotateQuestionClass(mem.last_question_class || "");
-  if (qClass === mem.last_question_class) qClass = rotateQuestionClass(qClass);
+  if (!qClass) qClass = rotateQuestionClass(lastQClass);
+  if (qClass === lastQClass) qClass = rotateQuestionClass(qClass);
+
+  // ---------- GUARDARRAÍL GENERAL: NP de apoyo no cambia el foco ----------
+  if (isShortSupportNP(message)) {
+    if (mem.frame?.topic_primary) frame.topic_primary = mem.frame.topic_primary;
+    if (mem.frame?.main_subject) frame.main_subject = mem.frame.main_subject;
+    frame.support_persons = Array.isArray(frame.support_persons) ? frame.support_persons : [];
+    if (!frame.support_persons.includes(message.trim())) frame.support_persons.push(message.trim());
+    if (["activity", "feelings", "help"].includes(qClass)) qClass = "decision";
+  }
+
+  // Si es un ACK, empujar a compromiso/práctica
+  if (isAck(message)) {
+    if (qClass !== "commitment" && qClass !== "practice") qClass = "commitment";
+  }
 
   return { frame, question_class: qClass };
 }
@@ -315,21 +339,24 @@ async function planFrame({ persona, message, history, mem }) {
 async function writeResponse({ persona, message, history, frame, question_class, last_bible_ref, last_question }) {
   const shortHistory = compactHistory(history, 8, 240);
 
-  const sys =
-    SYSTEM_PROMPT_CORE +
-    "\nMODO ESCRITURA\n" +
-    "- Genera SOLO JSON del esquema de salida.\n" +
-    "- \"message\": 2–3 pasos HOY (• …), o contención si está ambiguo. No repitas lo dicho recientemente.\n" +
-    "- \"question\": EXACTAMENTE UNA, de clase " + question_class + " (data/decision/commitment/practice/time/help/boundary/feelings/next_step/place).\n" +
-    "- Mantén el topic_primary del FRAME.\n";
+  const sys = [
+    SYSTEM_PROMPT_CORE,
+    "",
+    "MODO ESCRITURA",
+    "- Genera SOLO JSON del esquema de salida.",
+    '- "message": 2–3 pasos HOY (• …), o contención si está ambiguo. No repitas lo dicho recientemente.',
+    `- "question": EXACTAMENTE UNA, de clase ${question_class} (data/decision/commitment/practice/time/help/boundary/feelings/next_step/place).`,
+    "- Mantén el topic_primary del FRAME."
+  ].join("\n");
 
-  const usr =
-    "PERSONA: " + persona + "\n" +
-    "MENSAJE_ACTUAL: " + message + "\n" +
-    "FRAME: " + JSON.stringify(frame) + "\n" +
-    "last_bible_ref: " + (last_bible_ref || "(n/a)") + "\n" +
-    "last_question: " + (last_question || "(n/a)") + "\n" +
-    (shortHistory.length ? ("HISTORIAL: " + shortHistory.join(" | ")) : "HISTORIAL: (sin antecedentes)");
+  const usr = [
+    `PERSONA: ${persona}`,
+    `MENSAJE_ACTUAL: ${message}`,
+    `FRAME: ${JSON.stringify(frame)}`,
+    `last_bible_ref: ${last_bible_ref || "(n/a)"}`,
+    `last_question: ${last_question || "(n/a)"}`,
+    shortHistory.length ? `HISTORIAL: ${shortHistory.join(" | ")}` : "HISTORIAL: (sin antecedentes)"
+  ].join("\n");
 
   const r = await completionWithSchema({
     model: "gpt-4o",
@@ -343,21 +370,29 @@ async function writeResponse({ persona, message, history, frame, question_class,
   let data = {};
   try { data = JSON.parse(content); } catch { data = { message: content } };
 
-  const out = {
-    message: stripQuestions((data?.message || "").toString()),
-    question: (data?.question || "").toString().trim()
-  };
+  let messageOut = stripQuestions((data?.message || "").toString());
+  let questionOut = (data?.question || "").toString().trim();
 
-  const qNorm = normalizeQuestion(out.question);
+  // Evita preguntar lo mismo que la última pregunta del asistente
+  const qNorm = normalizeQuestion(questionOut);
   const lastQNorm = normalizeQuestion(last_question || "");
   if (qNorm && qNorm === lastQNorm) {
-    out.question =
-      question_class === "decision" ? "¿Prefieres empezar con un mensaje breve o una llamada corta?" :
+    questionOut =
+      question_class === "decision" ? "¿Prefieres enviar hoy un mensaje breve o acordar una llamada corta?" :
       question_class === "commitment" ? "¿Confirmas un primer paso concreto para hoy?" :
       "¿Qué paso pequeño puedes dar ahora mismo?";
   }
 
-  return out;
+  // ---------- GUARDARRAÍL: tema pareja no deriva a “actividad con apoyo” ----------
+  const topic = (frame.topic_primary || "").toLowerCase();
+  if (/(separation|relationship)/.test(topic)) {
+    const qCheck = normalizeQuestion(questionOut);
+    if (/(actividad|paseo|salir|caminar|juntas?|planear actividad)/.test(qCheck)) {
+      questionOut = "¿Prefieres enviar hoy un mensaje breve o acordar una llamada corta con tu esposo?";
+    }
+  }
+
+  return { message: messageOut, question: questionOut };
 }
 
 // ---------------------- ETAPA 3: VERSE SELECTOR ----------------------
@@ -367,17 +402,20 @@ async function chooseBible({ persona, message, frame, bannedRefs = [], lastRef =
   const banned = Array.from(new Set([...(bannedRefs || []), lastRef].filter(Boolean)));
   if (hijoAmbiguo && !banned.includes("Juan 8:36")) banned.push("Juan 8:36");
 
-  const sys =
-    "Devuelve SOLO JSON {\"bible\":{\"text\":\"…\",\"ref\":\"Libro 0:0\"}} en RVR1909.\n" +
-    "- Elige una cita coherente con el topic_primary y los micro-pasos del \"message\" (ensayo, límites, reconciliación, pedir sabiduría...).\n" +
-    "- Evita cualquier referencia en la lista \"banned_refs\".\n" +
-    "- Evita ambigüedad entre “hijo” (niño) y “el Hijo” (Cristo) cuando no sea el punto.\n";
+  const sys = [
+    'Devuelve SOLO JSON {"bible":{"text":"…","ref":"Libro 0:0"}} en RVR1909.',
+    '- Elige una cita coherente con el topic_primary y los micro-pasos del "message" (ensayo, límites, reconciliación, pedir sabiduría...).',
+    "- Evita cualquier referencia en la lista \"banned_refs\".",
+    " - Evita ambigüedad entre “hijo” (niño) y “el Hijo” (Cristo) cuando no sea el punto."
+  ].join("\n");
 
-  const usr =
-    "PERSONA: " + persona + "\n" +
-    "FRAME: " + JSON.stringify(frame) + "\n" +
-    "MESSAGE_STEPS: " + message + "\n" +
-    "banned_refs:\n- " + (banned.join("\n- ") || "(none)") + "\n";
+  const usr = [
+    `PERSONA: ${persona}`,
+    `FRAME: ${JSON.stringify(frame)}`,
+    `MESSAGE_STEPS: ${message}`,
+    "banned_refs:",
+    ...(banned.length ? banned.map(r => `- ${r}`) : ["- (none)"])
+  ].join("\n");
 
   const r = await completionWithSchema({
     model: "gpt-4o-mini",
@@ -395,10 +433,9 @@ async function chooseBible({ persona, message, frame, bannedRefs = [], lastRef =
   return text && ref ? { text, ref } : null;
 }
 
-// ---------------------- ASK PIPELINE ----------------------
+// ---------------------- PIPELINE ----------------------
 
 async function askPipeline({ persona, userMsg, history, mem }) {
-  const ack = isAck(userMsg);
   const bye = isGoodbye(userMsg);
 
   const recentRefs = extractRecentBibleRefs(history, 3);
@@ -408,9 +445,9 @@ async function askPipeline({ persona, userMsg, history, mem }) {
   // 1) Planner
   const plan = await planFrame({ persona, message: userMsg, history, mem });
   const frame = plan.frame;
-  let qClass = plan.question_class;
+  const qClass = plan.question_class;
 
-  // 2) Writer (modos)
+  // 2) Writer
   let writerOut;
   if (bye) {
     writerOut = { message: "Que la paz y el amor te acompañen. Descansa en la certeza de que no caminas sola.", question: "" };
