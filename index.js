@@ -42,6 +42,8 @@ MARCO DE CONVERSACIÓN (FRAME)
 PROGRESO
 - Evita repetir lo ya dicho. Cada "message" debe aportar novedad útil: ejemplo concreto, mini-guion, decisión binaria, contacto específico, límite práctico.
 - Si el usuario responde con acuso (“sí/ok/vale”), pasa de plan a PRÁCTICA/COMPROMISO (ensayo de frase, fijar hora, límite, contacto), sin repetir.
+- Si recibes deliverable_hint = draft_message, incluye un guion/mensaje listo para copiar (2–4 líneas, sin preguntas), adaptado al FRAME.
+- Si recibes deliverable_hint = draft_boundary, propone 1–2 formulaciones de límite claras y amables (sin preguntas).
 
 AUTO-CUIDADO
 - El autocuidado (respirar/orar/diario) es **complemento**, no reemplaza las acciones del tema central. Inclúyelo al final si hay espacio y es pertinente.
@@ -96,7 +98,13 @@ function stripQuestions(s = "") {
   return noLeadingQs.replace(/[¿?]+/g, "").trim();
 }
 function normalizeQuestion(q = "") {
-  return String(q).toLowerCase().replace(/\s+/g, " ").trim();
+  return String(q)
+    .toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // sin tildes
+    .replace(/[“”"«»]/g, "")                         // comillas varias
+    .replace(/[^\w\s]/g, " ")                        // signos -> espacio
+    .replace(/\s+/g, " ")
+    .trim();
 }
 function isAck(msg = "") {
   return /^\s*(si|sí|ok|okay|vale|dale|de acuerdo|perfecto|genial|bien)\s*\.?$/i.test((msg || "").trim());
@@ -129,19 +137,51 @@ function extractRecentAssistantQuestions(history = [], maxMsgs = 4) {
 }
 function classifyQuestion(q = "") {
   const s = normalizeQuestion(q);
-  if (/(cu[aá]ndo|cuando|hora)/i.test(s)) return "time";
-  if (/(d[oó]nde|donde|lugar)/i.test(s)) return "place";
-  if (/(ensayar|practicar|frase)/i.test(s)) return "practice";
-  if (/(profesional|terapeuta|grupo|apoyo)/i.test(s)) return "help";
-  if (/(l[ií]mite|limite|regla|acuerdo)/i.test(s)) return "boundary";
-  if (/(c[oó]mo te sientes|como te sientes|emoci[oó]n)/i.test(s)) return "feelings";
-  if (/(primer paso|siguiente paso)/i.test(s)) return "next_step";
-  if (/(actividad|paseo|salir|caminar|ir a|juntas?)/i.test(s)) return "activity";
-  if (/(qu[ié]n|quien|en qui[eé]n conf[ií]as|puede acompa[nñ]arte|apoyarte)/i.test(s)) return "support";
+  if (/(cu[aá]ndo|cuando|hora)\b/.test(s)) return "time";
+  if (/(d[oó]nde|donde|lugar)\b/.test(s)) return "place";
+  if (/(ensayar|practicar|frase)\b/.test(s)) return "practice";
+  if (/(profesional|terapeuta|grupo|apoyo)\b/.test(s)) return "help";
+  if (/(l[ií]mite|limite|regla|acuerdo)\b/.test(s)) return "boundary";
+  if (/(c[oó]mo te sientes|como te sientes|emoci[oó]n)\b/.test(s)) return "feelings";
+  if (/(primer paso|siguiente paso)\b/.test(s)) return "next_step";
+  if (/(actividad|paseo|salir|caminar|ir a|juntas?)\b/.test(s)) return "activity";
+  if (/(qu[ié]n|quien|en qui[eé]n conf[ií]as|puede acompa[nñ]arte|apoyarte)\b/.test(s)) return "support";
   return "other";
 }
 function deriveAvoidSlots(recentQs = []) {
   return [...new Set(recentQs.map(classifyQuestion))].filter(Boolean);
+}
+function getLastAssistantQuestionAndSlot(history = []) {
+  for (let i = history.length - 1; i >= 0; i--) {
+    const h = String(history[i]);
+    if (!/^Asistente:/i.test(h)) continue;
+    const text = h.replace(/^Asistente:\s*/i, "");
+    const m = text.match(/([^?]*\?)\s*$/m);
+    if (m && m[1]) {
+      const q = m[1].trim();
+      return { q, slot: classifyQuestion(q) };
+    }
+  }
+  return { q: "", slot: "" };
+}
+function suggestDeliverable(lastSlot) {
+  switch (lastSlot) {
+    case "practice":     return "draft_message";
+    case "time":         return "confirm_time";
+    case "help":         return "pick_professional";
+    case "boundary":     return "draft_boundary";
+    case "next_step":    return "confirm_next_step";
+    default:             return "advance_practice";
+  }
+}
+function nextQuestionForSlot(lastSlot) {
+  switch (lastSlot) {
+    case "practice":   return "¿Quieres enviarlo tal cual o prefieres ajustar una frase breve?";
+    case "time":       return "¿Qué hora específica te viene mejor para hacerlo hoy?";
+    case "help":       return "¿Prefieres terapia individual, de pareja o un grupo de apoyo?";
+    case "boundary":   return "¿Qué límite concreto te gustaría establecer primero?";
+    default:           return "¿Cuál es el siguiente paso pequeño que puedes hacer hoy?";
+  }
 }
 
 // -------- Memoria persistente --------
@@ -362,7 +402,7 @@ async function regenerateBibleAvoiding({ persona, message, focusHint, frame, ban
   const usr =
     `Persona: ${persona}\n` +
     `Mensaje_actual: ${message}\n` +
-    `Tema_prev_sustantivo: ${focusHint || "(sin pista)"}\n` +   // <- aquí estaba el error: antes tenía \n" +
+    `Tema_prev_sustantivo: ${focusHint || "(sin pista)"}\n` +
     `FRAME: ${JSON.stringify(frame)}\n` +
     `last_bible_ref: ${lastRef || "(n/a)"}\n` +
     `banned_refs:\n- ${bannedRefs.join("\n- ")}\n`;
@@ -382,6 +422,14 @@ async function regenerateBibleAvoiding({ persona, message, focusHint, frame, ban
   return text && ref ? { text, ref } : null;
 }
 
+// Fallback de ACK que siempre entrega algo práctico
+function ackSmartFallback({ focusHint = "", lastRef = "", lastSlot = "" }) {
+  const verse = { text: "Y si alguno de vosotros tiene falta de sabiduría, pídala a Dios, el cual da a todos abundantemente y sin reproche; y le será dada.", ref: "Santiago 1:5" };
+  const message =
+    "Hijo mío, avancemos a la práctica ahora. • Te dejo un guion breve para dar el siguiente paso. • Di: “Te hablo con amor y deseo entenderte; me importa nuestro bienestar”. • Propón un primer acuerdo concreto para hoy.";
+  const question = nextQuestionForSlot(lastSlot || "practice");
+  return { message, bible: verse, question };
+}
 
 async function askLLM({ persona, message, history = [], userId = "anon", profile = {} }) {
   const mem = await readUserMemory(userId);
@@ -414,6 +462,9 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
 
   const persistentMemory = buildPersistentMemoryPrompt(mem);
   const shortHistory = compactHistory(history, (ack || bye) ? 4 : 10, 240);
+
+  const { q: lastQ, slot: lastSlot } = getLastAssistantQuestionAndSlot(history);
+  const deliverable = suggestDeliverable(lastSlot);
 
   const commonHeader =
     `Persona: ${persona}\n` +
@@ -479,12 +530,15 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
     const userContent =
       `MODE: ACK\n` +
       commonHeader +
+      `last_question: ${lastQ || "(none)"}\n` +
+      `last_question_slot: ${lastSlot || "(none)"}\n` +
+      `deliverable_hint: ${deliverable}\n` +
       `INSTRUCCIONES:\n` +
-      `- Mantén el MISMO topic_primary del FRAME, NO lo cambies por respuestas de slot (p.ej., support_persons).\n` +
-      `- Pasa de plan a práctica/compromiso con **novedad** (guion breve, confirmar hora/límite/contacto), sin repetir.\n` +
-      `- "message": afirmativo, sin signos de pregunta.\n` +
-      `- "bible": coherente con message; RVR1909; NO uses banned_refs.\n` +
-      `- "question": UNA sola, para ensayar/confirmar el micro-paso; evita avoid_slots.\n`;
+      `- El mensaje del usuario es un ACK de la last_question: NO repitas esa pregunta.\n` +
+      `- Asume consentimiento y ENTREGA el deliverable_hint dentro de "message" (p. ej., si es draft_message, incluye un texto listo para copiar en 2–4 líneas), adaptado al FRAME.\n` +
+      `- "message": afirmativo, sin signos de pregunta, con NOVEDAD (no repitas viñetas previas).\n` +
+      `- "bible": coherente con el contenido práctico; RVR1909; NO uses banned_refs.\n` +
+      `- "question": UNA sola y DIFERENTE de last_question; enfocada al siguiente micro-paso; evita avoid_slots.\n`;
 
     let resp;
     try {
@@ -492,11 +546,16 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
         messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: userContent }],
         temperature: 0.5, max_tokens: 160, timeoutMs: ACK_TIMEOUT_MS
       });
-    } catch {
-      resp = await completionWithTimeout({
-        messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: userContent + "\nResponde de manera directa y breve ahora.\n" }],
-        temperature: 0.4, max_tokens: 140, timeoutMs: RETRY_TIMEOUT_MS
-      });
+    } catch (e) {
+      if (String(e?.message || e) === "TIMEOUT") {
+        const fb = ackSmartFallback({ focusHint, lastRef, lastSlot });
+        updateMemoryFromTurn(mem, { userMsg: message, assistantQuestion: fb.question, bibleRef: fb.bible.ref, focusHint });
+        mem.frame = frame;
+        await writeUserMemory(userId, mem);
+        return { message: fb.message, bible: fb.bible, question: fb.question };
+      }
+      // otro error
+      throw e;
     }
 
     const content = resp?.choices?.[0]?.message?.content || "{}";
@@ -508,9 +567,13 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
     let text = (data?.bible?.text || "").toString().trim();
     let question = (data?.question || "").toString().trim();
 
+    // Si la pregunta es la misma que la anterior, cambia a otra para avanzar
     const normalizedQ = normalizeQuestion(question);
-    const recentQs2 = extractRecentAssistantQuestions(history, 4);
-    if (question && recentQs2.includes(normalizedQ)) question = "";
+    const lastQNorm   = normalizeQuestion(lastQ);
+    const recentQs2   = extractRecentAssistantQuestions(history, 4);
+    if (question && (normalizedQ === lastQNorm || recentQs2.includes(normalizedQ))) {
+      question = nextQuestionForSlot(lastSlot);
+    }
 
     // Corrige cita ambigua o vetada
     const hijoOnly = /\bhijo\b/i.test(message) && !/(Jes[uú]s|Cristo)/i.test(message);
@@ -632,4 +695,3 @@ const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`Servidor listo en puerto ${PORT}`);
 });
-
