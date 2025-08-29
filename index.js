@@ -1,4 +1,4 @@
-// index.js — backend estable con ACK rápido y sin desvíos
+// index.js — backend estable, sin bancos locales; ACK/GOODBYE rápidos vía OpenAI
 
 const express = require("express");
 const cors = require("cors");
@@ -32,7 +32,7 @@ OBJETIVO
 - No hables de técnica/IA ni del propio modelo.
 
 CONDUCE LA CONVERSACIÓN (ENTREVISTA GUIADA)
-- Mantén un TEMA PRINCIPAL explícito (p. ej., "hablar con mi hijo por consumo de drogas") y NO pivotes a otros temas salvo que el usuario lo pida.
+- Mantén un TEMA PRINCIPAL explícito (p. ej., "hablar con mi hijo por consumo de drogas") y NO pivotes salvo que el usuario lo pida.
 - Piensa en "campos" internos: qué pasó, con quién, riesgo/urgencia, objetivo inmediato, obstáculos, recursos/apoyo, cuándo/dónde, primer micro-paso.
 - En cada turno, identifica QUÉ DATO CLAVE FALTA y usa "question" SOLO para pedir UN dato que desbloquee el siguiente paso (o para confirmar un compromiso breve).
 - Si el usuario responde con acuso ("sí/vale/ok"), NO repitas lo ya dicho: pasa de plan a PRÁCTICA/COMPROMISO (p. ej., guion de 1–2 frases, fijar hora/límite).
@@ -96,10 +96,17 @@ function stripQuestions(s = "") {
 }
 
 // -------- Llamada LLM --------
-const ACK_TIMEOUT_MS = 6000; // 6s: ACK debe ser ágil
+// ACK = respuestas tipo "sí/ok/vale"; GOODBYE = despedidas ("me voy", "debo irme", etc.)
+const ACK_TIMEOUT_MS = 6000;     // respuesta ágil en acks
+const RETRY_TIMEOUT_MS = 3000;   // reintento corto si la primera se demora
 
 function isAck(msg = "") {
   return /^\s*(si|sí|ok|okay|vale|dale|de acuerdo|perfecto|genial|bien)\s*\.?$/i.test((msg || "").trim());
+}
+function isGoodbye(msg = "") {
+  const s = (msg || "").toLowerCase();
+  return /(debo irme|tengo que irme|me voy|me retiro|hasta luego|nos vemos|hasta mañana|buenas noches|adiós|adios|chao|bye)\b/.test(s)
+      || (/gracias/.test(s) && /(irme|retir)/.test(s));
 }
 function extractLastBibleRef(history = []) {
   const rev = [...(history || [])].reverse();
@@ -122,122 +129,179 @@ function lastSubstantiveUser(history = []) {
   }
   return "";
 }
-function compactHistory(history = [], keep = 6, maxLen = 260) {
+function compactHistory(history = [], keep = 8, maxLen = 260) {
   const arr = Array.isArray(history) ? history : [];
   return arr.slice(-keep).map(x => String(x).slice(0, maxLen));
 }
 
-// Banco mínimo para fallback bíblico sin repetir la última referencia
-const VERSE_BANK = [
-  { ref: "Juan 8:36", text: "Así que, si el Hijo os libertare, seréis verdaderamente libres." },
-  { ref: "Proverbios 22:3", text: "El avisado ve el mal, y se esconde; mas los simples pasan, y reciben el daño." },
-  { ref: "1 Juan 4:18", text: "En el amor no hay temor, sino que el perfecto amor echa fuera el temor." },
-  { ref: "Gálatas 6:1", text: "Hermanos, si alguno fuere tomado en alguna falta, vosotros que sois espirituales, restauradle con espíritu de mansedumbre." },
-  { ref: "Santiago 1:5", text: "Y si alguno de vosotros tiene falta de sabiduría, pídala a Dios, el cual da a todos abundantemente y sin reproche, y le será dada." }
-];
-function pickAltVerse(lastRef = "") {
-  return VERSE_BANK.find(v => v.ref !== (lastRef || "").trim()) || VERSE_BANK[0];
-}
-
-// Fallback on-topic para ACK (“sí/ok/vale”): práctica sin salir del tema
-function ackSmartFallback({ focusHint = "", lastRef = "" }) {
-  const addictionLike = /hijo|consum|droga/i.test(focusHint || "");
-  const verse = pickAltVerse(lastRef);
-  const message = addictionLike
-    ? "Hijo mío, pasemos a la práctica de esta noche. • Abre con: “Te amo y me preocupa tu bienestar”. • Nombra brevemente lo que viste sin juicio. • Propón pedir ayuda juntos y explica un límite amable si se tensa."
-    : "Alma amada, avancemos con un paso práctico. • Pon en palabras lo que necesitas. • Elige una acción pequeña para hoy. • Busca a una persona de apoyo para sostener ese paso.";
-  const question = addictionLike
-    ? "¿Quieres ensayar ahora esa frase inicial para sentirte más seguro?"
-    : "¿Cuál es el primer paso pequeño que vas a dar hoy?";
-  return { message, bible: { text: verse.text, ref: verse.ref }, question };
+async function completionWithTimeout({ messages, temperature = 0.6, max_tokens = 200, timeoutMs = 8000 }) {
+  const call = openai.chat.completions.create({
+    model: "gpt-4o",
+    temperature,
+    max_tokens,
+    messages,
+    response_format: responseFormat
+  });
+  return await Promise.race([
+    call,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("TIMEOUT")), timeoutMs))
+  ]);
 }
 
 async function askLLM({ persona, message, history = [] }) {
   const ack = isAck(message);
+  const bye = isGoodbye(message);
   const lastRef = extractLastBibleRef(history);
   const focusHint = lastSubstantiveUser(history);
-  const shortHistory = compactHistory(history, ack ? 4 : 10, 240);
+  const shortHistory = compactHistory(history, (ack || bye) ? 4 : 10, 240);
 
-  const userContent = ack
-    ? (
+  // --- DESPEDIDA (sin pregunta), TODO desde OpenAI ---
+  if (bye) {
+    const userContent =
+      `MODE: GOODBYE\n` +
       `Persona: ${persona}\n` +
       `Mensaje_actual: ${message}\n` +
-      `Ack_actual: true\n` +
       `Tema_prev_sustantivo: ${focusHint || "(sin pista)"}\n` +
       `last_bible_ref: ${lastRef || "(n/a)"}\n` +
       (shortHistory.length ? `Historial: ${shortHistory.join(" | ")}` : "Historial: (sin antecedentes)") + "\n" +
-      `INSTRUCCIONES_ACK:\n` +
-      `- Mantén el MISMO tema.\n` +
-      `- Pasa de plan a práctica/compromiso (guion breve o decisión binaria).\n` +
-      `- "message": sin preguntas; 2–3 líneas nuevas (no repitas lo anterior).\n` +
-      `- "bible": coherente con message; evita last_bible_ref.\n` +
-      `- "question": UNA sola, para el siguiente micro-paso (ensayar/confirmar hora/límite).\n`
-    )
-    : (
+      `INSTRUCCIONES:\n` +
+      `- Despedida breve y benigna.\n` +
+      `- "message": afirmativo, sin signos de pregunta.\n` +
+      `- "bible": versículo de bendición/consuelo en RVR1909, NO repitas last_bible_ref.\n` +
+      `- No incluyas "question".\n`;
+
+    let resp;
+    try {
+      resp = await completionWithTimeout({
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: userContent }
+        ],
+        temperature: 0.5,
+        max_tokens: 160,
+        timeoutMs: ACK_TIMEOUT_MS
+      });
+    } catch {
+      resp = await completionWithTimeout({
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: userContent + "\nPor favor responde ahora mismo.\n" }
+        ],
+        temperature: 0.4,
+        max_tokens: 140,
+        timeoutMs: RETRY_TIMEOUT_MS
+      });
+    }
+
+    const content = resp?.choices?.[0]?.message?.content || "{}";
+    let data = {};
+    try { data = JSON.parse(content); } catch { data = { message: content }; }
+
+    let msg = stripQuestions((data?.message || "").toString());
+    let ref = cleanRef((data?.bible?.ref || "").toString());
+    const text = (data?.bible?.text || "").toString().trim();
+
+    return {
+      message: msg || "Que la paz y el amor te acompañen.",
+      bible: { text: text || "Y la paz de Dios, que sobrepuja todo entendimiento, guardará vuestros corazones.", ref: ref || "Filipenses 4:7" }
+      // sin question
+    };
+  }
+
+  // --- ACK (“sí/ok/vale”), TODO desde OpenAI, con fast-path ---
+  if (ack) {
+    const userContent =
+      `MODE: ACK\n` +
       `Persona: ${persona}\n` +
       `Mensaje_actual: ${message}\n` +
-      `Ack_actual: false\n` +
       `Tema_prev_sustantivo: ${focusHint || "(sin pista)"}\n` +
       `last_bible_ref: ${lastRef || "(n/a)"}\n` +
-      (shortHistory.length ? `Historial: ${shortHistory.join(" | ")}` : "Historial: (sin antecedentes)")
-    );
+      (shortHistory.length ? `Historial: ${shortHistory.join(" | ")}` : "Historial: (sin antecedentes)") + "\n" +
+      `INSTRUCCIONES:\n` +
+      `- Mantén el MISMO tema y pasa de plan a práctica/compromiso con NOVEDAD (guion breve, confirmar hora/límite), sin repetir lo anterior.\n` +
+      `- "message": afirmativo, sin signos de pregunta.\n` +
+      `- "bible": coherente con message; RVR1909; NO repitas last_bible_ref.\n` +
+      `- "question": UNA sola, para ensayar/confirmar el micro-paso.\n`;
 
-  const llmCall = openai.chat.completions.create({
-    model: "gpt-4o",
-    temperature: ack ? 0.5 : 0.6,
-    frequency_penalty: ack ? 0.3 : 0.4,
-    presence_penalty: 0.1,
-    max_tokens: ack ? 160 : 230,
+    let resp;
+    try {
+      resp = await completionWithTimeout({
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: userContent }
+        ],
+        temperature: 0.5,
+        max_tokens: 160,
+        timeoutMs: ACK_TIMEOUT_MS
+      });
+    } catch {
+      resp = await completionWithTimeout({
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: userContent + "\nResponde de manera directa y breve ahora.\n" }
+        ],
+        temperature: 0.4,
+        max_tokens: 140,
+        timeoutMs: RETRY_TIMEOUT_MS
+      });
+    }
+
+    const content = resp?.choices?.[0]?.message?.content || "{}";
+    let data = {};
+    try { data = JSON.parse(content); } catch { data = { message: content }; }
+
+    let msg = stripQuestions((data?.message || "").toString());
+    let ref = cleanRef((data?.bible?.ref || "").toString());
+    const text = (data?.bible?.text || "").toString().trim();
+    const question = (data?.question || "").toString().trim();
+
+    return {
+      message: msg || "Estoy contigo. Demos un paso práctico ahora.",
+      bible: { text: text || "Y si alguno de vosotros tiene falta de sabiduría, pídala a Dios.", ref: ref || "Santiago 1:5" },
+      ...(question ? { question } : {})
+    };
+  }
+
+  // --- NORMAL ---
+  const userContent =
+    `MODE: NORMAL\n` +
+    `Persona: ${persona}\n` +
+    `Mensaje_actual: ${message}\n` +
+    `Tema_prev_sustantivo: ${focusHint || "(sin pista)"}\n` +
+    `last_bible_ref: ${lastRef || "(n/a)"}\n` +
+    (shortHistory.length ? `Historial: ${shortHistory.join(" | ")}` : "Historial: (sin antecedentes)") + "\n" +
+    `INSTRUCCIONES:\n` +
+    `- Mantén el tema y progresa con 2–3 micro-pasos para HOY.\n` +
+    `- "message": afirmativo, sin signos de pregunta; no repitas viñetas recientes.\n` +
+    `- "bible": RVR1909; NO repitas last_bible_ref; temática acorde al message.\n` +
+    `- "question": UNA sola, pidiendo el siguiente dato clave o confirmando un compromiso.\n`;
+
+  const resp = await completionWithTimeout({
     messages: [
       { role: "system", content: SYSTEM_PROMPT },
       { role: "user", content: userContent }
     ],
-    response_format: responseFormat
+    temperature: 0.6,
+    max_tokens: 220,
+    timeoutMs: 12000
   });
-
-  let resp;
-  try {
-    resp = ack
-      ? await Promise.race([
-          llmCall,
-          new Promise((_, reject) => setTimeout(() => reject(new Error("ACK_TIMEOUT")), ACK_TIMEOUT_MS))
-        ])
-      : await llmCall;
-  } catch (e) {
-    if (ack && String(e?.message || e) === "ACK_TIMEOUT") {
-      return ackSmartFallback({ focusHint, lastRef });
-    }
-    throw e;
-  }
 
   const content = resp?.choices?.[0]?.message?.content || "{}";
   let data = {};
-  try {
-    data = JSON.parse(content);
-  } catch {
-    data = { message: content };
-  }
+  try { data = JSON.parse(content); } catch { data = { message: content }; }
 
-  // Normalización
-  let msg = (data?.message || "").toString();
-  msg = stripQuestions(msg);
-  let ref = cleanRef(data?.bible?.ref || "");
+  let msg = stripQuestions((data?.message || "").toString());
+  let ref = cleanRef((data?.bible?.ref || "").toString());
+  const text = (data?.bible?.text || "").toString().trim();
   const question = (data?.question || "").toString().trim();
-
-  if (ack && (!msg || msg.length < 12)) {
-    const fb = ackSmartFallback({ focusHint, lastRef });
-    return { message: fb.message, bible: fb.bible, question: fb.question };
-  }
-
-  const v = (!ref || ref === lastRef) ? pickAltVerse(lastRef) : null;
 
   return {
     message: msg || "Estoy contigo. Demos un paso pequeño y realista hoy.",
     bible: {
-      text: (data?.bible?.text || v?.text || "Dios es nuestro amparo y fortaleza; nuestro pronto auxilio en las tribulaciones.").toString().trim(),
-      ref: (v?.ref || ref || "Salmos 46:1").toString().trim()
+      text: text || "Dios es nuestro amparo y fortaleza; nuestro pronto auxilio en las tribulaciones.",
+      ref: ref || "Salmos 46:1"
     },
-    question
+    ...(question ? { question } : {})
   };
 }
 
