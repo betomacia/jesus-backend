@@ -1,43 +1,125 @@
-function ensureOneQuestionAtEnd(userMsg, message) {
-  // Si el usuario se despide, no preguntamos
-  if (isGoodbye(userMsg)) {
-    const { body } = extractTrailingQuestion(message);
-    return body; // cierre sin pregunta
+// src/services/structured.ts
+export class OpenAINoConnectionError extends Error {
+  constructor(msg = "Sin conexión con el backend / OpenAI") {
+    super(msg);
+    this.name = "OpenAINoConnectionError";
   }
-
-  // 1) Partimos el texto en líneas, limpiamos espacios y vacías
-  const lines = (message || "")
-    .split(/\n+/)
-    .map((l) => l.trim())
-    .filter(Boolean);
-
-  // 2) Identificamos TODAS las líneas que son preguntas
-  const questionIndices = [];
-  for (let i = 0; i < lines.length; i++) {
-    if (/\?\s*$/.test(lines[i])) questionIndices.push(i);
+}
+export class OpenAINoResponseError extends Error {
+  constructor(msg = "OpenAI no devolvió contenido") {
+    super(msg);
+    this.name = "OpenAINoResponseError";
   }
+}
 
-  // 3) Elegimos SOLO UNA pregunta para el final:
-  //    - Preferimos la ÚLTIMA que haya escrito el modelo
-  //    - Eliminamos cualquier otra pregunta "colada" al principio o en medio
-  let trailingQ = "";
-  if (questionIndices.length > 0) {
-    const keepIdx = questionIndices[questionIndices.length - 1];
-    trailingQ = lines[keepIdx];
-    // quitamos todas las preguntas del cuerpo (incluida la elegida)
-    for (let i = questionIndices.length - 1; i >= 0; i--) {
-      lines.splice(questionIndices[i], 1);
+const BASE_URL = "https://jesus-backend-production-1cf4.up.railway.app";
+const DEV_LOG = false;
+
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit = {},
+  ms = 25000
+): Promise<Response> {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), ms);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(id);
+  }
+}
+
+async function readJSON(r: Response): Promise<any> {
+  const raw = await r.text();
+  if (DEV_LOG) console.debug("[structured RAW]", raw?.slice(0, 800));
+  if (!raw || !raw.trim()) return {};
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return { message: raw };
+  }
+}
+
+type StructuredOut = {
+  body: string;
+  verse?: string;
+  question?: string;
+};
+
+// Si el modelo dejó UNA pregunta al final del message, la separamos
+function extractTrailingQuestion(msg = ""): { body: string; question: string } {
+  const lines = (msg || "").split(/\n+/);
+  if (!lines.length) return { body: msg, question: "" };
+  const last = lines[lines.length - 1]?.trim() || "";
+  if (/\?\s*$/.test(last)) {
+    lines.pop();
+    return { body: lines.join("\n").trim(), question: last };
+  }
+  return { body: msg, question: "" };
+}
+
+function normalizeToStructured(data: any): StructuredOut {
+  let message = (data?.message || "").toString().trim();
+  const text = (data?.bible?.text || "").toString().trim();
+  const ref = (data?.bible?.ref || "").toString().trim();
+
+  if (!message && !text && !ref) throw new OpenAINoResponseError();
+
+  const { body, question } = extractTrailingQuestion(message);
+
+  // Cita en formato “texto — Libro 0:0”
+  const verse =
+    text || ref
+      ? [text ? text : "", ref ? `— ${ref}` : ""].filter(Boolean).join(" ")
+      : undefined;
+
+  return {
+    body: body || "¿Qué situación específica quieres contarme hoy?",
+    verse,
+    question // la mostrará tu App al final
+  };
+}
+
+export async function getStructuredGuidance(
+  persona: string,
+  message: string,
+  history: string[] = [],
+  _memory?: unknown,
+  _lastFollowUps?: string[]
+): Promise<StructuredOut> {
+  const payload = { persona, message, history };
+
+  try {
+    const r = await fetchWithTimeout(
+      `${BASE_URL}/api/ask`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      },
+      25000
+    );
+
+    if (!r.ok) {
+      if (r.status === 0) throw new OpenAINoConnectionError();
+      await readJSON(r).catch(() => ({}));
+      throw new OpenAINoResponseError(`HTTP ${r.status} en /api/ask`);
+    }
+
+    const data = await readJSON(r);
+    return normalizeToStructured(data);
+  } catch {
+    try {
+      const r2 = await fetchWithTimeout(`${BASE_URL}/api/welcome`, { method: "GET" }, 8000);
+      if (!r2.ok) throw new OpenAINoConnectionError();
+      const d2 = await readJSON(r2);
+      return normalizeToStructured(d2);
+    } catch {
+      return {
+        body: "La paz sea contigo. ¿Qué ocurrió para poder acompañarte mejor?",
+        verse: "Dios es el amparo y fortaleza; nuestro pronto auxilio en las tribulaciones. — Salmos 46:1",
+        question: "¿Qué situación específica quieres contarme hoy?"
+      };
     }
   }
-
-  // 4) El cuerpo queda sin preguntas duplicadas
-  const body = lines.join("\n").trim();
-
-  // 5) Si no quedó ninguna pregunta, generamos una contextual como red de seguridad
-  if (!trailingQ) {
-    trailingQ = makeContextualQuestion(userMsg);
-  }
-
-  // 6) Devolvemos cuerpo + UNA sola pregunta (la cita la inserta el front entre ambos)
-  return `${body}\n${trailingQ}`.trim();
 }
