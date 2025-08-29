@@ -111,22 +111,27 @@ function stripQuestions(s = "") {
 }
 
 // -------- Llamada LLM (con ayudas de foco y antirrepetición) --------
+// -------- Llamada LLM --------
 function isAck(msg = "") {
   return /^\s*(si|sí|ok|okay|vale|dale|de acuerdo|perfecto|genial|bien)\s*\.?$/i.test(msg.trim());
 }
 
 function extractLastBibleRef(history = []) {
-  // Busca "— Libro 0:0" en el historial (líneas recientes del asistente)
+  // Busca algo tipo "— Libro 0:0" o "- Libro 0:0"
   const rev = [...(history || [])].reverse();
   for (const h of rev) {
-    const m = String(h).match(/—\s*([A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+\s+\d+:\d+)/);
+    const str = String(h);
+    const m =
+      str.match(/—\s*([A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+\s+\d+:\d+)/) ||
+      str.match(/-\s*([A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+\s+\d+:\d+)/) ||
+      str.match(/\(\s*([A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+\s+\d+:\d+)\s*\)/);
     if (m && m[1]) return m[1].trim();
   }
   return "";
 }
 
 function lastSubstantiveUser(history = []) {
-  // Último "Usuario: ..." que no sea solo un ack
+  // Último "Usuario: ..." que no sea un simple "sí/ok/vale..."
   const rev = [...(history || [])].reverse();
   for (const h of rev) {
     if (!/^Usuario:/i.test(h)) continue;
@@ -136,10 +141,32 @@ function lastSubstantiveUser(history = []) {
   return "";
 }
 
+function extractRecentAssistantBullets(history = [], maxMsgs = 3) {
+  // Extrae viñetas "• ..." de las últimas respuestas del Asistente
+  const rev = [...(history || [])].reverse();
+  const bullets = [];
+  let seen = 0;
+  for (const h of rev) {
+    if (/^Asistente:/i.test(h)) {
+      const text = h.replace(/^Asistente:\s*/i, "");
+      const lines = text.split(/\n+/);
+      for (const l of lines) {
+        const m = l.match(/^\s*•\s*(.+)$/);
+        if (m && m[1]) bullets.push(m[1].trim().toLowerCase());
+      }
+      seen++;
+      if (seen >= maxMsgs) break;
+    }
+  }
+  // Devuelve únicas y recortadas (10 máx) para no saturar
+  return Array.from(new Set(bullets)).slice(0, 10);
+}
+
 async function askLLM({ persona, message, history = [] }) {
   const ack = isAck(message);
   const lastRef = extractLastBibleRef(history);
   const focusHint = lastSubstantiveUser(history);
+  const avoidBullets = extractRecentAssistantBullets(history);
 
   const userContent =
     `Persona: ${persona}\n` +
@@ -147,11 +174,13 @@ async function askLLM({ persona, message, history = [] }) {
     `Ack_actual: ${ack}\n` +
     `Tema_prev_sustantivo: ${focusHint || "(sin pista)"}\n` +
     `last_bible_ref: ${lastRef || "(n/a)"}\n` +
+    (avoidBullets.length ? `avoid_bullets:\n- ${avoidBullets.join("\n- ")}\n` : "") +
     (history?.length ? `Historial: ${history.join(" | ")}` : "Historial: (sin antecedentes)");
 
   const resp = await openai.chat.completions.create({
     model: "gpt-4o",
-    temperature: 0.7,
+    temperature: 0.6,
+    frequency_penalty: 0.6,
     messages: [
       { role: "system", content: SYSTEM_PROMPT },
       { role: "user", content: userContent }
@@ -167,7 +196,7 @@ async function askLLM({ persona, message, history = [] }) {
     data = { message: content };
   }
 
-  // Normalizaciones (una sola vez, dentro de la función)
+  // Normalizaciones
   let msg = (data?.message || "").toString();
   msg = stripQuestions(msg); // message nunca debe tener preguntas
   let ref = cleanRef(data?.bible?.ref || "");
@@ -182,6 +211,7 @@ async function askLLM({ persona, message, history = [] }) {
     question
   };
 }
+
 
 // -------- Rutas --------
 app.post("/api/ask", async (req, res) => {
@@ -229,4 +259,5 @@ const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`Servidor listo en puerto ${PORT}`);
 });
+
 
