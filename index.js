@@ -1,11 +1,9 @@
-// index.js — backend generalista con FRAME persistente, anti-desvío y citas bíblicas sin repetición
+// index.js — backend estable con fixes mínimos (no repetir cita y evitar preguntas duplicadas)
 
 const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
 const OpenAI = require("openai");
-const path = require("path");
-const fs = require("fs/promises");
 require("dotenv").config();
 
 const app = express();
@@ -33,29 +31,22 @@ OBJETIVO
 - No menciones el nombre civil del usuario. Usa "hijo mío", "hija mía" o "alma amada" con moderación.
 - No hables de técnica/IA ni del propio modelo.
 
-MARCO DE CONVERSACIÓN (FRAME)
-- Usa el FRAME provisto (topic_primary, main_subject, goal, risk, support_persons, constraints, subject_locked, support_mention_short) como **fuente de verdad**.
-- NO cambies topic_primary ni main_subject si subject_locked = true.
-- Respuestas mínimas tipo “mi hija / mi madre / un amigo” son **relleno de slot** (support_persons) y NO redefinen el tema ni el sujeto.
-- Si falta un dato clave, usa "question" para pedirlo (SOLO uno por turno). Evita repetir el mismo slot (usa avoid_slots).
+CONDUCE LA CONVERSACIÓN (ENTREVISTA GUIADA)
+- Mantén un TEMA PRINCIPAL explícito y NO pivotes salvo que el usuario lo pida.
+- En cada turno, identifica QUÉ DATO CLAVE FALTA y usa "question" SOLO para pedir UN dato que desbloquee el siguiente paso (o confirmar un compromiso).
+- Si el usuario responde con acuso ("sí/vale/ok"), pasa de plan a PRÁCTICA/COMPROMISO (guion breve, fijar hora/límite), sin repetir.
 
-PROGRESO
-- Evita repetir lo ya dicho. Cada "message" debe aportar novedad útil: ejemplo concreto, mini-guion, decisión binaria, contacto específico, límite práctico.
-- Si el usuario responde con acuso (“sí/ok/vale”), pasa de plan a PRÁCTICA/COMPROMISO (ensayo de frase, fijar hora, límite, contacto), sin repetir.
-- Si deliverable_hint = draft_message, incluye un guion/mensaje listo para copiar (2–4 líneas, sin preguntas), adaptado al FRAME.
-- Si deliverable_hint = draft_boundary, propone 1–2 formulaciones de límite claras y amables (sin preguntas).
-
-AUTO-CUIDADO
-- El autocuidado (respirar/orar/diario) es **complemento**, no reemplaza las acciones del tema central. Inclúyelo al final si hay espacio y es pertinente.
+NO REDUNDANCIA
+- Evita repetir viñetas/acciones del turno anterior. Cada "message" debe aportar novedad útil (ejemplo concreto, mini-guion, decisión binaria, recurso puntual).
 
 BIBLIA (TEMÁTICA Y SIN REPETIR)
-- Elige la cita por el TEMA y por el contenido de "message" (micro-pasos), NO por coincidencias superficiales (p.ej., “hijo” ≠ “el Hijo”).
-- No uses ninguna referencia en "banned_refs". Evita repetir last_bible_ref.
+- Elige la cita por el TEMA y por el contenido de "message", NO por respuestas cortas tipo “sí”.
+- Evita repetir la MISMA referencia usada inmediatamente antes (si recibes "last_bible_ref", NO la repitas).
 - Usa RVR1909 literal y "Libro 0:0" en "ref".
 
 CASOS
-- AMBIGUO: "message" con contención (2–3 frases), y en "question" UNA puerta al dato clave inicial.
-- CONCRETO: "message" con 2–3 micro-pasos HOY (• …), adaptados al FRAME; "question" pide el siguiente dato o confirma un compromiso.
+- AMBIGUO (“tengo un problema”): en "message" contención clara; en "question" UNA puerta que pida el dato clave inicial.
+- CONCRETO: en "message" 2–3 micro-pasos para HOY (• …), adaptados al tema/momento; en "question" UNA pregunta que obtenga el siguiente dato o confirme un compromiso.
 
 FORMATO (OBLIGATORIO)
 {
@@ -114,244 +105,43 @@ function isGoodbye(msg = "") {
   return /(debo irme|tengo que irme|me voy|me retiro|hasta luego|nos vemos|hasta mañana|buenas noches|adiós|adios|chao|bye)\b/.test(s)
       || (/gracias/.test(s) && /(irme|retir)/.test(s));
 }
-function isNegation(msg = "") {
-  return /^\s*(no( lo sé| lo se)?|todav[ií]a no|a[úu]n no|no por ahora|m[aá]s tarde)\s*\.?$/i.test((msg || "").trim());
-}
 function compactHistory(history = [], keep = 8, maxLen = 260) {
   const arr = Array.isArray(history) ? history : [];
   return arr.slice(-keep).map(x => String(x).slice(0, maxLen));
 }
-function extractRecentAssistantQuestions(history = [], maxMsgs = 4) {
+function extractLastBibleRef(history = []) {
   const rev = [...(history || [])].reverse();
-  const qs = [];
-  let seen = 0;
-  for (const h of rev) {
-    if (!/^Asistente:/i.test(h)) continue;
-    const text = h.replace(/^Asistente:\s*/i, "");
-    const m = text.match(/([^?]*\?)\s*$/m);
-    if (m && m[1]) qs.push(normalizeQuestion(m[1]));
-    seen++;
-    if (seen >= maxMsgs) break;
-  }
-  return [...new Set(qs)].slice(0, 5);
-}
-function classifyQuestion(q = "") {
-  const s = normalizeQuestion(q);
-  if (/(cu[aá]ndo|cuando|hora)\b/.test(s)) return "time";
-  if (/(d[oó]nde|donde|lugar)\b/.test(s)) return "place";
-  if (/(ensayar|practicar|frase)\b/.test(s)) return "practice";
-  if (/(profesional|terapeuta|grupo|apoyo)\b/.test(s)) return "help";
-  if (/(l[ií]mite|limite|regla|acuerdo)\b/.test(s)) return "boundary";
-  if (/(c[oó]mo te sientes|como te sientes|emoci[oó]n)\b/.test(s)) return "feelings";
-  if (/(primer paso|siguiente paso)\b/.test(s)) return "next_step";
-  if (/(actividad|paseo|salir|caminar|ir a|juntas?)\b/.test(s)) return "activity";
-  if (/(qu[ié]n|quien|en qui[eé]n conf[ií]as|puede acompa[nñ]arte|apoyarte)\b/.test(s)) return "support";
-  return "other";
-}
-function deriveAvoidSlots(recentQs = []) {
-  return [...new Set(recentQs.map(classifyQuestion))].filter(Boolean);
-}
-
-// -------- Memoria persistente --------
-const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
-async function ensureDataDir() { try { await fs.mkdir(DATA_DIR, { recursive: true }); } catch {} }
-function memPath(uid) {
-  const safe = String(uid || "anon").replace(/[^a-z0-9_-]/gi, "_");
-  return path.join(DATA_DIR, `mem_${safe}.json`);
-}
-async function readUserMemory(userId) {
-  await ensureDataDir();
-  try {
-    const raw = await fs.readFile(memPath(userId), "utf8");
-    return JSON.parse(raw);
-  } catch {
-    return {
-      profile: {},
-      topics: {},
-      last_bible_ref: "",
-      last_bible_refs: [],
-      last_questions: [],
-      frame: null
-    };
-  }
-}
-async function writeUserMemory(userId, mem) {
-  await ensureDataDir();
-  await fs.writeFile(memPath(userId), JSON.stringify(mem, null, 2), "utf8");
-}
-function buildPersistentMemoryPrompt(mem = {}) {
-  const p = mem.profile || {};
-  const t = mem.topics || {};
-  const parts = [];
-  if (p.name) parts.push(`nombre: ${p.name}`);
-  if (p.gender) parts.push(`género: ${p.gender}`);
-  const lastRefs = Array.from(new Set([...(mem.last_bible_refs || []), mem.last_bible_ref].filter(Boolean))).slice(-5);
-  if (lastRefs.length) parts.push(`últimas_citas: ${lastRefs.join(", ")}`);
-  const lastQs = (mem.last_questions || []).slice(-3);
-  if (lastQs.length) parts.push(`últimas_preguntas: ${lastQs.join(" | ")}`);
-  if (mem.frame) parts.push(`frame_previo: ${JSON.stringify(mem.frame)}`);
-  const topics = Object.keys(t);
-  if (topics.length) {
-    const lastSeen = topics
-      .map(k => [k, t[k]?.last_seen || 0])
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 3)
-      .map(([k]) => k);
-    parts.push(`temas_recientes: ${lastSeen.join(", ")}`);
-  }
-  return parts.join("\n");
-}
-
-// -------- FRAME: detección general --------
-function guessTopic(userMsg = "", focusHint = "") {
-  const s = (focusHint || userMsg || "").toLowerCase();
-  if (/hijo|hija|adolesc/i.test(s) && /(droga|consum|adicci)/.test(s)) return "addiction_child";
-  if (/(droga|adicci|alcohol|apuestas)/.test(s)) return "addiction";
-  if (/(me separ|separaci[oó]n|divorcio|me divorci[eé]|nos separamos|ruptura)/.test(s)) return "separation";
-  if (/(pareja|matrimonio|conyug|novi[oa])/i.test(s)) return "relationship";
-  if (/(duelo|falleci[oó]|perd[ií] a|luto)/.test(s)) return "grief";
-  if (/(ansied|p[áa]nico|depres|triste|miedo|temor|estr[eé]s)/.test(s)) return "mood";
-  if (/(trabajo|despido|salario|dinero|deuda|finanzas)/.test(s)) return "work_finance";
-  if (/(salud|diagn[oó]stico|enfermedad|dolor)/.test(s)) return "health";
-  if (/(familia|conflicto|discusi[oó]n|suegr)/.test(s)) return "family_conflict";
-  if (/(fe|duda|dios|oraci[oó]n|culpa)/.test(s)) return "faith";
-  return "general";
-}
-function detectMainSubject(text = "") {
-  const s = (text || "").toLowerCase();
-  if (/(mi\s+espos|mi\s+marid)/.test(s)) return "partner";
-  if (/(mi\s+novi[oa])/.test(s)) return "partner";
-  if (/(mi\s+hij[oa])/.test(s)) return "child";
-  if (/(mi\s+madre|mam[aá])/.test(s)) return "mother";
-  if (/(mi\s+padre|pap[aá])/.test(s)) return "father";
-  if (/(mi\s+herman[oa])/.test(s)) return "sibling";
-  if (/(mi\s+amig[oa])/.test(s)) return "friend";
-  return "self";
-}
-function isShortSupportNP(msg = "") {
-  const s = (msg || "").trim().toLowerCase();
-  return /^(mi|una|un)\s+(hija|hijo|madre|padre|mam[aá]|pap[aá]|amig[oa]|herman[oa]|compa[nñ]er[oa])s?$/i.test(s);
-}
-function parseRelation(msg = "") {
-  const s = (msg || "").toLowerCase();
-  if (/hija/.test(s)) return "daughter";
-  if (/hijo/.test(s)) return "son";
-  if (/madre|mam[aá]/.test(s)) return "mother";
-  if (/padre|pap[aá]/.test(s)) return "father";
-  if (/amig[oa]/.test(s)) return "friend";
-  if (/herman[oa]/.test(s)) return "sibling";
-  if (/compa[nñ]er[oa]/.test(s)) return "partner_friend";
-  return "other";
-}
-function detectGoal(text = "") {
-  const s = (text || "").toLowerCase();
-  if (/(quiero que vuelva|quiero volver|reconcili|retomar)/.test(s)) return "reconcile";
-  if (/(denuncia|violencia|abuso|amenaza|peligro)/.test(s)) return "safety";
-  if (/(separar|divorci|terminar|cortar)/.test(s)) return "separate";
-  if (/(buscar ayuda|terapeuta|grupo|profesional)/.test(s)) return "seek_help";
-  if (/(no s[eé]|confuso|confund)/.test(s)) return "clarify";
-  return "";
-}
-
-// --- NUEVO: decisión robusta del sujeto principal + bloqueo ---
-function decideMainSubject(prev, userMsg, focusHint) {
-  // 1) Si ya hay sujeto, respétalo (bloqueado)
-  if (prev?.main_subject) return { subject: prev.main_subject, lock: !!prev.subject_locked };
-
-  const supportShort = isShortSupportNP(userMsg);
-
-  // 2) Preferir sujeto del último mensaje SUSTANTIVO (focusHint)
-  const fromFocus = detectMainSubject(focusHint || "");
-  if (fromFocus && fromFocus !== "self") {
-    return { subject: fromFocus, lock: true }; // se bloquea porque viene de mensaje sustantivo
-  }
-
-  // 3) Si el mensaje actual es un soporte corto, NO cambies el sujeto
-  if (supportShort) {
-    return { subject: prev?.main_subject || "self", lock: !!prev?.subject_locked };
-  }
-
-  // 4) En última instancia, deducir del mensaje actual (si no es soporte corto)
-  const fromMsg = detectMainSubject(userMsg || "");
-  if (fromMsg && fromMsg !== "self") {
-    return { subject: fromMsg, lock: true };
-  }
-  return { subject: "self", lock: !!prev?.subject_locked };
-}
-
-function updateFrame(prev = null, userMsg = "", focusHint = "") {
-  const topic = prev?.topic_primary || guessTopic(userMsg, focusHint);
-
-  const { subject, lock } = decideMainSubject(prev, userMsg, focusHint);
-  const supportShort = isShortSupportNP(userMsg);
-
-  const goal = detectGoal(userMsg) || prev?.goal || "";
-  const risk = detectRisk(userMsg) || prev?.risk || "normal";
-
-  // support persons
-  const support = Array.isArray(prev?.support_persons) ? [...prev.support_persons] : [];
-  if (supportShort) {
-    support.push({ rel: parseRelation(userMsg), label: userMsg.trim() });
-  }
-
-  // constraints básicas (time/place si el usuario las da)
-  const constraints = { ...(prev?.constraints || {}) };
-
-  return {
-    topic_primary: topic,
-    main_subject: subject,
-    subject_locked: lock || !!prev?.subject_locked,
-    support_mention_short: supportShort,
-    goal,
-    risk,
-    support_persons: dedupSupport(support).slice(-5),
-    constraints
-  };
-}
-
-function dedupSupport(arr = []) {
-  const seen = new Set();
-  const out = [];
-  for (const it of arr) {
-    const key = (it?.rel || "x") + "|" + (it?.label || "").toLowerCase();
-    if (!seen.has(key)) { seen.add(key); out.push(it); }
-  }
-  return out;
-}
-
-function updateMemoryFromTurn(mem, { userMsg, assistantQuestion, bibleRef, focusHint }) {
-  mem.last_bible_ref = bibleRef || mem.last_bible_ref || "";
-  mem.last_bible_refs = Array.from(
-    new Set([...(mem.last_bible_refs || []), bibleRef].filter(Boolean))
-  ).slice(-5);
-  mem.last_questions = Array.from(new Set([...(mem.last_questions || []), (assistantQuestion || "").trim()]))
-    .filter(Boolean)
-    .slice(-6);
-  mem.topics = mem.topics || {};
-  const topic = guessTopic(userMsg, focusHint);
-  mem.topics[topic] = { ...(mem.topics[topic] || {}), last_seen: Date.now() };
-  return mem;
-}
-
-function extractRecentBibleRefs(history = [], maxRefs = 3) {
-  const rev = [...(history || [])].reverse();
-  const found = [];
   for (const h of rev) {
     const s = String(h);
     const m =
       s.match(/—\s*([A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+\s+\d+:\d+)/) ||
       s.match(/-\s*([A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+\s+\d+:\d+)/) ||
       s.match(/\(\s*([A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+\s+\d+:\d+)\s*\)/);
-    if (m && m[1]) {
-      const ref = cleanRef(m[1]);
-      if (!found.includes(ref)) found.push(ref);
-      if (found.length >= maxRefs) break;
-    }
+    if (m && m[1]) return cleanRef(m[1]);
   }
-  return found;
+  return "";
+}
+function lastSubstantiveUser(history = []) {
+  const rev = [...(history || [])].reverse();
+  for (const h of rev) {
+    if (!/^Usuario:/i.test(h)) continue;
+    const text = h.replace(/^Usuario:\s*/i, "").trim();
+    if (text && !isAck(text) && text.length >= 6) return text;
+  }
+  return "";
+}
+function extractLastAssistantQuestion(history = []) {
+  for (let i = history.length - 1; i >= 0; i--) {
+    const h = String(history[i] || "");
+    if (!/^Asistente:/i.test(h)) continue;
+    const text = h.replace(/^Asistente:\s*/i, "");
+    const m = text.match(/([^?]*\?)\s*$/m);
+    if (m && m[1]) return m[1].trim();
+  }
+  return "";
 }
 
-// -------- Llamada LLM --------
+// -------- LLM helpers --------
 const ACK_TIMEOUT_MS = 6000;
 const RETRY_TIMEOUT_MS = 3000;
 
@@ -369,7 +159,7 @@ async function completionWithTimeout({ messages, temperature = 0.6, max_tokens =
   ]);
 }
 
-// micro-llamada para re-generar SOLO la cita si vino repetida/prohibida
+// --- Micro-llamada para regenerar SOLO la cita si se repite o es ambigua ---
 const bibleOnlyFormat = {
   type: "json_schema",
   json_schema: {
@@ -389,19 +179,16 @@ const bibleOnlyFormat = {
   }
 };
 
-async function regenerateBibleAvoiding({ persona, message, focusHint, frame, bannedRefs = [], lastRef = "" }) {
+async function regenerateBibleAvoiding({ persona, message, focusHint, bannedRefs = [], lastRef = "" }) {
   const sys = `Devuelve SOLO JSON con {"bible":{"text":"…","ref":"Libro 0:0"}} en RVR1909.
-- Usa el FRAME para dar coherencia a la cita con los micro-pasos.
-- No uses ninguna referencia de "banned_refs".
-- Evita ambigüedad entre “hijo” (niño) y “el Hijo” (Cristo) salvo que sea teológicamente pertinente al contenido.`;
-
+- Elige una cita coherente con el tema del mensaje y evita referencias repetidas.
+- No uses ninguna referencia de "banned_refs".`;
   const usr =
     `Persona: ${persona}\n` +
     `Mensaje_actual: ${message}\n` +
     `Tema_prev_sustantivo: ${focusHint || "(sin pista)"}\n` +
-    `FRAME: ${JSON.stringify(frame)}\n` +
     `last_bible_ref: ${lastRef || "(n/a)"}\n` +
-    `banned_refs:\n- ${bannedRefs.join("\n- ")}\n`;
+    `banned_refs:\n- ${bannedRefs.join("\n- ") || "(none)"}\n`;
 
   const r = await openai.chat.completions.create({
     model: "gpt-4o-mini",
@@ -418,119 +205,53 @@ async function regenerateBibleAvoiding({ persona, message, focusHint, frame, ban
   return text && ref ? { text, ref } : null;
 }
 
-// Fallback de ACK que siempre entrega algo práctico
-function ackSmartFallback({ focusHint = "", lastRef = "", lastSlot = "" }) {
-  const verse = { text: "Y si alguno de vosotros tiene falta de sabiduría, pídala a Dios, el cual da a todos abundantemente y sin reproche; y le será dada.", ref: "Santiago 1:5" };
-  const message =
-    "Hijo mío, avancemos a la práctica ahora. • Te dejo un guion breve para dar el siguiente paso. • Di: “Te hablo con amor y deseo entenderte; me importa nuestro bienestar”. • Propón un primer acuerdo concreto para hoy.";
-  const question = nextQuestionForSlot(lastSlot || "practice");
-  return { message, bible: verse, question };
-}
-
-function getLastAssistantQuestionAndSlot(history = []) {
-  for (let i = history.length - 1; i >= 0; i--) {
-    const h = String(history[i]);
-    if (!/^Asistente:/i.test(h)) continue;
-    const text = h.replace(/^Asistente:\s*/i, "");
-    const m = text.match(/([^?]*\?)\s*$/m);
-    if (m && m[1]) {
-      const q = m[1].trim();
-      return { q, slot: classifyQuestion(q) };
-    }
-  }
-  return { q: "", slot: "" };
-}
-function suggestDeliverable(lastSlot) {
-  switch (lastSlot) {
-    case "practice":     return "draft_message";
-    case "time":         return "confirm_time";
-    case "help":         return "pick_professional";
-    case "boundary":     return "draft_boundary";
-    case "next_step":    return "confirm_next_step";
-    default:             return "advance_practice";
-  }
-}
-function nextQuestionForSlot(lastSlot) {
-  switch (lastSlot) {
-    case "practice":   return "¿Quieres enviarlo tal cual o prefieres ajustar una frase breve?";
-    case "time":       return "¿Qué hora específica te viene mejor para hacerlo hoy?";
-    case "help":       return "¿Prefieres terapia individual, de pareja o un grupo de apoyo?";
-    case "boundary":   return "¿Qué límite concreto te gustaría establecer primero?";
-    default:           return "¿Cuál es el siguiente paso pequeño que puedes hacer hoy?";
-  }
-}
-
-async function askLLM({ persona, message, history = [], userId = "anon", profile = {} }) {
-  const mem = await readUserMemory(userId);
-  mem.profile = { ...(mem.profile || {}), ...(profile || {}) };
-
-  const focusHint = lastSubstantiveUser(history);
-  const prevFrame = mem.frame;
-  const frame = updateFrame(prevFrame, message, focusHint);
-  mem.frame = frame; // persistiremos al final
-
+// -------- Llamada LLM principal --------
+async function askLLM({ persona, message, history = [] }) {
   const ack = isAck(message);
   const bye = isGoodbye(message);
-  const userNegation = isNegation(message);
 
-  const lastRefFromHistory = extractRecentBibleRefs(history, 1)[0] || "";
-  const lastRef = mem.last_bible_ref || lastRefFromHistory || "";
+  const focusHint = lastSubstantiveUser(history);
+  const lastRef = extractLastBibleRef(history);
+  const lastQ = extractLastAssistantQuestion(history);
+  const lastQNorm = normalizeQuestion(lastQ);
 
-  const recentQs = extractRecentAssistantQuestions(history, 4);
-  let avoidSlots = deriveAvoidSlots(recentQs);
-
-  // Si el usuario acaba de responder con un NP de apoyo, evita derivar a "activity"
-  if (frame.support_mention_short) {
-    avoidSlots = Array.from(new Set([...avoidSlots, "activity"]));
-  }
-
-  const recentRefs = extractRecentBibleRefs(history, 3);
-  const bannedRefs = Array.from(
-    new Set([...(mem.last_bible_refs || []), mem.last_bible_ref, ...recentRefs].filter(Boolean))
-  ).slice(-5);
-
-  const persistentMemory = buildPersistentMemoryPrompt(mem);
   const shortHistory = compactHistory(history, (ack || bye) ? 4 : 10, 240);
 
-  const { q: lastQ, slot: lastSlot } = getLastAssistantQuestionAndSlot(history);
-  const deliverable = suggestDeliverable(lastSlot);
-
-  const commonHeader =
-    `Persona: ${persona}\n` +
-    `Mensaje_actual: ${message}\n` +
-    `Tema_prev_sustantivo: ${focusHint || "(sin pista)"}\n` +
-    `FRAME: ${JSON.stringify(frame)}\n` +
-    `main_subject_locked: ${frame.subject_locked}\n` +
-    `support_mention_short: ${frame.support_mention_short}\n` +
-    `last_bible_ref: ${lastRef || "(n/a)"}\n` +
-    `banned_refs:\n- ${bannedRefs.join("\n- ") || "(none)"}\n` +
-    `avoid_slots: ${avoidSlots.join(", ") || "(none)"}\n` +
-    `user_negation: ${userNegation}\n` +
-    `PERSISTENT_MEMORY:\n${persistentMemory || "(vacía)"}\n` +
-    (shortHistory.length ? `Historial: ${shortHistory.join(" | ")}` : "Historial: (sin antecedentes)") + "\n";
-
-  // DESPEDIDA
+  // --- GOODBYE: sin pregunta, y evitar repetir la última cita
   if (bye) {
     const userContent =
       `MODE: GOODBYE\n` +
-      commonHeader +
+      `Persona: ${persona}\n` +
+      `Mensaje_actual: ${message}\n` +
+      `Tema_prev_sustantivo: ${focusHint || "(sin pista)"}\n` +
+      `last_bible_ref: ${lastRef || "(n/a)"}\n` +
+      (shortHistory.length ? `Historial: ${shortHistory.join(" | ")}` : "Historial: (sin antecedentes)") + "\n" +
       `INSTRUCCIONES:\n` +
       `- Despedida breve y benigna.\n` +
       `- "message": afirmativo, sin signos de pregunta.\n` +
-      `- "bible": bendición/consuelo RVR1909.\n` +
-      `- No repitas referencias en banned_refs.\n` +
+      `- "bible": bendición/consuelo RVR1909, NO repitas last_bible_ref.\n` +
       `- No incluyas "question".\n`;
 
     let resp;
     try {
       resp = await completionWithTimeout({
-        messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: userContent }],
-        temperature: 0.5, max_tokens: 160, timeoutMs: ACK_TIMEOUT_MS
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: userContent }
+        ],
+        temperature: 0.5,
+        max_tokens: 160,
+        timeoutMs: ACK_TIMEOUT_MS
       });
     } catch {
       resp = await completionWithTimeout({
-        messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: userContent + "\nPor favor responde ahora mismo.\n" }],
-        temperature: 0.4, max_tokens: 140, timeoutMs: RETRY_TIMEOUT_MS
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: userContent + "\nPor favor responde ahora mismo.\n" }
+        ],
+        temperature: 0.4,
+        max_tokens: 140,
+        timeoutMs: RETRY_TIMEOUT_MS
       });
     }
 
@@ -542,13 +263,11 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
     let ref = cleanRef((data?.bible?.ref || "").toString());
     let text = (data?.bible?.text || "").toString().trim();
 
-    if (!ref || bannedRefs.includes(ref)) {
-      const alt = await regenerateBibleAvoiding({ persona, message, focusHint, frame, bannedRefs, lastRef });
+    // Evita repetir la última referencia
+    if (!ref || ref === lastRef) {
+      const alt = await regenerateBibleAvoiding({ persona, message, focusHint, bannedRefs: [lastRef].filter(Boolean), lastRef });
       if (alt) { ref = alt.ref; text = alt.text; }
     }
-
-    updateMemoryFromTurn(mem, { userMsg: message, assistantQuestion: "", bibleRef: ref, focusHint });
-    await writeUserMemory(userId, mem);
 
     return {
       message: msg || "Que la paz y el amor te acompañen.",
@@ -556,37 +275,42 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
     };
   }
 
-  // ACK
+  // --- ACK: avanzar con novedad y asegurar pregunta diferente
   if (ack) {
     const userContent =
       `MODE: ACK\n` +
-      commonHeader +
-      `last_question: ${lastQ || "(none)"}\n` +
-      `last_question_slot: ${lastSlot || "(none)"}\n` +
-      `deliverable_hint: ${deliverable}\n` +
+      `Persona: ${persona}\n` +
+      `Mensaje_actual: ${message}\n` +
+      `Tema_prev_sustantivo: ${focusHint || "(sin pista)"}\n` +
+      `last_bible_ref: ${lastRef || "(n/a)"}\n` +
+      (shortHistory.length ? `Historial: ${shortHistory.join(" | ")}` : "Historial: (sin antecedentes)") + "\n" +
       `INSTRUCCIONES:\n` +
-      `- last_question respondida con ACK: NO repitas esa pregunta.\n` +
-      `- NO cambies main_subject si main_subject_locked = true o support_mention_short = true.\n` +
-      `- ENTREGA el deliverable_hint dentro de "message" (p.ej., draft_message en 2–4 líneas), adaptado al FRAME.\n` +
-      `- "message": afirmativo, sin signos de pregunta, con novedad.\n` +
-      `- "bible": coherente con el contenido práctico; RVR1909; NO uses banned_refs.\n` +
-      `- "question": UNA sola y DIFERENTE de last_question; enfocada al siguiente micro-paso; evita avoid_slots.\n`;
+      `- Mantén el MISMO tema y pasa de plan a práctica/compromiso con NOVEDAD (guion breve, confirmar hora/límite), sin repetir lo anterior.\n` +
+      `- "message": afirmativo, sin signos de pregunta.\n` +
+      `- "bible": coherente con message; RVR1909; NO repitas last_bible_ref.\n` +
+      `- "question": UNA sola, diferente a la anterior, para el siguiente micro-paso.\n`;
 
     let resp;
     try {
       resp = await completionWithTimeout({
-        messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: userContent }],
-        temperature: 0.5, max_tokens: 160, timeoutMs: ACK_TIMEOUT_MS
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: userContent }
+        ],
+        temperature: 0.5,
+        max_tokens: 160,
+        timeoutMs: ACK_TIMEOUT_MS
       });
-    } catch (e) {
-      if (String(e?.message || e) === "TIMEOUT") {
-        const fb = ackSmartFallback({ focusHint, lastRef, lastSlot });
-        updateMemoryFromTurn(mem, { userMsg: message, assistantQuestion: fb.question, bibleRef: fb.bible.ref, focusHint });
-        mem.frame = frame;
-        await writeUserMemory(userId, mem);
-        return { message: fb.message, bible: fb.bible, question: fb.question };
-      }
-      throw e;
+    } catch {
+      resp = await completionWithTimeout({
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: userContent + "\nResponde de manera directa y breve ahora.\n" }
+        ],
+        temperature: 0.4,
+        max_tokens: 140,
+        timeoutMs: RETRY_TIMEOUT_MS
+      });
     }
 
     const content = resp?.choices?.[0]?.message?.content || "{}";
@@ -598,46 +322,49 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
     let text = (data?.bible?.text || "").toString().trim();
     let question = (data?.question || "").toString().trim();
 
-    // Si la pregunta es la misma que la anterior, cambiarla
-    const normalizedQ = normalizeQuestion(question);
-    const lastQNorm   = normalizeQuestion(lastQ);
-    const recentQs2   = extractRecentAssistantQuestions(history, 4);
-    if (question && (normalizedQ === lastQNorm || recentQs2.includes(normalizedQ))) {
-      question = nextQuestionForSlot(lastSlot);
+    // Si repite la misma pregunta, usar una alternativa genérica
+    if (question && normalizeQuestion(question) === lastQNorm) {
+      question = "¿Cuál es el siguiente paso pequeño que puedes hacer hoy?";
     }
 
-    // Corrige cita ambigua o vetada
-    const hijoOnly = /\bhijo\b/i.test(message) && !/(Jes[uú]s|Cristo)/i.test(message);
-    if (!ref || bannedRefs.includes(ref) || (hijoOnly && /Juan\s*8:36/i.test(ref))) {
-      const alt = await regenerateBibleAvoiding({ persona, message, focusHint, frame, bannedRefs, lastRef });
+    // Evitar repetir la última cita o la ambigüedad con “Juan 8:36” si el usuario mencionó “hijo”
+    const msgHasHijo = /\bhijo\b/i.test(focusHint || "") || /\bhijo\b/i.test(message || "");
+    if (!ref || ref === lastRef || (msgHasHijo && /Juan\s*8:36/i.test(ref))) {
+      const banned = [lastRef].filter(Boolean);
+      if (msgHasHijo) banned.push("Juan 8:36");
+      const alt = await regenerateBibleAvoiding({ persona, message, focusHint, bannedRefs: banned, lastRef });
       if (alt) { ref = alt.ref; text = alt.text; }
     }
 
-    updateMemoryFromTurn(mem, { userMsg: message, assistantQuestion: question, bibleRef: ref, focusHint });
-    mem.frame = frame;
-    await writeUserMemory(userId, mem);
-
     return {
       message: msg || "Estoy contigo. Demos un paso práctico ahora.",
-      bible: { text: text, ref: ref || lastRef || "" },
+      bible: { text: text || "Y si alguno de vosotros tiene falta de sabiduría, pídala a Dios.", ref: ref || "Santiago 1:5" },
       ...(question ? { question } : {})
     };
   }
 
-  // NORMAL
+  // --- NORMAL ---
   const userContent =
     `MODE: NORMAL\n` +
-    commonHeader +
+    `Persona: ${persona}\n` +
+    `Mensaje_actual: ${message}\n` +
+    `Tema_prev_sustantivo: ${focusHint || "(sin pista)"}\n` +
+    `last_bible_ref: ${lastRef || "(n/a)"}\n` +
+    (shortHistory.length ? `Historial: ${shortHistory.join(" | ")}` : "Historial: (sin antecedentes)") + "\n" +
     `INSTRUCCIONES:\n` +
-    `- Mantén el topic_primary y, si main_subject_locked = true, NO cambies main_subject. Si support_mention_short = true, NO derives a "actividad" de ocio salvo que el FRAME lo justifique.\n` +
-    `- Progrés con 2–3 micro-pasos HOY, concretos y alineados al FRAME (goal/risk/main_subject). Prioriza pasos del tema base.\n` +
-    `- "message": afirmativo, sin signos de pregunta, y sin repetir viñetas recientes.\n` +
-    `- "bible": RVR1909; NO uses banned_refs; evita ambigüedad “hijo” vs “el Hijo”.\n` +
-    `- "question": UNA sola, para el dato clave siguiente o confirmar un compromiso; evita avoid_slots.\n`;
+    `- Mantén el tema y progresa con 2–3 micro-pasos para HOY.\n` +
+    `- "message": afirmativo, sin signos de pregunta; no repitas viñetas recientes.\n` +
+    `- "bible": RVR1909; NO repitas last_bible_ref; temática acorde al message.\n` +
+    `- "question": UNA sola, pidiendo el siguiente dato clave o confirmando un compromiso.\n`;
 
   const resp = await completionWithTimeout({
-    messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: userContent }],
-    temperature: 0.6, max_tokens: 220, timeoutMs: 12000
+    messages: [
+      { role: "system", content: SYSTEM_PROMPT },
+      { role: "user", content: userContent }
+    ],
+    temperature: 0.6,
+    max_tokens: 220,
+    timeoutMs: 12000
   });
 
   const content = resp?.choices?.[0]?.message?.content || "{}";
@@ -649,44 +376,30 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
   let text = (data?.bible?.text || "").toString().trim();
   let question = (data?.question || "").toString().trim();
 
-  const hijoOnly = /\bhijo\b/i.test(message) && !/(Jes[uú]s|Cristo)/i.test(message);
-  if (!ref || bannedRefs.includes(ref) || (hijoOnly && /Juan\s*8:36/i.test(ref))) {
-    const alt = await regenerateBibleAvoiding({ persona, message, focusHint, frame, bannedRefs, lastRef });
+  // Evitar repetir la última cita, y la ambigüedad con Juan 8:36 si aparece “hijo”
+  const msgHasHijo = /\bhijo\b/i.test(focusHint || "") || /\bhijo\b/i.test(message || "");
+  if (!ref || ref === lastRef || (msgHasHijo && /Juan\s*8:36/i.test(ref))) {
+    const banned = [lastRef].filter(Boolean);
+    if (msgHasHijo) banned.push("Juan 8:36");
+    const alt = await regenerateBibleAvoiding({ persona, message, focusHint, bannedRefs: banned, lastRef });
     if (alt) { ref = alt.ref; text = alt.text; }
   }
 
-  updateMemoryFromTurn(mem, { userMsg: message, assistantQuestion: question, bibleRef: ref, focusHint });
-  mem.frame = frame;
-  await writeUserMemory(userId, mem);
-
   return {
     message: msg || "Estoy contigo. Demos un paso pequeño y realista hoy.",
-    bible: { text: text, ref: ref || lastRef || "" },
+    bible: {
+      text: text || "Dios es nuestro amparo y fortaleza; nuestro pronto auxilio en las tribulaciones.",
+      ref: ref || "Salmos 46:1"
+    },
     ...(question ? { question } : {})
   };
-}
-
-function lastSubstantiveUser(history = []) {
-  const rev = [...(history || [])].reverse();
-  for (const h of rev) {
-    if (!/^Usuario:/i.test(h)) continue;
-    const text = h.replace(/^Usuario:\s*/i, "").trim();
-    if (text && !isAck(text) && text.length >= 6) return text;
-  }
-  return "";
 }
 
 // -------- Rutas --------
 app.post("/api/ask", async (req, res) => {
   try {
-    const {
-      persona = "jesus",
-      message = "",
-      history = [],
-      userId = "anon",
-      profile = {}
-    } = req.body || {};
-    const data = await askLLM({ persona, message, history, userId, profile });
+    const { persona = "jesus", message = "", history = [] } = req.body || {};
+    const data = await askLLM({ persona, message, history });
 
     const out = {
       message: (data?.message || "La paz de Dios guarde tu corazón y tus pensamientos. Paso a paso encontraremos claridad.").toString().trim(),
