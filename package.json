@@ -2,10 +2,10 @@
   "name": "jesus-backend",
   "version": "1.0.0",
   "private": true,
-  "main": "server.js",
+  "main": "index.js",
   "type": "commonjs",
   "scripts": {
-    "start": "node server.js"
+    "start": "node index.js"
   },
   "engines": {
     "node": ">=18"
@@ -19,5 +19,6 @@
     "openai": "^4.55.0"
   }
 }
+
 
 
