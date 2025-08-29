@@ -148,10 +148,12 @@ function guessTopic(userMsg = "", focusHint = "") {
   const s = (focusHint || userMsg || "").toLowerCase();
   if (/hijo/.test(s) && /(droga|consum)/.test(s)) return "addiction_child";
   if (/(droga|adicci)/.test(s)) return "addiction";
-  if (/(pareja|matrimonio)/.test(s)) return "relationship";
-  if (/(ansied|miedo|temor|triste)/.test(s)) return "mood";
+  if (/(me separ|separaci[oó]n|divorcio|me divorci[eé]|nos separamos|ruptura)/.test(s)) return "separation";
+  if (/(pareja|matrimonio|conyug)/.test(s)) return "relationship";
+  if (/(ansied|miedo|temor|triste|depres)/.test(s)) return "mood";
   return "general";
 }
+
 function updateMemoryFromTurn(mem, { userMsg, assistantQuestion, bibleRef, focusHint }) {
   mem.last_bible_ref = bibleRef || mem.last_bible_ref || "";
   mem.last_bible_refs = Array.from(
@@ -186,15 +188,17 @@ function extractRecentAssistantQuestions(history = [], maxMsgs = 4) {
 }
 function classifyQuestion(q = "") {
   const s = normalizeQuestion(q);
-  if (/(cuándo|cuando|hora)/i.test(s)) return "time";
-  if (/(dónde|donde|lugar)/i.test(s)) return "place";
+  if (/(cu[aá]ndo|cuando|hora)/i.test(s)) return "time";
+  if (/(d[oó]nde|donde|lugar)/i.test(s)) return "place";
   if (/(ensayar|practicar|frase)/i.test(s)) return "practice";
   if (/(profesional|terapeuta|grupo|apoyo)/i.test(s)) return "help";
-  if (/(límite|limite|regla|acuerdo)/i.test(s)) return "boundary";
-  if (/(cómo te sientes|como te sientes|emocion)/i.test(s)) return "feelings";
+  if (/(l[ií]mite|limite|regla|acuerdo)/i.test(s)) return "boundary";
+  if (/(c[oó]mo te sientes|como te sientes|emoci[oó]n)/i.test(s)) return "feelings";
   if (/(primer paso|siguiente paso)/i.test(s)) return "next_step";
+  if (/(actividad|paseo|salir|caminar|ir a|juntas?)/i.test(s)) return "activity"; // <-- nuevo
   return "other";
 }
+
 function deriveAvoidSlots(recentQs = []) {
   return [...new Set(recentQs.map(classifyQuestion))].filter(Boolean);
 }
@@ -567,3 +571,4 @@ const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`Servidor listo en puerto ${PORT}`);
 });
+
