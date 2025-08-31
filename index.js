@@ -142,14 +142,14 @@ function classifyQuestion(q = "") {
   const s = normalizeQuestion(q);
   if (/(cu[aá]ndo|cuando|hora)/i.test(s)) return "time";
   if (/(d[oó]nde|donde|lugar)/i.test(s)) return "place";
-  if (/(ensayar|practicar|frase|mensaje)/i.test(s)) return "practice";
+  if (/(ensayar|practicar|frase)/i.test(s)) return "practice"; // <-- quitamos 'mensaje' de aquí
   if (/(profesional|terapeuta|grupo|apoyo)/i.test(s)) return "help";
   if (/(l[ií]mite|limite|regla|acuerdo)/i.test(s)) return "boundary";
   if (/(c[oó]mo te sientes|como te sientes|emoci[oó]n)/i.test(s)) return "feelings";
   if (/(primer paso|siguiente paso|qué har[aá]s|que haras)/i.test(s)) return "next_step";
   if (/(actividad|paseo|salir|caminar|ir a|juntas?)/i.test(s)) return "activity";
   if (/(qu[ié]n|quien|en qui[eé]n conf[ií]as|puede acompa[nñ]arte|apoyarte)/i.test(s)) return "support";
-  if (/(llamar|llamada|escribir|mensaje)/i.test(s)) return "channel";
+  if (/(llamar|llamada|escribir|mensaje|contacto|contactarle|comunicar)/i.test(s)) return "channel"; // <-- movimos aquí “mensaje”
   return "other";
 }
 function deriveAvoidSlots(recentQs = []) {
@@ -339,7 +339,7 @@ function updateMemoryFromTurn(mem, { topic, questionClass, userMsg, assistantQue
   ).slice(-5);
   mem.last_questions = Array.from(new Set([...(mem.last_questions || []), (assistantQuestion || "").trim()]))
     .filter(Boolean)
-    .slice(-6);
+    .slice(6 * -1);
 
   mem.topics = mem.topics || {};
   mem.topics[topic] = { ...(mem.topics[topic] || {}), last_seen: Date.now() };
@@ -618,7 +618,7 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
     }
 
     // Evitar cita ambigua/repetida
-    const hijoOnly = /\bhijo\b/i.test(message) && !/(Jes[uú]s|Cristo)/i.test(message);
+    const hijoOnly = /\bhij[oa]\b/i.test(message) && !/(Jes[uú]s|Cristo)/i.test(message);
     if (!ref || bannedRefs.includes(ref) || (hijoOnly && /Juan\s*8:36/i.test(ref))) {
       const alt = await regenerateBibleAvoiding({ persona, message, focusHint, frame, bannedRefs, lastRef });
       if (alt) { ref = alt.ref; text = alt.text; }
@@ -675,7 +675,7 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
     question = forced;
   }
 
-  const hijoOnly = /\bhijo\b/i.test(message) && !/(Jes[uú]s|Cristo)/i.test(message);
+  const hijoOnly = /\bhij[oa]\b/i.test(message) && !/(Jes[uú]s|Cristo)/i.test(message);
   if (!ref || bannedRefs.includes(ref) || (hijoOnly && /Juan\s*8:36/i.test(ref))) {
     const alt = await regenerateBibleAvoiding({ persona, message, focusHint, frame, bannedRefs, lastRef });
     if (alt) { ref = alt.ref; text = alt.text; }
