@@ -1,5 +1,6 @@
-// index.js — backend con FRAME persistente, memoria por usuario, anti-desvío general
-// Respuestas cortas (≤60 palabras), preguntas 1 sola opcional, citas RVR1909 sin repetir
+// index.js — backend con FRAME persistente, memoria por usuario y anti-desvío GENERAL
+// Respuestas cortas (≤60 palabras), UNA pregunta opcional, citas RVR1909 sin repetir,
+// y detección de “persona de apoyo” para CUALQUIER relación (no solo hija/hijo).
 
 const express = require("express");
 const cors = require("cors");
@@ -30,37 +31,36 @@ Eres Jesús: voz serena, compasiva y clara. Responde SIEMPRE en español.
 OBJETIVO
 - Devuelve SOLO JSON: { "message", "bible": { "text", "ref" }, "question"? }.
 - "message": ≤60 palabras, afirmativo, SIN signos de pregunta.
-- "question": opcional, UNA sola, breve, termina en "?". Nada más.
+- "question": opcional, UNA sola, breve, termina en "?".
 - No menciones el nombre civil. Puedes usar “hijo mío”, “hija mía” o “alma amada” con moderación.
 - No hables de técnica/IA ni del propio modelo.
 
 MARCO (FRAME) Y MEMORIA
-- Usa el FRAME recibido (topic_primary, main_subject, goal, risk, support_persons, constraints), avoid_slots, banned_refs, last_bible_ref y PERSISTENT_MEMORY como verdad.
+- Usa el FRAME (topic_primary, main_subject, goal, risk, support_persons, constraints), avoid_slots, banned_refs, last_bible_ref y PERSISTENT_MEMORY como verdad.
 - NO cambies topic_primary salvo que el usuario lo pida o el texto cambie claramente de asunto.
-- Respuestas cortas tipo “mi hija/mi madre/un amigo” son relleno de slot (support_persons) y NO redefinen el tema principal.
+- Si support_np_detected es true, trátalo como relleno de slot de apoyo; NO redefinas el tema ni el sujeto principal.
 
 PROGRESO (ENTREVISTA GUIADA)
-- En cada turno identifica QUÉ dato clave falta y avanza. Prioridad: goal → risk → plan (canal, hora, mini-guion) → constraints → support_persons.
-- Si el usuario da un “ack” (sí/ok/vale), pasa de plan a PRÁCTICA/COMPROMISO (mini-guion 1–2 frases, elegir canal y hora, fijar límite). Nada de repetir.
-- Evita repetir ideas/viñetas del turno previo. Cada "message" aporta novedad útil y accionable.
+- En cada turno identifica QUÉ dato falta y avanza: goal → risk → plan (canal, hora, mini-guion) → constraints → support_persons.
+- Si hay “ack” (sí/ok/vale), pasa de plan a PRÁCTICA/COMPROMISO (mini-guion 1–2 frases, elegir canal/hora, fijar límite). Evita repetir.
+- Evita repetir ideas/viñetas previas. Cada "message" aporta novedad accionable.
 
 CONTENIDO
-- AMBIGUO: "message" con contención concreta (1–2 frases) y “question” para el dato clave inicial.
-- CONCRETO: "message" con 1–2 micro-pasos HOY (usa viñetas “• …” si ayuda), alineados al FRAME; “question” pide el siguiente dato o confirma un compromiso.
-- El autocuidado (respirar/orar/diario) puede ir al final como complemento, NUNCA reemplaza la acción del tema central.
-- No propongas ocio/“salir a pasear” salvo que el tema sea explícitamente vínculo/bonding; si aparece un support_person, úsalo como apoyo para el objetivo principal (ensayar guion, acompañar llamada, estar presente), no como nuevo tema.
+- AMBIGUO: "message" con contención (1–2 frases) y “question” para el dato inicial clave.
+- CONCRETO: "message" con 1–2 micro-pasos HOY (puedes usar “• …”), alineados al FRAME; “question” pide el siguiente dato o confirma un compromiso.
+- Autocuidado puede ir al final como complemento, NUNCA reemplaza la acción central.
+- Si support_np_detected es true, usa a esa persona SOLO como apoyo para el objetivo (acompañar llamada, estar presente, ayudar con logística). No propongas ocio/“salir a pasear” salvo que el FRAME explicite “vínculo/bonding”.
 
 BIBLIA (RVR1909, SIN AMBIGÜEDADES)
-- Elige la cita por el TEMA y por el contenido de "message" (micro-pasos), NO por palabras sueltas (p.ej., “hijo” ≠ “el Hijo”).
+- Elige la cita por el TEMA y los micro-pasos del "message", NO por palabras sueltas (“hijo” ≠ “el Hijo”).
 - Usa RVR1909 literal y "Libro 0:0" en "ref".
-- Evita last_bible_ref y todas las de banned_refs.
-- Prefiere pasajes pertinentes: sabiduría/decisiones (Santiago 1:5; Proverbios 16:9; 22:3; 27:6), paz/consuelo (Salmos 34:18; Filipenses 4:7), verdad/límites (Efesios 4:15), reconciliación/paz (Romanos 12:18), libertad/adicción (1 Corintios 10:13).
-- Evita ambigüedad “el Hijo” (Juan 8:36) cuando el usuario habló de su “hijo/hija” familiar, salvo pertinencia teológica explícita.
+- Evita last_bible_ref y todas las banned_refs.
+- Sugerencias: sabiduría/decisiones (Santiago 1:5; Proverbios 16:9; 22:3; 27:6), paz/consuelo (Salmos 34:18; Filipenses 4:7), verdad/límites (Efesios 4:15), reconciliación/paz (Romanos 12:18), libertad/adicción (1 Corintios 10:13).
+- Evita ambigüedad “el Hijo” (Juan 8:36) cuando el usuario habló de un familiar “hijo/hija”, salvo pertinencia teológica explícita.
 
 REGLAS ESPECIALES
-- DESPEDIDA: si el usuario se despide, entrega bendición breve en "message", elige verso de paz/consuelo (no repetido) y NO incluyas "question".
-- “question” debe ser distinta de las últimas preguntas (si avoid_slots lo indica, no repitas ese tipo).
-- Mantén el mismo topic_primary aunque aparezcan support_persons o tiempo/lugar; esos son constraints o apoyo, no tema nuevo.
+- DESPEDIDA: bendición breve en "message"; verso de paz/consuelo (no repetido) en "bible"; SIN "question".
+- “question” debe diferir de las últimas (usa avoid_slots).
 
 FORMATO (OBLIGATORIO)
 {
@@ -102,7 +102,6 @@ function stripQuestions(s = "") {
     .join("\n").trim();
   return noLeadingQs.replace(/[¿?]+/g, "").trim();
 }
-// Limita a ≤ N palabras
 function limitWords(s = "", max = 60) {
   const words = String(s || "").trim().split(/\s+/);
   return words.length <= max ? String(s || "").trim() : words.slice(0, max).join(" ").trim();
@@ -241,61 +240,96 @@ function detectMainSubject(text = "") {
   if (/(mi\s+amig[oa])/.test(s)) return "friend";
   return "self";
 }
-function isShortSupportNP(msg = "") {
-  const s = (msg || "").trim().toLowerCase();
-  return /^(mi|una|un)\s+(hija|hijo|madre|padre|mam[aá]|pap[aá]|amig[oa]|herman[oa]|compa[nñ]er[oa])s?$/i.test(s);
+
+// --- NUEVO: detección GENERAL de “persona de apoyo” (cualquier relación breve) ---
+const SUPPORT_LEX = [
+  // familia directa y extendida
+  "hijo","hija","madre","padre","mamá","mama","papá","papa","abuelo","abuela","nieto","nieta",
+  "tío","tio","tía","tia","sobrino","sobrina","primo","prima","cuñado","cuñada","suegro","suegra","yerno","nuera",
+  // pareja y amistades
+  "esposo","esposa","pareja","novio","novia","amigo","amiga","compañero","compañera","colega","vecino","vecina",
+  // red de apoyo diversa
+  "pastor","sacerdote","mentor","maestro","maestra","profesor","profesora","jefe","jefa",
+  // profesionales de ayuda (siguen siendo “apoyo”, no tema)
+  "psicólogo","psicologa","psicóloga","terapeuta","consejero","consejera","médico","medica","médica"
+];
+
+function detectSupportNP(msg = "") {
+  const raw = (msg || "").trim();
+  if (!raw) return null;
+  // Muy corto, pocas palabras y sin verbos → probable mención de persona
+  const tokens = raw.split(/\s+/);
+  if (tokens.length > 6) return null;
+
+  const s = raw.toLowerCase();
+  // patrones: "mi X", "mis X", "una X", "un X", "el X", "la X", "mi amiga Laura", "un primo", etc.
+  const artPat = /^(mi|mis|una|un|el|la)\s+(.+)$/i;
+  let label = raw;
+  let core = s;
+  const m = s.match(artPat);
+  if (m) {
+    core = m[2].trim();
+    label = raw;
+  }
+  // tomar la primera palabra del núcleo como "candidato" de relación
+  const first = core.split(/\s+/)[0].replace(/[.,;:!?"'()]/g, "");
+  if (!first) return null;
+
+  // ¿está en léxico de relaciones?
+  const hit = SUPPORT_LEX.includes(first);
+  if (!hit) return null;
+
+  return { rel: first, label };
 }
-function parseRelation(msg = "") {
-  const s = (msg || "").toLowerCase();
-  if (/hija/.test(s)) return "daughter";
-  if (/hijo/.test(s)) return "son";
-  if (/madre|mam[aá]/.test(s)) return "mother";
-  if (/padre|pap[aá]/.test(s)) return "father";
-  if (/amig[oa]/.test(s)) return "friend";
-  if (/herman[oa]/.test(s)) return "sibling";
-  if (/compa[nñ]er[oa]/.test(s)) return "partner_friend";
+
+function mapSupportRelToBucket(rel = "") {
+  const r = (rel || "").toLowerCase();
+  if (/(hijo|hija|nieto|nieta)/.test(r)) return "child";
+  if (/(madre|padre|mamá|mama|papá|papa|abuelo|abuela)/.test(r)) return "parent";
+  if (/(t[ií]o|tio|t[ií]a|tia|sobrin|primo|prima|cuñad|suegr|yerno|nuera)/.test(r)) return "relative";
+  if (/(espos|pareja|novi)/.test(r)) return "partner";
+  if (/(amig|vecin|compañer|coleg)/.test(r)) return "friend";
+  if (/(pastor|sacerdote|mentor|maestr|profesor|profesora|jef)/.test(r)) return "mentor";
+  if (/(psicol|terapeuta|consejer|m[eé]dic)/.test(r)) return "professional";
   return "other";
 }
-function detectGoal(text = "") {
-  const s = (text || "").toLowerCase();
-  if (/(quiero que vuelva|quiero volver|reconcili|retomar)/.test(s)) return "reconcile";
-  if (/(denuncia|violencia|abuso|amenaza|peligro)/.test(s)) return "safety";
-  if (/(separar|divorci|terminar|cortar)/.test(s)) return "separate";
-  if (/(buscar ayuda|terapeuta|grupo|profesional)/.test(s)) return "seek_help";
-  if (/(no s[eé]|confuso|confund)/.test(s)) return "clarify";
-  return "";
-}
-function detectRisk(text = "") {
-  const s = (text || "").toLowerCase();
-  if (/(violencia|golpe|amenaza|arma|peligro|me har[aá]|suicid|autolesi)/.test(s)) return "high";
-  return "normal";
-}
+
 function dedupSupport(arr = []) {
   const seen = new Set();
   const out = [];
   for (const it of arr) {
-    const key = (it?.rel || "x") + "|" + (it?.label || "").toLowerCase();
+    const key = (it?.bucket || "x") + "|" + (it?.label || "").toLowerCase();
     if (!seen.has(key)) { seen.add(key); out.push(it); }
   }
   return out;
 }
+
 function updateFrame(prev = null, userMsg = "", focusHint = "") {
+  const supportNP = detectSupportNP(userMsg); // NUEVO
   const topic = prev?.topic_primary || guessTopic(userMsg, focusHint);
+
+  // Mantener main_subject previo si existe; si no, derivarlo del último mensaje sustantivo (focusHint)
   const mainSubject = prev?.main_subject || detectMainSubject(focusHint || userMsg);
+
   const goal = detectGoal(userMsg) || prev?.goal || "";
   const risk = detectRisk(userMsg) || prev?.risk || "normal";
+
+  // soporte
   const support = Array.isArray(prev?.support_persons) ? [...prev.support_persons] : [];
-  if (isShortSupportNP(userMsg)) {
-    support.push({ rel: parseRelation(userMsg), label: userMsg.trim() });
+  if (supportNP) {
+    support.push({ rel: supportNP.rel, label: supportNP.label, bucket: mapSupportRelToBucket(supportNP.rel) });
   }
+
   const constraints = { ...(prev?.constraints || {}) };
+
   return {
     topic_primary: topic,
     main_subject: mainSubject,
     goal,
     risk,
     support_persons: dedupSupport(support).slice(-5),
-    constraints
+    constraints,
+    support_np_detected: !!supportNP // bandera para el prompt
   };
 }
 
@@ -349,7 +383,7 @@ async function completionWithTimeout({ messages, temperature = 0.6, max_tokens =
   ]);
 }
 
-// micro-llamada para re-generar SOLO la cita si vino repetida/prohibida
+// --- micro-llamada para re-generar SOLO la cita si viene repetida/prohibida
 const bibleOnlyFormat = {
   type: "json_schema",
   json_schema: {
@@ -373,7 +407,7 @@ async function regenerateBibleAvoiding({ persona, message, focusHint, frame, ban
   const sys = `Devuelve SOLO JSON con {"bible":{"text":"…","ref":"Libro 0:0"}} en RVR1909.
 - Usa el FRAME para dar coherencia a la cita con los micro-pasos.
 - No uses ninguna referencia de "banned_refs".
-- Evita ambigüedad entre “hijo” (niño) y “el Hijo” (Cristo) salvo pertinencia teológica explícita.`;
+- Evita ambigüedad “hijo” (familiar) vs “el Hijo” (Cristo) salvo pertinencia teológica explícita.`;
 
   const usr = (
     `Persona: ${persona}\n` +
@@ -417,8 +451,9 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
 
   const recentQs = extractRecentAssistantQuestions(history, 4);
   let avoidSlots = deriveAvoidSlots(recentQs);
-  if (isShortSupportNP(message)) {
-    avoidSlots = Array.from(new Set([...avoidSlots, "activity"]));
+  if (frame.support_np_detected) {
+    // Evitar girar a “actividad/bonding” y a repetir “support”
+    avoidSlots = Array.from(new Set([...avoidSlots, "activity", "support"]));
   }
 
   const recentRefs = extractRecentBibleRefs(history, 3);
@@ -434,6 +469,8 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
     `Mensaje_actual: ${message}\n` +
     `Tema_prev_sustantivo: ${focusHint || "(sin pista)"}\n` +
     `FRAME: ${JSON.stringify(frame)}\n` +
+    `support_np_detected: ${frame.support_np_detected}\n` +
+    `topic_primary_lock: true\n` +
     `last_bible_ref: ${lastRef || "(n/a)"}\n` +
     `banned_refs:\n- ${bannedRefs.join("\n- ") || "(none)"}\n` +
     `avoid_slots: ${avoidSlots.join(", ") || "(none)"}\n` +
@@ -449,8 +486,7 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
       `INSTRUCCIONES:\n` +
       `- Despedida breve y benigna.\n` +
       `- "message": afirmativo, sin signos de pregunta (≤60 palabras).\n` +
-      `- "bible": bendición/consuelo RVR1909.\n` +
-      `- No repitas referencias en banned_refs.\n` +
+      `- "bible": bendición/consuelo RVR1909 (no repetida).\n` +
       `- No incluyas "question".\n`;
 
     let resp;
@@ -495,11 +531,11 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
       `MODE: ACK\n` +
       commonHeader +
       `INSTRUCCIONES:\n` +
-      `- Mantén el MISMO topic_primary del FRAME, NO lo cambies por respuestas de slot (support_persons).\n` +
-      `- Pasa de plan a práctica/compromiso con **novedad** (mini-guion, confirmar hora/límite/contacto), sin repetir.\n` +
-      `- "message": afirmativo, sin signos de pregunta (≤60 palabras).\n` +
-      `- "bible": coherente con message; RVR1909; NO uses banned_refs.\n` +
-      `- "question": UNA sola, para ensayar/confirmar el micro-paso; evita avoid_slots.\n`;
+      `- Mantén el MISMO topic_primary (topic_primary_lock). NO pivotear por support_np_detected.\n` +
+      `- De plan a práctica/compromiso con NOVEDAD (mini-guion, canal y hora, límite), sin repetir.\n` +
+      `- "message": afirmativo, ≤60 palabras, sin signos de pregunta.\n` +
+      `- "bible": coherente con message; RVR1909; evita banned_refs.\n` +
+      `- "question": UNA sola; evita avoid_slots.\n`;
 
     let resp;
     try {
@@ -528,6 +564,7 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
     const recentQs2 = extractRecentAssistantQuestions(history, 4);
     if (question && recentQs2.includes(normalizedQ)) question = "";
 
+    // Evitar cita ambigua/repetida (p.ej. Juan 8:36 por “hijo”)
     const hijoOnly = /\bhijo\b/i.test(message) && !/(Jes[uú]s|Cristo)/i.test(message);
     if (!ref || bannedRefs.includes(ref) || (hijoOnly && /Juan\s*8:36/i.test(ref))) {
       const alt = await regenerateBibleAvoiding({ persona, message, focusHint, frame, bannedRefs, lastRef });
@@ -550,11 +587,11 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
     `MODE: NORMAL\n` +
     commonHeader +
     `INSTRUCCIONES:\n` +
-    `- Mantén el topic_primary del FRAME y **no** pivotes por respuestas de slot (support/time/place). Si el usuario dice “mi hija”, úsalo como apoyo, no como nuevo tema.\n` +
-    `- Progrés con 1–2 micro-pasos HOY, concretos y alineados al FRAME (goal/risk/main_subject). Evita ocio genérico salvo vínculo explícito.\n` +
-    `- "message": afirmativo, sin signos de pregunta, sin repetir viñetas recientes, ≤60 palabras.\n` +
-    `- "bible": RVR1909; NO uses banned_refs; evita ambigüedad “hijo” vs “el Hijo”.\n` +
-    `- "question": UNA sola, para el dato clave siguiente o confirmar un compromiso; evita avoid_slots.\n`;
+    `- Mantén topic_primary (topic_primary_lock). NO pivotes por support_np_detected; úsalo como apoyo al objetivo.\n` +
+    `- Progrés con 1–2 micro-pasos HOY, concretos y alineados al FRAME (goal/risk/main_subject). Sin ocio genérico salvo vínculo explícito.\n` +
+    `- "message": afirmativo, ≤60 palabras, sin signos de pregunta, sin repetir viñetas recientes.\n` +
+    `- "bible": RVR1909; evita banned_refs; evita ambigüedad “hijo” vs “el Hijo”.\n` +
+    `- "question": UNA sola, siguiente dato/compromiso; evita avoid_slots.\n`;
 
   const resp = await completionWithTimeout({
     messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: userContent }],
