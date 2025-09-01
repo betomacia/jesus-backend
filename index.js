@@ -1,6 +1,6 @@
 // index.js — backend con FRAME persistente, memoria por usuario y anti-desvío GENERAL
 // Respuestas cortas (≤60 palabras), UNA pregunta opcional, citas RVR1909 sin repetir,
-// detección general de “persona de apoyo” y progresión forzada (goal→channel→time→support→boundary).
+// detección general de “persona de apoyo” y progresión forzada (canal→hora→apoyo→primer paso).
 
 const express = require("express");
 const cors = require("cors");
@@ -41,8 +41,7 @@ MARCO (FRAME) Y MEMORIA
 - Si support_np_detected es true, trátalo como relleno de slot de apoyo; NO redefinas el tema ni el sujeto principal.
 
 PROGRESO (ENTREVISTA GUIADA)
-- En cada turno identifica QUÉ dato falta y avanza: goal → plan (canal, hora, mini-guion) → constraints → support_persons.
-- Si goal_is_set = false, la pregunta DEBE ser de objetivo; NO preguntes por canal/tiempo/apoyo/límites.
+- En cada turno identifica QUÉ dato falta y avanza: goal → risk → plan (canal, hora, mini-guion) → constraints → support_persons.
 - Si hay “ack” (sí/ok/vale), pasa de plan a PRÁCTICA/COMPROMISO (mini-guion 1–2 frases, elegir canal/hora, fijar límite). Evita repetir.
 - Evita repetir ideas/viñetas previas. Cada "message" aporta novedad accionable.
 
@@ -141,14 +140,13 @@ function extractRecentAssistantQuestions(history = [], maxMsgs = 4) {
 }
 function classifyQuestion(q = "") {
   const s = normalizeQuestion(q);
-  if (/(qu[eé]\s+te\s+gustar[ií]a\s+lograr|objetivo|meta)/i.test(s)) return "goal";   // <-- NUEVO: clase objetivo
   if (/(cu[aá]ndo|cuando|hora)/i.test(s)) return "time";
   if (/(d[oó]nde|donde|lugar)/i.test(s)) return "place";
   if (/(ensayar|practicar|frase|mensaje)/i.test(s)) return "practice";
   if (/(profesional|terapeuta|grupo|apoyo)/i.test(s)) return "help";
   if (/(l[ií]mite|limite|regla|acuerdo)/i.test(s)) return "boundary";
   if (/(c[oó]mo te sientes|como te sientes|emoci[oó]n)/i.test(s)) return "feelings";
-  if (/(primer paso|siguiente paso|qu[eé]\s+har[aá]s|que haras)/i.test(s)) return "next_step";
+  if (/(primer paso|siguiente paso|qué har[aá]s|que haras)/i.test(s)) return "next_step";
   if (/(actividad|paseo|salir|caminar|ir a|juntas?)/i.test(s)) return "activity";
   if (/(qu[ié]n|quien|en qui[eé]n conf[ií]as|puede acompa[nñ]arte|apoyarte)/i.test(s)) return "support";
   if (/(llamar|llamada|escribir|mensaje)/i.test(s)) return "channel";
@@ -294,13 +292,17 @@ function dedupSupport(arr = []) {
   return out;
 }
 
+// *** FIX 1: detectGoal mejorado (capta “que vuelva”, “que me perdone”, “recuperar”, etc.) ***
 function detectGoal(text = "") {
   const s = (text || "").toLowerCase();
-  if (/(quiero que vuelva|quiero volver|reconcili|retomar)/.test(s)) return "reconcile";
+  // reconciliación / volver / pedir perdón / restaurar relación
+  if (/(que\s+vuelv[ae]|que\s+regres[ea]|volver(?:\s+a)?\s+estar|retomar|reconcili|restaurar|arreglar|recuperar|reconstruir|pedir\s+perd[oó]n|que\s+me\s+perdon[ea]|perdonarnos)/.test(s)) {
+    return "reconcile";
+  }
   if (/(denuncia|violencia|abuso|amenaza|peligro)/.test(s)) return "safety";
-  if (/(separar|divorci|terminar|cortar)/.test(s)) return "separate";
-  if (/(buscar ayuda|terapeuta|grupo|profesional)/.test(s)) return "seek_help";
-  if (/(no s[eé]|confuso|confund)/.test(s)) return "clarify";
+  if (/(separar|divorci|terminar|cortar|seguir\s+adelante)/.test(s)) return "separate";
+  if (/(buscar\s+ayuda|terapeuta|grupo|profesional)/.test(s)) return "seek_help";
+  if (/(no s[eé]|confuso|confund|no\s+tengo\s+claro)/.test(s)) return "clarify";
   return "";
 }
 function detectRisk(text = "") {
@@ -385,30 +387,31 @@ function subjectNoun(frame) {
     default: return "esta situación";
   }
 }
-function forcedNextQuestion(frame, mem, avoidSlots = [], userNegation = false) {
-  const topic = frame.topic_primary || "general";
-  mem.progress = mem.progress || {};
-  const prog = mem.progress[topic] || { stage: 0, decided: {} };
 
-  const plan = [
-    { slot: "goal",       q: `¿Qué te gustaría lograr esta semana respecto a ${subjectNoun(frame)}?` },
-    { slot: "channel",    q: "¿Prefieres escribir un mensaje breve o hacer una llamada?" },
-    { slot: "time",       q: "¿A qué hora hoy te viene mejor intentarlo?" },
-    { slot: "support_act",q: frame.support_persons?.length ? `¿Quieres que ${frame.support_persons[0].label} te acompañe o esté cerca?` : "" },
-    { slot: "boundary",   q: "¿Hay algún límite claro que quieras expresar si la conversación se complica?" },
-    { slot: "next_step",  q: "¿Cuál será tu primer paso concreto hoy?" }
+// *** FIX 2: si ya hay goal, no se vuelve a preguntar goal; saltar a canal/hora/etc. ***
+function forcedNextQuestion(frame, mem, avoidSlots = [], userNegation = false) {
+  const hasGoal = Boolean(frame.goal);
+  const basePlan = [
+    ...(!hasGoal ? [{ slot: "goal", q: `¿Qué te gustaría lograr esta semana respecto a ${subjectNoun(frame)}?` }] : []),
+    { slot: "channel",     q: "¿Prefieres escribir un mensaje breve o hacer una llamada?" },
+    { slot: "time",        q: "¿A qué hora hoy te viene mejor intentarlo?" },
+    { slot: "support_act", q: frame.support_persons?.length ? `¿Quieres que ${frame.support_persons[0].label} te acompañe o esté cerca?` : "" },
+    { slot: "boundary",    q: "¿Hay algún límite claro que quieras expresar si la conversación se complica?" },
+    { slot: "next_step",   q: "¿Cuál será tu primer paso concreto hoy?" }
   ];
 
+  // Si el usuario acaba de negar (“no tengo ganas”), prioriza time/next_step.
   const order = userNegation
-    ? ["goal","time","next_step","channel","support_act","boundary"]
+    ? ["time","next_step","channel","support_act","boundary","goal"]
     : ["goal","channel","time","support_act","boundary","next_step"];
 
   for (const key of order) {
-    const item = plan.find(p => p.slot === key);
+    const item = basePlan.find(p => p.slot === key);
     if (!item || !item.q) continue;
     const classOfItem = classifyQuestion(item.q);
     if (avoidSlots.includes(classOfItem)) continue;
 
+    // si ya está decidido en constraints, salta
     if (key === "channel" && frame.constraints?.channel) continue;
     if (key === "time"    && frame.constraints?.time) continue;
 
@@ -502,18 +505,8 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
 
   const recentQs = extractRecentAssistantQuestions(history, 4);
   let avoidSlots = deriveAvoidSlots(recentQs);
-
-  // Si detectó NP de apoyo, no preguntar actividades ni “support” en cadena
   if (frame.support_np_detected) {
     avoidSlots = Array.from(new Set([...avoidSlots, "activity", "support"]));
-  }
-
-  // ---- GATING UNIVERSAL: si no hay goal, evita adelantarse a canal/tiempo/apoyo/límites/etc.
-  if (!frame.goal) {
-    avoidSlots = Array.from(new Set([
-      ...avoidSlots,
-      "channel","time","support","boundary","practice","activity","next_step"
-    ]));
   }
 
   const recentRefs = extractRecentBibleRefs(history, 3);
@@ -531,7 +524,6 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
     `FRAME: ${JSON.stringify(frame)}\n` +
     `support_np_detected: ${frame.support_np_detected}\n` +
     `topic_primary_lock: true\n` +
-    `goal_is_set: ${Boolean(frame.goal)}\n` +          // <-- bandera para el LLM
     `last_bible_ref: ${lastRef || "(n/a)"}\n` +
     `banned_refs:\n- ${bannedRefs.join("\n- ") || "(none)"}\n` +
     `avoid_slots: ${avoidSlots.join(", ") || "(none)"}\n` +
@@ -593,7 +585,6 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
       commonHeader +
       `INSTRUCCIONES:\n` +
       `- Mantén el MISMO topic_primary (topic_primary_lock). NO pivotear por support_np_detected.\n` +
-      `- Si goal_is_set = false, formula pregunta de objetivo; NO preguntes por canal/tiempo/apoyo/límites.\n` + // <-- instrucción explícita
       `- De plan a práctica/compromiso con NOVEDAD (mini-guion, canal y hora, límite), sin repetir.\n` +
       `- "message": afirmativo, ≤60 palabras, sin signos de pregunta.\n` +
       `- "bible": coherente con message; RVR1909; evita banned_refs.\n` +
@@ -630,11 +621,6 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
       question = forcedNextQuestion(frame, mem, recentClasses, userNegation);
     }
 
-    // GATING post-LLM: si no hay goal y la pregunta NO es de objetivo → reemplazar
-    if (!frame.goal && classifyQuestion(question) !== "goal") {
-      question = `¿Qué te gustaría lograr esta semana respecto a ${subjectNoun(frame)}?`;
-    }
-
     // Evitar cita ambigua/repetida
     const hijoOnly = /\bhijo\b/i.test(message) && !/(Jes[uú]s|Cristo)/i.test(message);
     if (!ref || bannedRefs.includes(ref) || (hijoOnly && /Juan\s*8:36/i.test(ref))) {
@@ -666,7 +652,6 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
     commonHeader +
     `INSTRUCCIONES:\n` +
     `- Mantén topic_primary (topic_primary_lock). NO pivotes por support_np_detected; úsalo como apoyo al objetivo.\n` +
-    `- Si goal_is_set = false, la pregunta DEBE ser sobre el objetivo. NO preguntes canal/tiempo/apoyo/límites.\n` + // <-- instrucción explícita
     `- Progrés con 1–2 micro-pasos HOY, concretos y alineados al FRAME (goal/risk/main_subject). Sin ocio genérico salvo vínculo explícito.\n` +
     `- "message": afirmativo, ≤60 palabras, sin signos de pregunta, sin repetir viñetas recientes.\n` +
     `- "bible": RVR1909; evita banned_refs; evita ambigüedad “hijo” vs “el Hijo”.\n` +
@@ -689,14 +674,9 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
 
   // Antibucle de pregunta en NORMAL
   const qClass = classifyQuestion(question);
-  const avoidRecent = deriveAvoidSlots(extractRecentAssistantQuestions(history, 4));
-  if (!question || avoidRecent.includes(qClass)) {
-    question = forcedNextQuestion(frame, mem, avoidRecent, userNegation);
-  }
-
-  // GATING post-LLM: si no hay goal y la pregunta NO es de objetivo → reemplazar
-  if (!frame.goal && classifyQuestion(question) !== "goal") {
-    question = `¿Qué te gustaría lograr esta semana respecto a ${subjectNoun(frame)}?`;
+  const avoidCls = deriveAvoidSlots(extractRecentAssistantQuestions(history, 4));
+  if (!question || avoidCls.includes(qClass)) {
+    question = forcedNextQuestion(frame, mem, avoidCls, userNegation);
   }
 
   const hijoOnly = /\bhijo\b/i.test(message) && !/(Jes[uú]s|Cristo)/i.test(message);
