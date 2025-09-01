@@ -1,6 +1,6 @@
 // index.js — backend con FRAME persistente, memoria por usuario y anti-desvío GENERAL
 // Respuestas cortas (≤60 palabras), UNA pregunta opcional, citas RVR1909 sin repetir,
-// detección general de “persona de apoyo”, progreso guiado y SIN preguntas locales forzadas.
+// detección general de “persona de apoyo” y progresión forzada (canal→hora→apoyo→primer paso).
 
 const express = require("express");
 const cors = require("cors");
@@ -16,9 +16,6 @@ app.use(bodyParser.json());
 
 // ---- OpenAI ----
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-// Desactiva el fallback local de preguntas (todas deben venir del LLM)
-const ENABLE_LOCAL_QUESTION_FALLBACK = false;
 
 /**
  * Respuesta del BACKEND:
@@ -39,12 +36,12 @@ OBJETIVO
 - No hables de técnica/IA ni del propio modelo.
 
 MARCO (FRAME) Y MEMORIA
-- Usa el FRAME (topic_primary, main_subject, goal, risk, support_persons, constraints), avoid_slots, banned_refs, last_bible_ref, last_questions y PERSISTENT_MEMORY como verdad.
+- Usa el FRAME (topic_primary, main_subject, goal, risk, support_persons, constraints), avoid_slots, banned_refs, last_bible_ref y PERSISTENT_MEMORY como verdad.
 - NO cambies topic_primary salvo que el usuario lo pida o el texto cambie claramente de asunto.
 - Si support_np_detected es true, trátalo como relleno de slot de apoyo; NO redefinas el tema ni el sujeto principal.
 
 PROGRESO (ENTREVISTA GUIADA)
-- Identifica QUÉ dato falta y avanza: goal → risk → plan (canal, hora, mini-guion) → constraints → support_persons.
+- En cada turno identifica QUÉ dato falta y avanza: goal → risk → plan (canal, hora, mini-guion) → constraints → support_persons.
 - Si hay “ack” (sí/ok/vale), pasa de plan a PRÁCTICA/COMPROMISO (mini-guion 1–2 frases, elegir canal/hora, fijar límite). Evita repetir.
 - Evita repetir ideas/viñetas previas. Cada "message" aporta novedad accionable.
 
@@ -57,16 +54,13 @@ CONTENIDO
 BIBLIA (RVR1909, SIN AMBIGÜEDADES)
 - Elige la cita por el TEMA y los micro-pasos del "message", NO por palabras sueltas (“hijo” ≠ “el Hijo”).
 - Usa RVR1909 literal y "Libro 0:0" en "ref".
-- Evita last_bible_ref, last_bible_refs y todas las banned_refs.
+- Evita last_bible_ref y todas las banned_refs.
 - Sugerencias: sabiduría/decisiones (Santiago 1:5; Proverbios 16:9; 22:3; 27:6), paz/consuelo (Salmos 34:18; Filipenses 4:7), verdad/límites (Efesios 4:15), reconciliación/paz (Romanos 12:18), libertad/adicción (1 Corintios 10:13).
 - Evita ambigüedad “el Hijo” (Juan 8:36) cuando el usuario habló de un familiar “hijo/hija”, salvo pertinencia teológica explícita.
 
 REGLAS ESPECIALES
 - DESPEDIDA: bendición breve en "message"; verso de paz/consuelo (no repetido) en "bible"; SIN "question".
-
-VARIACIÓN DE PREGUNTAS
-- No repitas preguntas recientes (ver "last_questions"). Respeta "avoid_slots".
-- Si no puedes proponer una pregunta NUEVA y ÚTIL, omite "question".
+- “question” debe diferir de las últimas (usa avoid_slots).
 
 FORMATO (OBLIGATORIO)
 {
@@ -207,7 +201,7 @@ function buildPersistentMemoryPrompt(mem = {}) {
   if (p.gender) parts.push(`género: ${p.gender}`);
   const lastRefs = Array.from(new Set([...(mem.last_bible_refs || []), mem.last_bible_ref].filter(Boolean))).slice(-5);
   if (lastRefs.length) parts.push(`últimas_citas: ${lastRefs.join(", ")}`);
-  const lastQs = (mem.last_questions || []).slice(-5);
+  const lastQs = (mem.last_questions || []).slice(-3);
   if (lastQs.length) parts.push(`últimas_preguntas: ${lastQs.join(" | ")}`);
   if (mem.frame) parts.push(`frame_previo: ${JSON.stringify(mem.frame)}`);
   const topics = Object.keys(t);
@@ -350,7 +344,7 @@ function updateMemoryFromTurn(mem, { topic, questionClass, userMsg, assistantQue
   mem.topics = mem.topics || {};
   mem.topics[topic] = { ...(mem.topics[topic] || {}), last_seen: Date.now() };
 
-  // progreso por tema (guardamos el avance aunque ya no forcemos pregunta localmente)
+  // progreso por tema
   mem.progress = mem.progress || {};
   const prog = mem.progress[topic] || { stage: 0, decided: {} };
   if (questionClass) prog.stage = Math.min(prog.stage + 1, 6);
@@ -377,7 +371,7 @@ function extractRecentBibleRefs(history = [], maxRefs = 3) {
   return found;
 }
 
-// -------- Progresión local (deshabilitada por defecto) --------
+// -------- Progresión forzada de pregunta (si LLM repite o se queda en blanco) --------
 function subjectNoun(frame) {
   switch (frame.main_subject) {
     case "partner": return "tu esposo/pareja";
@@ -392,6 +386,9 @@ function subjectNoun(frame) {
 function forcedNextQuestion(frame, mem, avoidSlots = [], userNegation = false) {
   const topic = frame.topic_primary || "general";
   mem.progress = mem.progress || {};
+  const prog = mem.progress[topic] || { stage: 0, decided: {} };
+
+  // Orden de slots a cubrir
   const plan = [
     { slot: "goal",       q: `¿Qué te gustaría lograr esta semana respecto a ${subjectNoun(frame)}?` },
     { slot: "channel",    q: "¿Prefieres escribir un mensaje breve o hacer una llamada?" },
@@ -400,14 +397,20 @@ function forcedNextQuestion(frame, mem, avoidSlots = [], userNegation = false) {
     { slot: "boundary",   q: "¿Hay algún límite claro que quieras expresar si la conversación se complica?" },
     { slot: "next_step",  q: "¿Cuál será tu primer paso concreto hoy?" }
   ];
+
+  // Si el usuario acaba de negar (“no tengo ganas”), evita “practice” y empuja a una decisión mínima (time/next_step).
   const order = userNegation ? ["time","next_step","channel","support_act","boundary"] : ["goal","channel","time","support_act","boundary","next_step"];
+
   for (const key of order) {
     const item = plan.find(p => p.slot === key);
     if (!item || !item.q) continue;
     const classOfItem = classifyQuestion(item.q);
     if (avoidSlots.includes(classOfItem)) continue;
+
+    // si ya está decidido en constraints, salta
     if (key === "channel" && frame.constraints?.channel) continue;
     if (key === "time"    && frame.constraints?.time) continue;
+
     return item.q;
   }
   return "¿Cuál será tu primer paso concreto hoy?";
@@ -480,6 +483,17 @@ async function regenerateBibleAvoiding({ persona, message, focusHint, frame, ban
   return text && ref ? { text, ref } : null;
 }
 
+// --- Guardia anti-basura desde STT u otras integraciones ---
+function looksLikeJunk(s=""){
+  const t = String(s).trim().toLowerCase();
+  if (!t) return true;
+  const words = t.split(/\s+/).filter(Boolean);
+  const isAckV = /^(si|sí|ok|okay|vale|dale|de acuerdo|bien|genial)\.?$/.test(t);
+  if (isAckV) return false;
+  if (t.replace(/[^\p{L}\p{N}]/gu,"").length < 6 || words.length < 2) return true;
+  return false;
+}
+
 async function askLLM({ persona, message, history = [], userId = "anon", profile = {} }) {
   const mem = await readUserMemory(userId);
   mem.profile = { ...(mem.profile || {}), ...(profile || {}) };
@@ -509,7 +523,6 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
 
   const persistentMemory = buildPersistentMemoryPrompt(mem);
   const shortHistory = compactHistory(history, (ack || bye) ? 4 : 10, 240);
-  const lastQuestions = (mem.last_questions || []).slice(-5);
 
   const commonHeader =
     `Persona: ${persona}\n` +
@@ -521,7 +534,6 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
     `last_bible_ref: ${lastRef || "(n/a)"}\n` +
     `banned_refs:\n- ${bannedRefs.join("\n- ") || "(none)"}\n` +
     `avoid_slots: ${avoidSlots.join(", ") || "(none)"}\n` +
-    `last_questions: ${lastQuestions.join(" | ") || "(none)"}\n` +
     `user_negation: ${userNegation}\n` +
     `PERSISTENT_MEMORY:\n${persistentMemory || "(vacía)"}\n` +
     (shortHistory.length ? `Historial: ${shortHistory.join(" | ")}` : "Historial: (sin antecedentes)") + "\n";
@@ -583,7 +595,7 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
       `- De plan a práctica/compromiso con NOVEDAD (mini-guion, canal y hora, límite), sin repetir.\n` +
       `- "message": afirmativo, ≤60 palabras, sin signos de pregunta.\n` +
       `- "bible": coherente con message; RVR1909; evita banned_refs.\n` +
-      `- "question": UNA sola; evita avoid_slots y last_questions; si no hay pregunta NUEVA y útil, omítela.\n`;
+      `- "question": UNA sola; evita avoid_slots.\n`;
 
     let resp;
     try {
@@ -608,16 +620,12 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
     let text = (data?.bible?.text || "").toString().trim();
     let question = (data?.question || "").toString().trim();
 
-    // Antibucle de pregunta: no sustituimos localmente (salvo que se habilite explícito)
+    // Antibucle de pregunta: si es vacía o cae en slots recientes, forzar progreso
     const qClass = classifyQuestion(question);
     const recentQs2 = extractRecentAssistantQuestions(history, 4);
     const recentClasses = deriveAvoidSlots(recentQs2);
     if (!question || recentClasses.includes(qClass)) {
-      if (ENABLE_LOCAL_QUESTION_FALLBACK) {
-        question = forcedNextQuestion(frame, mem, recentClasses, userNegation);
-      } else {
-        question = "";
-      }
+      question = forcedNextQuestion(frame, mem, recentClasses, userNegation);
     }
 
     // Evitar cita ambigua/repetida
@@ -654,7 +662,7 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
     `- Progrés con 1–2 micro-pasos HOY, concretos y alineados al FRAME (goal/risk/main_subject). Sin ocio genérico salvo vínculo explícito.\n` +
     `- "message": afirmativo, ≤60 palabras, sin signos de pregunta, sin repetir viñetas recientes.\n` +
     `- "bible": RVR1909; evita banned_refs; evita ambigüedad “hijo” vs “el Hijo”.\n` +
-    `- "question": UNA sola, siguiente dato/compromiso; evita avoid_slots y last_questions; si no hay pregunta NUEVA y útil, omítela.\n`;
+    `- "question": UNA sola, siguiente dato/compromiso; evita avoid_slots.\n`;
 
   const resp = await completionWithTimeout({
     messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: userContent }],
@@ -671,15 +679,11 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
   let text = (data?.bible?.text || "").toString().trim();
   let question = (data?.question || "").toString().trim();
 
-  // Antibucle de pregunta (sin sustitución local por defecto)
+  // Antibucle de pregunta en NORMAL
   const qClass = classifyQuestion(question);
-  const recentClasses = deriveAvoidSlots(extractRecentAssistantQuestions(history, 4));
-  if (!question || recentClasses.includes(qClass)) {
-    if (ENABLE_LOCAL_QUESTION_FALLBACK) {
-      question = forcedNextQuestion(frame, mem, recentClasses, userNegation);
-    } else {
-      question = "";
-    }
+  if (!question || deriveAvoidSlots(extractRecentAssistantQuestions(history, 4)).includes(qClass)) {
+    const forced = forcedNextQuestion(frame, mem, deriveAvoidSlots(extractRecentAssistantQuestions(history, 4)), userNegation);
+    question = forced;
   }
 
   const hijoOnly = /\bhijo\b/i.test(message) && !/(Jes[uú]s|Cristo)/i.test(message);
@@ -706,16 +710,6 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
   };
 }
 
-function lastSubstantiveUser(history = []) {
-  const rev = [...(history || [])].reverse();
-  for (const h of rev) {
-    if (!/^Usuario:/i.test(h)) continue;
-    const text = h.replace(/^Usuario:\s*/i, "").trim();
-    if (text && !isAck(text) && text.length >= 6) return text;
-  }
-  return "";
-}
-
 // -------- Rutas --------
 app.post("/api/ask", async (req, res) => {
   try {
@@ -726,6 +720,19 @@ app.post("/api/ask", async (req, res) => {
       userId = "anon",
       profile = {}
     } = req.body || {};
+
+    // Guardia anti-basura local (STT cortado, etc.)
+    if (looksLikeJunk(message)) {
+      return res.status(200).json({
+        message: "Estoy aquí. Dímelo con una frase completa para poder ayudarte.",
+        bible: {
+          text: "Clama a mí, y yo te responderé, y te enseñaré cosas grandes y ocultas que tú no conoces.",
+          ref: "Jeremías 33:3"
+        },
+        question: "¿Qué te preocupa ahora mismo?"
+      });
+    }
+
     const data = await askLLM({ persona, message, history, userId, profile });
 
     const out = {
