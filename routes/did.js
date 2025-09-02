@@ -1,23 +1,36 @@
-// routes/did.js — D-ID Streams proxy
+// routes/did.js — D-ID Streams proxy con ElevenLabs integrado
 const express = require("express");
 const nodeFetch = require("node-fetch");
 
 const router = express.Router();
+const fetch = (...args) => nodeFetch(...args);
 
+// ==== Credenciales D-ID ====
 const DID_API_KEY = process.env.DID_API_KEY || "";
 const DID_USER = process.env.DID_USERNAME || "";
 const DID_PASS = process.env.DID_PASSWORD || "";
-
 // OJO: para Streams la base es SIN /v1
 const DID_BASE = process.env.DID_BASE || "https://api.d-id.com";
-const fetch = (...args) => nodeFetch(...args);
 
-// === Auth header ===
+// ==== ElevenLabs (para que D-ID use tu propia voz) ====
+const ELEVEN_API_KEY =
+  process.env.ELEVENLABS_API_KEY ||
+  process.env.ELEVEN_API_KEY ||
+  process.env.ELEVEN_API ||
+  "";
+const ELEVEN_VOICE_ID =
+  process.env.ELEVENLABS_VOICE_ID ||
+  process.env.ELEVEN_VOICE_ID ||
+  "";
+// Modelo recomendado para baja latencia y multi-idioma (ver docs D-ID/ElevenLabs)
+const ELEVEN_MODEL_ID = process.env.ELEVEN_MODEL_ID || "eleven_flash_v2_5";
+
+// === Auth header D-ID ===
 const authMode = DID_API_KEY
   ? "API_KEY"
   : (DID_USER && DID_PASS ? "USER_PASS" : "MISSING");
 
-const didHeaders = () => {
+function didHeaders() {
   const h = { "Content-Type": "application/json", Accept: "application/json" };
   if (authMode === "API_KEY") {
     // Basic base64("APIKEY:")
@@ -26,37 +39,33 @@ const didHeaders = () => {
     // Basic base64("user:pass")
     h.Authorization = "Basic " + Buffer.from(`${DID_USER}:${DID_PASS}`).toString("base64");
   }
+  // Permite a D-ID usar TU cuenta de ElevenLabs (requerido por sus docs)
+  // Debe ser STRING con JSON: {"elevenlabs":"<API_KEY>"}
+  if (ELEVEN_API_KEY) {
+    h["x-api-key-external"] = JSON.stringify({ elevenlabs: ELEVEN_API_KEY });
+  }
   return h;
-};
+}
 
-// === Cookie jar en memoria por streamId (para stickiness del ALB) ===
+// === Cookie jar en memoria por streamId (stickiness ALB) ===
 const cookieJar = new Map(); // streamId -> cookie (string)
 
-// Utilidades
 const validSess = (s) => typeof s === "string" && /^sess_/i.test(s);
 
-/** Parsea el header Set-Cookie y arma:
- *  - cookie: "AWSALB=...; AWSALBCORS=...; session_id=sess_..."
- *  - session_id: "sess_..."
- */
+// Parse Set-Cookie
 function parseSetCookie(setCookieHeader) {
   const out = { cookie: "", session_id: "" };
   if (!setCookieHeader) return out;
-
   const sess = setCookieHeader.match(/session_id=(sess_[^;,\s]+)/i);
   const alb = setCookieHeader.match(/AWSALB=[^;]+/);
   const cors = setCookieHeader.match(/AWSALBCORS=[^;]+/);
-
   const parts = [];
   if (alb) parts.push(alb[0]);
   if (cors) parts.push(cors[0]);
   if (sess) { parts.push(`session_id=${sess[1]}`); out.session_id = sess[1]; }
-
   out.cookie = parts.join("; ");
   return out;
 }
-
-/** Mezcla/actualiza pares clave=valor de varias cadenas Cookie */
 function mergeCookies(...cookieStrings) {
   const map = new Map();
   for (const s of cookieStrings) {
@@ -74,7 +83,12 @@ router.get("/selftest", async (_req, res) => {
   try {
     const r = await fetch(`${DID_BASE}/credits`, { headers: didHeaders() });
     const data = await r.json().catch(() => ({}));
-    res.status(r.ok ? 200 : r.status).json({ status: r.status, authMode, base: DID_BASE, data });
+    res.status(r.ok ? 200 : r.status).json({
+      status: r.status, authMode, base: DID_BASE,
+      elevenVoice: ELEVEN_VOICE_ID ? "configured" : "missing",
+      elevenModel: ELEVEN_MODEL_ID,
+      data
+    });
   } catch (e) {
     res.status(500).json({ status: 500, authMode, base: DID_BASE, error: String(e && e.message || e) });
   }
@@ -119,26 +133,18 @@ router.post("/streams", async (req, res) => {
       try { data = txt ? JSON.parse(txt) : null; } catch { data = null; }
 
       if (r.ok && data && data.id && data.offer) {
-        // Parsear cookies y corregir session_id si D-ID devolvió mal el campo
         const { cookie, session_id: sessFromCookie } = parseSetCookie(setCookie);
-
         if (!validSess(data.session_id) && sessFromCookie) {
           console.warn("[DID] Upstream session_id inválido, corrigiendo:", data.session_id, "->", sessFromCookie);
           data.session_id = sessFromCookie;
         } else if (!validSess(data.session_id)) {
           console.warn("[DID] WARNING: invalid session_id from upstream y no hay sess_ en cookies:", data.session_id || "(empty)");
         }
-
         if (cookie) {
           const prev = cookieJar.get(data.id) || "";
           cookieJar.set(data.id, mergeCookies(prev, cookie));
         }
-
-        return res.json({
-          ...data,
-          cookie: (cookie || undefined),
-          upstream_status: lastStatus
-        });
+        return res.json({ ...data, cookie: (cookie || undefined), upstream_status: lastStatus });
       }
 
       attempt++;
@@ -166,7 +172,6 @@ router.post("/streams/:id/sdp", async (req, res) => {
     let { answer, session_id } = req.body || {};
     if (!id || !answer) return res.status(400).json({ error: "missing_fields" });
 
-    // Si el session_id recibido es inválido, intenta reconstruirlo desde cookieJar
     const cookie = cookieJar.get(id) || "";
     if (!validSess(session_id || "")) {
       const m = cookie.match(/session_id=(sess_[^;]+)/i);
@@ -180,7 +185,6 @@ router.post("/streams/:id/sdp", async (req, res) => {
       body: JSON.stringify({ answer, session_id })
     });
 
-    // Actualiza cookie jar si upstream setea cookies nuevas
     const setCookie = r.headers.get("set-cookie") || "";
     const pc = parseSetCookie(setCookie);
     if (pc.cookie) cookieJar.set(id, mergeCookies(cookie, pc.cookie));
@@ -209,7 +213,6 @@ router.post("/streams/:id/ice", async (req, res) => {
     if (sdpMid != null) payload.sdpMid = sdpMid;
     if (sdpMLineIndex != null) payload.sdpMLineIndex = sdpMLineIndex;
 
-    // Reconstruir session_id si es necesario
     const cookie = cookieJar.get(id) || "";
     if (!validSess(session_id || "")) {
       const m = cookie.match(/session_id=(sess_[^;]+)/i);
@@ -249,17 +252,11 @@ router.get("/streams/:id/ice", async (req, res) => {
     if (!id) return res.status(400).json({ error: "missing_id" });
 
     const cookie = cookieJar.get(id) || "";
-
-    // Reconstruir session_id si el query es inválido o inexistente
     if (!validSess(String(session_id || ""))) {
       const m = cookie.match(/session_id=(sess_[^;]+)/i);
       if (m) session_id = m[1];
     }
-
-    // Si aún no hay sess_, devolvemos OK "vacío" (el front seguirá intentando sin ruido)
-    if (!session_id) {
-      return res.status(200).json({ candidates: [] });
-    }
+    if (!session_id) return res.status(200).json({ candidates: [] });
 
     const url = `${DID_BASE}/talks/streams/${id}/ice?session_id=${encodeURIComponent(String(session_id))}`;
     const r = await fetch(url, {
@@ -286,12 +283,12 @@ router.get("/streams/:id/ice", async (req, res) => {
     }
   } catch (e) {
     console.error("ice get error", e);
-    return res.status(200).json({ candidates: [] }); // fallback silencioso
+    return res.status(200).json({ candidates: [] });
   }
 });
 
 /* =========================================================
-   4) HABLAR (texto)
+   4) HABLAR (texto) — inyecta ElevenLabs si no viene provider
    POST /api/did/streams/:id/talk { session_id, script:{...} }
    -> POST https://api.d-id.com/talks/streams/{id}
    ========================================================= */
@@ -300,6 +297,29 @@ router.post("/streams/:id/talk", async (req, res) => {
     const { id } = req.params;
     let { session_id, script } = req.body || {};
     if (!id || !script) return res.status(400).json({ error: "missing_fields" });
+
+    // Inyección de ElevenLabs por defecto si es texto
+    if (script && script.type === "text") {
+      const isEleven = script.provider && script.provider.type === "elevenlabs";
+      if (!isEleven && ELEVEN_VOICE_ID) {
+        script.provider = {
+          type: "elevenlabs",
+          voice_id: ELEVEN_VOICE_ID,
+          voice_config: {
+            model_id: ELEVEN_MODEL_ID,
+            stability: 0.5,
+            similarity_boost: 0.75
+          }
+        };
+      } else if (isEleven) {
+        const vc = script.provider.voice_config || {};
+        script.provider.voice_config = {
+          model_id: vc.model_id || ELEVEN_MODEL_ID,
+          stability: vc.stability ?? 0.5,
+          similarity_boost: vc.similarity_boost ?? 0.75
+        };
+      }
+    }
 
     const cookie = cookieJar.get(id) || "";
     if (!validSess(session_id || "")) {
@@ -351,7 +371,6 @@ router.delete("/streams/:id", async (req, res) => {
       body: JSON.stringify({ session_id })
     });
 
-    // Limpia cookie jar
     cookieJar.delete(id);
 
     const txt = await r.text().catch(() => "");
