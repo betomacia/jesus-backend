@@ -13,16 +13,19 @@ const path = require("path");
 const fs = require("fs/promises");
 require("dotenv").config();
 
-const didRouter = require("./routes/did");
-const ttsRouter = require("./routes/tts");
-
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
 // Routers externos (no tocar lógica aquí)
+const didRouterRaw = require("./routes/did");
+const ttsRouterRaw = require("./routes/tts");
+const didRouter = didRouterRaw.default || didRouterRaw;
+const ttsRouter = ttsRouterRaw.default || ttsRouterRaw;
+
 app.use("/api/did", didRouter);
 app.use("/api/tts", ttsRouter);
+
 
 // ---- OpenAI ----
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -414,3 +417,4 @@ const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`Servidor listo en puerto ${PORT}`);
 });
+
