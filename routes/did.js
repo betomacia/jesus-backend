@@ -1,463 +1,385 @@
-// index.js — Backend minimalista: 100% preguntas desde OpenAI (sin inyección local)
-// Respuestas cortas (≤60 palabras), UNA pregunta opcional solo si la devuelve OpenAI,
-// citas RVR1909 sin repetir, memoria simple por usuario y FRAME básico sin desvíos.
-
+// routes/did.js — D-ID Streams proxy
 const express = require("express");
-const cors = require("cors");
-const bodyParser = require("body-parser");
-const OpenAI = require("openai");
-const path = require("path");
-const fs = require("fs/promises");
-require("dotenv").config();
+const nodeFetch = require("node-fetch");
 
-const app = express();
-app.use(cors());
-app.use(bodyParser.json());
+const router = express.Router();
 
-// ---- OpenAI ----
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const DID_API_KEY = process.env.DID_API_KEY || "";
+const DID_USER = process.env.DID_USERNAME || "";
+const DID_PASS = process.env.DID_PASSWORD || "";
 
-/**
- * Formato esperado desde OpenAI:
- * {
- *   "message": "consejo breve, SIN preguntas (≤60 palabras)",
- *   "bible": { "text": "RVR1909 literal", "ref": "Libro 0:0" },
- *   "question": "pregunta breve (opcional, UNA sola)"
- * }
+// OJO: para Streams la base es SIN /v1
+const DID_BASE = process.env.DID_BASE || "https://api.d-id.com";
+const fetch = (...args) => nodeFetch(...args);
+
+// === Auth header ===
+const authMode = DID_API_KEY
+  ? "API_KEY"
+  : (DID_USER && DID_PASS ? "USER_PASS" : "MISSING");
+
+const didHeaders = () => {
+  const h = { "Content-Type": "application/json", Accept: "application/json" };
+  if (authMode === "API_KEY") {
+    // Basic base64("APIKEY:")
+    h.Authorization = "Basic " + Buffer.from(`${DID_API_KEY}:`).toString("base64");
+  } else if (authMode === "USER_PASS") {
+    // Basic base64("user:pass")
+    h.Authorization = "Basic " + Buffer.from(`${DID_USER}:${DID_PASS}`).toString("base64");
+  }
+  return h;
+};
+
+// === Cookie jar en memoria por streamId (para stickiness del ALB) ===
+const cookieJar = new Map(); // streamId -> cookie (string)
+
+// Utilidades
+const validSess = (s) => typeof s === "string" && /^sess_/i.test(s);
+
+/** Parsea el header Set-Cookie y arma:
+ *  - cookie: "AWSALB=...; AWSALBCORS=...; session_id=sess_..."
+ *  - session_id: "sess_..."
  */
-const SYSTEM_PROMPT = `
-Eres Jesús: voz serena, compasiva y clara. Responde SIEMPRE en español.
+function parseSetCookie(setCookieHeader) {
+  const out = { cookie: "", session_id: "" };
+  if (!setCookieHeader) return out;
 
-OBJETIVO
-- Devuelve SOLO JSON: { "message", "bible": { "text", "ref" }, "question"? }.
-- "message": ≤60 palabras, afirmativo, SIN signos de pregunta.
-- "question": opcional, UNA sola, breve, debe terminar en "?" y NO repetir textualmente las últimas preguntas ya hechas.
-- No menciones el nombre civil. Puedes usar “hijo mío”, “hija mía” o “alma amada” con moderación.
-- No hables de técnica/IA ni del propio modelo.
+  const sess = setCookieHeader.match(/session_id=(sess_[^;,\s]+)/i);
+  const alb = setCookieHeader.match(/AWSALB=[^;]+/);
+  const cors = setCookieHeader.match(/AWSALBCORS=[^;]+/);
 
-MARCO (FRAME)
-- Respeta el FRAME (topic_primary, main_subject, support_persons) y el historial breve como contexto.
-- NO cambies el tema por mencionar una persona de apoyo (“mi hija/mi primo/mi amigo”). Es apoyo, no nuevo tema.
+  const parts = [];
+  if (alb) parts.push(alb[0]);
+  if (cors) parts.push(cors[0]);
+  if (sess) { parts.push(`session_id=${sess[1]}`); out.session_id = sess[1]; }
 
-PROGRESO
-- Cada turno aporta novedad útil (micro-pasos concretos, mini-guion, decisión simple o límite).
-- Si el usuario solo reconoce (“sí/ok/vale”), avanza a práctica/compromiso sin repetir contenido.
-- Evita preguntar por canal/hora (p.ej., “¿mensaje o llamada?”) si el objetivo/voluntad de contacto aún no es claro.
-
-BIBLIA (RVR1909, SIN AMBIGÜEDADES)
-- Ajusta la cita al tema y a los micro-pasos.
-- Usa RVR1909 literal y "Libro 0:0" en "ref".
-- Evita last_bible_ref y todas las banned_refs.
-- Evita ambigüedad “el Hijo” (Juan 8:36) cuando el usuario alude a un familiar “hijo/hija”, salvo pertinencia teológica explícita.
-
-FORMATO (OBLIGATORIO)
-{
-  "message": "… (≤60 palabras, sin signos de pregunta)",
-  "bible": { "text": "… (RVR1909 literal)", "ref": "Libro 0:0" },
-  "question": "…? (opcional, una sola)"
+  out.cookie = parts.join("; ");
+  return out;
 }
-`;
 
-// Respuesta tipada por esquema (OpenAI JSON mode)
-const responseFormat = {
-  type: "json_schema",
-  json_schema: {
-    name: "SpiritualGuidance",
-    schema: {
-      type: "object",
-      properties: {
-        message: { type: "string" },
-        bible: {
-          type: "object",
-          properties: { text: { type: "string" }, ref: { type: "string" } },
-          required: ["text", "ref"]
-        },
-        question: { type: "string" }
-      },
-      required: ["message", "bible"],
-      additionalProperties: false
+/** Mezcla/actualiza pares clave=valor de varias cadenas Cookie */
+function mergeCookies(...cookieStrings) {
+  const map = new Map();
+  for (const s of cookieStrings) {
+    if (!s) continue;
+    for (const part of s.split(/;\s*/)) {
+      const m = part.match(/^([^=]+)=(.+)$/);
+      if (m) map.set(m[1], m[2]);
     }
   }
-};
-
-// ---------- Utilidades ligeras ----------
-function cleanRef(ref = "") {
-  return String(ref).replace(/\s*\([^)]*\)\s*/g, " ").replace(/\s+/g, " ").trim();
-}
-function stripQuestionsFromMessage(s = "") {
-  const noTrailingQLines = (s || "")
-    .split(/\n+/)
-    .map((l) => l.trim())
-    .filter((l) => !/\?\s*$/.test(l))
-    .join("\n")
-    .trim();
-  return noTrailingQLines.replace(/[¿?]+/g, "").trim();
-}
-function limitWords(s = "", max = 60) {
-  const words = String(s || "").trim().split(/\s+/);
-  return words.length <= max ? String(s || "").trim() : words.slice(0, max).join(" ").trim();
-}
-function normalizeQuestion(q = "") {
-  return String(q).toLowerCase().replace(/\s+/g, " ").trim();
-}
-function compactHistory(history = [], keep = 8, maxLen = 260) {
-  const arr = Array.isArray(history) ? history : [];
-  return arr.slice(-keep).map((x) => String(x).slice(0, maxLen));
-}
-function extractRecentAssistantQuestions(history = [], maxMsgs = 5) {
-  const rev = [...(history || [])].reverse();
-  const qs = [];
-  let seen = 0;
-  for (const h of rev) {
-    if (!/^Asistente:/i.test(h)) continue;
-    const text = h.replace(/^Asistente:\s*/i, "").trim();
-    const m = text.match(/([^?]*\?)\s*$/m);
-    if (m && m[1]) qs.push(normalizeQuestion(m[1]));
-    seen++;
-    if (seen >= maxMsgs) break;
-  }
-  return [...new Set(qs)].slice(0, 5);
-}
-function extractRecentBibleRefs(history = [], maxRefs = 3) {
-  const rev = [...(history || [])].reverse();
-  const found = [];
-  for (const h of rev) {
-    const s = String(h);
-    const m =
-      s.match(/—\s*([A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+\s+\d+:\d+)/) ||
-      s.match(/-\s*([A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+\s+\d+:\d+)/) ||
-      s.match(/\(\s*([A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+\s+\d+:\d+)\s*\)/);
-    if (m && m[1]) {
-      const ref = cleanRef(m[1]);
-      if (!found.includes(ref)) found.push(ref);
-      if (found.length >= maxRefs) break;
-    }
-  }
-  return found;
+  return Array.from(map.entries()).map(([k,v]) => `${k}=${v}`).join("; ");
 }
 
-// Detección muy simple de tema/sujeto y persona de apoyo (para el FRAME)
-function guessTopic(s = "") {
-  const t = (s || "").toLowerCase();
-  if (/(droga|adicci|alcohol|apuestas)/.test(t)) return "addiction";
-  if (/(me separ|separaci[oó]n|divorcio|ruptura)/.test(t)) return "separation";
-  if (/(pareja|matrimonio|conyug|novi[oa])/i.test(t)) return "relationship";
-  if (/(duelo|falleci[oó]|perd[ií]|luto)/.test(t)) return "grief";
-  if (/(ansied|p[áa]nico|depres|triste|miedo|temor|estr[eé]s)/.test(t)) return "mood";
-  if (/(trabajo|despido|salario|dinero|deuda|finanzas)/.test(t)) return "work_finance";
-  if (/(salud|diagn[oó]stico|enfermedad|dolor)/.test(t)) return "health";
-  if (/(familia|conflicto|discusi[oó]n|suegr)/.test(t)) return "family_conflict";
-  if (/(fe|duda|dios|oraci[oó]n|culpa)/.test(t)) return "faith";
-  return "general";
-}
-function detectMainSubject(s = "") {
-  const t = (s || "").toLowerCase();
-  if (/(mi\s+espos|mi\s+marid)/.test(t)) return "partner";
-  if (/(mi\s+novi[oa])/.test(t)) return "partner";
-  if (/(mi\s+hij[oa])/.test(t)) return "child";
-  if (/(mi\s+madre|mam[aá])/.test(t)) return "mother";
-  if (/(mi\s+padre|pap[aá])/.test(t)) return "father";
-  if (/(mi\s+herman[oa])/.test(t)) return "sibling";
-  if (/(mi\s+amig[oa])/.test(t)) return "friend";
-  return "self";
-}
-const SUPPORT_WORDS = [
-  "hijo","hija","madre","padre","mamá","mama","papá","papa","abuelo","abuela","nieto","nieta",
-  "tío","tio","tía","tia","sobrino","sobrina","primo","prima","cuñado","cuñada","suegro","suegra","yerno","nuera",
-  "esposo","esposa","pareja","novio","novia","amigo","amiga","compañero","compañera","colega","vecino","vecina",
-  "pastor","sacerdote","mentor","maestro","maestra","profesor","profesora","jefe","jefa",
-  "psicólogo","psicologa","psicóloga","terapeuta","consejero","consejera","médico","medica","médica"
-];
-function detectSupportNP(s = "") {
-  const raw = (s || "").trim();
-  if (!raw) return null;
-  const tokens = raw.split(/\s+/);
-  if (tokens.length > 6) return null;
-  const low = raw.toLowerCase();
-  const art = /^(mi|mis|una|un|el|la)\s+(.+)$/i;
-  let core = low;
-  let label = raw;
-  const m = low.match(art);
-  if (m) { core = m[2].trim(); label = raw; }
-  const first = core.split(/\s+/)[0].replace(/[.,;:!?"'()]/g, "");
-  if (!first) return null;
-  if (!SUPPORT_WORDS.includes(first)) return null;
-  return { label };
-}
-
-// ---------- Memoria por usuario ----------
-const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
-async function ensureDataDir() { try { await fs.mkdir(DATA_DIR, { recursive: true }); } catch {} }
-function memPath(uid) {
-  const safe = String(uid || "anon").replace(/[^a-z0-9_-]/gi, "_");
-  return path.join(DATA_DIR, `mem_${safe}.json`);
-}
-async function readUserMemory(userId) {
-  await ensureDataDir();
+// Selftest
+router.get("/selftest", async (_req, res) => {
   try {
-    const raw = await fs.readFile(memPath(userId), "utf8");
-    return JSON.parse(raw);
-  } catch {
-    return {
-      last_bible_ref: "",
-      last_bible_refs: [],
-      last_questions: [],
-      frame: null
-    };
-  }
-}
-async function writeUserMemory(userId, mem) {
-  await ensureDataDir();
-  await fs.writeFile(memPath(userId), JSON.stringify(mem, null, 2), "utf8");
-}
-
-// ---------- OpenAI helpers ----------
-async function completionWithTimeout({ messages, temperature = 0.6, max_tokens = 220, timeoutMs = 12000 }) {
-  const call = openai.chat.completions.create({
-    model: "gpt-4o",
-    temperature,
-    max_tokens,
-    messages,
-    response_format: responseFormat
-  });
-  return await Promise.race([
-    call,
-    new Promise((_, reject) => setTimeout(() => reject(new Error("TIMEOUT")), timeoutMs))
-  ]);
-}
-
-const bibleOnlyFormat = {
-  type: "json_schema",
-  json_schema: {
-    name: "BibleOnly",
-    schema: {
-      type: "object",
-      properties: {
-        bible: {
-          type: "object",
-          properties: { text: { type: "string" }, ref: { type: "string" } },
-          required: ["text", "ref"]
-        }
-      },
-      required: ["bible"],
-      additionalProperties: false
-    }
-  }
-};
-
-async function regenerateBibleAvoiding({ persona, message, frame, bannedRefs = [], lastRef = "" }) {
-  const sys = `Devuelve SOLO JSON con {"bible":{"text":"…","ref":"Libro 0:0"}} en RVR1909.
-- Ajusta la cita al tema y micro-pasos.
-- Evita ambigüedad “hijo” (familiar) vs “el Hijo” (Cristo) salvo pertinencia teológica explícita.
-- No uses ninguna referencia de "banned_refs" ni "last_bible_ref".`;
-
-  const usr =
-    `Persona: ${persona}\n` +
-    `Mensaje_actual: ${message}\n` +
-    `FRAME: ${JSON.stringify(frame)}\n` +
-    `last_bible_ref: ${lastRef || "(n/a)"}\n` +
-    `banned_refs:\n- ${bannedRefs.join("\n- ") || "(none)"}\n`;
-
-  const r = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    temperature: 0.4,
-    max_tokens: 120,
-    messages: [{ role: "system", content: sys }, { role: "user", content: usr }],
-    response_format: bibleOnlyFormat
-  });
-
-  const content = r?.choices?.[0]?.message?.content || "{}";
-  let data = {};
-  try { data = JSON.parse(content); } catch { data = {}; }
-  const text = (data?.bible?.text || "").toString().trim();
-  const ref = cleanRef((data?.bible?.ref || "").toString());
-  return text && ref ? { text, ref } : null;
-}
-
-// ---------- Core ----------
-async function askLLM({ persona, message, history = [], userId = "anon" }) {
-  const mem = await readUserMemory(userId);
-
-  // FRAME básico
-  const support = detectSupportNP(message);
-  const topic = guessTopic(message);
-  const mainSubject = detectMainSubject(message);
-  const frame = {
-    topic_primary: topic,
-    main_subject: mem.frame?.topic_primary === topic ? (mem.frame?.main_subject || mainSubject) : mainSubject,
-    support_persons: support ? [{ label: support.label }] : (mem.frame?.topic_primary === topic ? (mem.frame?.support_persons || []) : []),
-  };
-  mem.frame = frame;
-
-  const lastRefFromHistory = extractRecentBibleRefs(history, 1)[0] || "";
-  const lastRef = mem.last_bible_ref || lastRefFromHistory || "";
-  const recentRefs = extractRecentBibleRefs(history, 3);
-  const bannedRefs = Array.from(new Set([...(mem.last_bible_refs || []), lastRef, ...recentRefs].filter(Boolean))).slice(-5);
-
-  const recentQs = extractRecentAssistantQuestions(history, 5);
-
-  const shortHistory = compactHistory(history, 10, 240);
-  const header =
-    `Persona: ${persona}\n` +
-    `Mensaje_actual: ${message}\n` +
-    `FRAME: ${JSON.stringify(frame)}\n` +
-    `last_bible_ref: ${lastRef || "(n/a)"}\n` +
-    `banned_refs:\n- ${bannedRefs.join("\n- ") || "(none)"}\n` +
-    (recentQs.length ? `ultimas_preguntas: ${recentQs.join(" | ")}` : "ultimas_preguntas: (ninguna)") + "\n" +
-    (shortHistory.length ? `Historial: ${shortHistory.join(" | ")}` : "Historial: (sin antecedentes)") + "\n";
-
-  const resp = await completionWithTimeout({
-    messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: header }],
-    temperature: 0.6,
-    max_tokens: 220,
-    timeoutMs: 12000
-  });
-
-  const content = resp?.choices?.[0]?.message?.content || "{}";
-  let data = {};
-  try { data = JSON.parse(content); } catch { data = { message: content }; }
-
-  // Sanitización final
-  let msg = stripQuestionsFromMessage((data?.message || "").toString());
-  msg = limitWords(msg, 60);
-
-  let ref = cleanRef((data?.bible?.ref || "").toString());
-  let text = (data?.bible?.text || "").toString().trim();
-
-  // Evitar cita vetada/ambigua/repetida
-  const hijoOnly = /\bhijo\b/i.test(message) && !/(Jes[uú]s|Cristo)/i.test(message);
-  if (!ref || bannedRefs.includes(ref) || (hijoOnly && /Juan\s*8:36/i.test(ref))) {
-    const alt = await regenerateBibleAvoiding({ persona, message, frame, bannedRefs, lastRef });
-    if (alt) { ref = alt.ref; text = alt.text; }
-  }
-
-  // Pregunta: SOLO si viene del modelo y no repite las últimas
-  let question = (data?.question || "").toString().trim();
-  const normalizedQ = normalizeQuestion(question);
-  const isRepeat = !question ? false : recentQs.includes(normalizedQ);
-  const malformed = question && !/\?\s*$/.test(question);
-  if (!question || isRepeat || malformed) question = "";
-
-  // Actualizar memoria
-  mem.last_bible_ref = ref || mem.last_bible_ref || "";
-  mem.last_bible_refs = Array.from(new Set([...(mem.last_bible_refs || []), ref].filter(Boolean))).slice(-5);
-  if (question) {
-    mem.last_questions = Array.from(new Set([...(mem.last_questions || []), normalizedQ])).slice(-6);
-  }
-  await writeUserMemory(userId, mem);
-
-  return {
-    message: msg || "Estoy contigo. Demos un paso pequeño y realista hoy.",
-    bible: { text: text || "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu.", ref: ref || "Salmos 34:18" },
-    ...(question ? { question } : {})
-  };
-}
-
-// ---------- Rutas ----------
-app.post("/api/ask", async (req, res) => {
-  try {
-    const {
-      persona = "jesus",
-      message = "",
-      history = [],
-      userId = "anon"
-    } = req.body || {};
-
-    const data = await askLLM({ persona, message, history, userId });
-
-    const out = {
-      message: (data?.message || "").toString().trim(),
-      bible: {
-        text: (data?.bible?.text || "").toString().trim(),
-        ref: (data?.bible?.ref || "").toString().trim()
-      },
-      ...(data?.question ? { question: data.question } : {})
-    };
-
-    res.setHeader("Content-Type", "application/json; charset=utf-8");
-    res.status(200).json(out);
-  } catch (err) {
-    console.error("ASK ERROR:", err);
-    // Fallback SOLO por error técnico; sin pregunta
-    res.status(200).json({
-      message: "La paz sea contigo. Compárteme en pocas palabras lo esencial, y seguimos paso a paso.",
-      bible: {
-        text: "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu.",
-        ref: "Salmos 34:18"
-      }
-    });
-  }
-});
-
-app.get("/api/welcome", (_req, res) => {
-  res.json({
-    message: "La paz esté contigo. Estoy aquí para escucharte y acompañarte con calma.",
-    bible: {
-      text: "El Señor es mi luz y mi salvación; ¿de quién temeré?",
-      ref: "Salmos 27:1"
-    }
-  });
-});
-
-/* ======== ElevenLabs TTS ========
-   POST /api/tts { text, lang?, voiceId? }
-   -> devuelve audio/mpeg
-   Env vars:
-     ELEVEN_API_KEY (obligatoria)
-     ELEVEN_VOICE_ID (opcional, por defecto una voz conocida)
-     ELEVEN_MODEL (opcional, por defecto eleven_multilingual_v2)
-     ELEVEN_STABILITY, ELEVEN_SIMILARITY, ELEVEN_STYLE, ELEVEN_SPK_BOOST
-==================================*/
-app.post("/api/tts", async (req, res) => {
-  try {
-    const apiKey = process.env.ELEVEN_API_KEY || "";
-    if (!apiKey) return res.status(501).json({ error: "elevenlabs_key_missing" });
-
-    const { text, voiceId, lang } = req.body || {};
-    const t = String(text || "").trim();
-    if (!t) return res.status(400).json({ error: "missing_text" });
-
-    const model = process.env.ELEVEN_MODEL || "eleven_multilingual_v2";
-    const vid = voiceId || process.env.ELEVEN_VOICE_ID || "21m00Tcm4TlvDq8ikWAM"; // "Rachel" por defecto
-
-    const body = {
-      text: t,
-      model_id: model,
-      voice_settings: {
-        stability: Number(process.env.ELEVEN_STABILITY ?? 0.4),
-        similarity_boost: Number(process.env.ELEVEN_SIMILARITY ?? 0.8),
-        style: Number(process.env.ELEVEN_STYLE ?? 0.1),
-        use_speaker_boost: process.env.ELEVEN_SPK_BOOST === "false" ? false : true
-      }
-    };
-
-    const url = `https://api.elevenlabs.io/v1/text-to-speech/${vid}?optimize_streaming_latency=0&output_format=mp3_44100_128`;
-    const r = await fetch(url, {
-      method: "POST",
-      headers: {
-        "xi-api-key": apiKey,
-        "Content-Type": "application/json",
-        "Accept": "audio/mpeg"
-      },
-      body: JSON.stringify(body)
-    });
-
-    if (!r.ok) {
-      const detail = await r.text().catch(() => "");
-      return res.status(r.status).json({ error: "elevenlabs_upstream", detail: detail?.slice(0, 1200) || "" });
-    }
-
-    const ab = await r.arrayBuffer();
-    res.setHeader("Content-Type", "audio/mpeg");
-    res.send(Buffer.from(ab));
+    const r = await fetch(`${DID_BASE}/credits`, { headers: didHeaders() });
+    const data = await r.json().catch(() => ({}));
+    res.status(r.ok ? 200 : r.status).json({ status: r.status, authMode, base: DID_BASE, data });
   } catch (e) {
-    console.error("TTS error:", e);
-    res.status(500).json({ error: "tts_failed" });
+    res.status(500).json({ status: 500, authMode, base: DID_BASE, error: String(e && e.message || e) });
   }
 });
 
-// ---------- Arranque ----------
-const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => {
-  console.log(`Servidor listo en puerto ${PORT}`);
+/* =========================================================
+   1) CREAR STREAM
+   POST /api/did/streams { source_url }
+   -> POST https://api.d-id.com/talks/streams
+   ========================================================= */
+router.post("/streams", async (req, res) => {
+  try {
+    const { source_url } = req.body || {};
+    if (!source_url) return res.status(400).json({ error: "missing_source_url" });
+
+    const baseReq = {
+      method: "POST",
+      headers: didHeaders(),
+      body: JSON.stringify({ source_url }),
+      redirect: "manual",
+    };
+
+    const doRequest = async (url) => {
+      let r = await fetch(url, baseReq);
+      if (r.status >= 300 && r.status < 400) {
+        const loc = r.headers.get("location");
+        if (loc) r = await fetch(loc, baseReq);
+      }
+      return r;
+    };
+
+    let attempt = 0, maxAttempts = 3, lastStatus = 0, lastBody = "";
+    let r = await doRequest(`${DID_BASE}/talks/streams`);
+
+    while (attempt < maxAttempts) {
+      lastStatus = r.status;
+      const setCookie = r.headers.get("set-cookie") || "";
+      const txt = await r.text().catch(() => "");
+      lastBody = txt;
+
+      let data = null;
+      try { data = txt ? JSON.parse(txt) : null; } catch { data = null; }
+
+      if (r.ok && data && data.id && data.offer) {
+        // Parsear cookies y corregir session_id si D-ID devolvió mal el campo
+        const { cookie, session_id: sessFromCookie } = parseSetCookie(setCookie);
+
+        if (!validSess(data.session_id) && sessFromCookie) {
+          console.warn("[DID] Upstream session_id inválido, corrigiendo:", data.session_id, "->", sessFromCookie);
+          data.session_id = sessFromCookie;
+        } else if (!validSess(data.session_id)) {
+          console.warn("[DID] WARNING: invalid session_id from upstream y no hay sess_ en cookies:", data.session_id || "(empty)");
+        }
+
+        if (cookie) {
+          const prev = cookieJar.get(data.id) || "";
+          cookieJar.set(data.id, mergeCookies(prev, cookie));
+        }
+
+        return res.json({
+          ...data,
+          cookie: (cookie || undefined),
+          upstream_status: lastStatus
+        });
+      }
+
+      attempt++;
+      if (attempt >= maxAttempts) break;
+      await new Promise(r => setTimeout(r, 250 * attempt));
+      r = await doRequest(`${DID_BASE}/talks/streams`);
+    }
+
+    console.error("[DID] streams create failed", lastStatus, lastBody || "");
+    return res.status(502).json({ error: "streams_create_failed", upstream_status: lastStatus, detail: safeJSON(lastBody) });
+  } catch (e) {
+    console.error("streams create error", e);
+    return res.status(500).json({ error: "streams_create_error" });
+  }
 });
+
+/* =========================================================
+   2) ENVIAR SDP ANSWER
+   POST /api/did/streams/:id/sdp { answer, session_id }
+   -> POST https://api.d-id.com/talks/streams/{id}/sdp
+   ========================================================= */
+router.post("/streams/:id/sdp", async (req, res) => {
+  try {
+    const { id } = req.params;
+    let { answer, session_id } = req.body || {};
+    if (!id || !answer) return res.status(400).json({ error: "missing_fields" });
+
+    // Si el session_id recibido es inválido, intenta reconstruirlo desde cookieJar
+    const cookie = cookieJar.get(id) || "";
+    if (!validSess(session_id || "")) {
+      const m = cookie.match(/session_id=(sess_[^;]+)/i);
+      if (m) session_id = m[1];
+    }
+    if (!session_id) return res.status(400).json({ error: "missing_session_id" });
+
+    const r = await fetch(`${DID_BASE}/talks/streams/${id}/sdp`, {
+      method: "POST",
+      headers: { ...didHeaders(), ...(cookie ? { Cookie: cookie } : {}) },
+      body: JSON.stringify({ answer, session_id })
+    });
+
+    // Actualiza cookie jar si upstream setea cookies nuevas
+    const setCookie = r.headers.get("set-cookie") || "";
+    const pc = parseSetCookie(setCookie);
+    if (pc.cookie) cookieJar.set(id, mergeCookies(cookie, pc.cookie));
+
+    const txt = await r.text().catch(() => "");
+    const data = parseJSON(txt);
+    return res.status(r.ok ? 200 : r.status).json(data ?? { raw: txt });
+  } catch (e) {
+    console.error("sdp post error", e);
+    return res.status(500).json({ error: "sdp_failed" });
+  }
+});
+
+/* =========================================================
+   3) ENVIAR ICE (local -> upstream)
+   POST /api/did/streams/:id/ice { candidate, sdpMid?, sdpMLineIndex?, session_id }
+   -> POST https://api.d-id.com/talks/streams/{id}/ice
+   ========================================================= */
+router.post("/streams/:id/ice", async (req, res) => {
+  try {
+    const { id } = req.params;
+    let { candidate, sdpMid, sdpMLineIndex, session_id } = req.body || {};
+    if (!id || !candidate) return res.status(400).json({ error: "missing_fields" });
+
+    const payload = { candidate, session_id: "" };
+    if (sdpMid != null) payload.sdpMid = sdpMid;
+    if (sdpMLineIndex != null) payload.sdpMLineIndex = sdpMLineIndex;
+
+    // Reconstruir session_id si es necesario
+    const cookie = cookieJar.get(id) || "";
+    if (!validSess(session_id || "")) {
+      const m = cookie.match(/session_id=(sess_[^;]+)/i);
+      if (m) session_id = m[1];
+    }
+    if (!session_id) return res.status(400).json({ error: "missing_session_id" });
+    payload.session_id = session_id;
+
+    const r = await fetch(`${DID_BASE}/talks/streams/${id}/ice`, {
+      method: "POST",
+      headers: { ...didHeaders(), ...(cookie ? { Cookie: cookie } : {}) },
+      body: JSON.stringify(payload)
+    });
+
+    const setCookie = r.headers.get("set-cookie") || "";
+    const pc = parseSetCookie(setCookie);
+    if (pc.cookie) cookieJar.set(id, mergeCookies(cookie, pc.cookie));
+
+    const txt = await r.text().catch(() => "");
+    const data = parseJSON(txt);
+    return res.status(r.ok ? 200 : r.status).json(data ?? { raw: txt });
+  } catch (e) {
+    console.error("ice post error", e);
+    return res.status(500).json({ error: "ice_failed" });
+  }
+});
+
+/* =========================================================
+   3b) OBTENER ICE REMOTO
+   GET /api/did/streams/:id/ice[?session_id=...]
+   -> GET https://api.d-id.com/talks/streams/{id}/ice?session_id=...
+   ========================================================= */
+router.get("/streams/:id/ice", async (req, res) => {
+  try {
+    const { id } = req.params;
+    let { session_id } = req.query || {};
+    if (!id) return res.status(400).json({ error: "missing_id" });
+
+    const cookie = cookieJar.get(id) || "";
+
+    // Reconstruir session_id si el query es inválido o inexistente
+    if (!validSess(String(session_id || ""))) {
+      const m = cookie.match(/session_id=(sess_[^;]+)/i);
+      if (m) session_id = m[1];
+    }
+
+    // Si aún no hay sess_, devolvemos OK "vacío" (el front seguirá intentando sin ruido)
+    if (!session_id) {
+      return res.status(200).json({ candidates: [] });
+    }
+
+    const url = `${DID_BASE}/talks/streams/${id}/ice?session_id=${encodeURIComponent(String(session_id))}`;
+    const r = await fetch(url, {
+      method: "GET",
+      headers: { ...didHeaders(), ...(cookie ? { Cookie: cookie } : {}) }
+    });
+
+    const setCookie = r.headers.get("set-cookie") || "";
+    const pc = parseSetCookie(setCookie);
+    if (pc.cookie) cookieJar.set(id, mergeCookies(cookie, pc.cookie));
+
+    const txt = await r.text().catch(() => "");
+    try {
+      const data = JSON.parse(txt);
+      return res.status(r.ok ? 200 : r.status).json(data);
+    } catch {
+      // Fallback NDJSON -> lines con "candidate"
+      const candidates = txt
+        .split(/\r?\n/)
+        .map(s => { try { return JSON.parse(s); } catch { return null; } })
+        .filter(Boolean)
+        .flatMap(obj => Array.isArray(obj?.candidates) ? obj.candidates : []);
+      return res.status(200).json({ candidates });
+    }
+  } catch (e) {
+    console.error("ice get error", e);
+    return res.status(200).json({ candidates: [] }); // fallback silencioso
+  }
+});
+
+/* =========================================================
+   4) HABLAR (texto)
+   POST /api/did/streams/:id/talk { session_id, script:{...} }
+   -> POST https://api.d-id.com/talks/streams/{id}
+   ========================================================= */
+router.post("/streams/:id/talk", async (req, res) => {
+  try {
+    const { id } = req.params;
+    let { session_id, script } = req.body || {};
+    if (!id || !script) return res.status(400).json({ error: "missing_fields" });
+
+    const cookie = cookieJar.get(id) || "";
+    if (!validSess(session_id || "")) {
+      const m = cookie.match(/session_id=(sess_[^;]+)/i);
+      if (m) session_id = m[1];
+    }
+    if (!session_id) return res.status(400).json({ error: "missing_session_id" });
+
+    const r = await fetch(`${DID_BASE}/talks/streams/${id}`, {
+      method: "POST",
+      headers: { ...didHeaders(), ...(cookie ? { Cookie: cookie } : {}) },
+      body: JSON.stringify({ session_id, script })
+    });
+
+    const setCookie = r.headers.get("set-cookie") || "";
+    const pc = parseSetCookie(setCookie);
+    if (pc.cookie) cookieJar.set(id, mergeCookies(cookie, pc.cookie));
+
+    const txt = await r.text().catch(() => "");
+    const data = parseJSON(txt);
+    return res.status(r.ok ? 200 : r.status).json(data ?? { raw: txt });
+  } catch (e) {
+    console.error("talk post error", e);
+    return res.status(500).json({ error: "talk_failed" });
+  }
+});
+
+/* =========================================================
+   5) CERRAR STREAM
+   DELETE /api/did/streams/:id  { session_id }
+   -> DELETE https://api.d-id.com/talks/streams/{id}
+   ========================================================= */
+router.delete("/streams/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    let { session_id } = req.body || {};
+    if (!id) return res.status(400).json({ error: "missing_id" });
+
+    const cookie = cookieJar.get(id) || "";
+    if (!validSess(session_id || "")) {
+      const m = cookie.match(/session_id=(sess_[^;]+)/i);
+      if (m) session_id = m[1];
+    }
+    if (!session_id) return res.status(400).json({ error: "missing_session_id" });
+
+    const r = await fetch(`${DID_BASE}/talks/streams/${id}`, {
+      method: "DELETE",
+      headers: { ...didHeaders(), ...(cookie ? { Cookie: cookie } : {}) },
+      body: JSON.stringify({ session_id })
+    });
+
+    // Limpia cookie jar
+    cookieJar.delete(id);
+
+    const txt = await r.text().catch(() => "");
+    const data = parseJSON(txt);
+    return res.status(r.ok ? 200 : r.status).json(data ?? { raw: txt });
+  } catch (e) {
+    console.error("delete stream error", e);
+    return res.status(500).json({ error: "delete_stream_failed" });
+  }
+});
+
+/* =========================================================
+   6) CRÉDITOS (debug)
+   ========================================================= */
+router.get("/credits", async (_req, res) => {
+  try {
+    const r = await fetch(`${DID_BASE}/credits`, { headers: didHeaders() });
+    const txt = await r.text().catch(() => "");
+    const data = parseJSON(txt);
+    return res.status(r.ok ? 200 : r.status).json(data ?? { raw: txt });
+  } catch (e) {
+    console.error("credits error", e);
+    return res.status(500).json({ error: "credits_failed" });
+  }
+});
+
+/* Helpers */
+function parseJSON(s) { try { return JSON.parse(s); } catch { return null; } }
+function safeJSON(s) { try { return JSON.parse(s); } catch { return s; } }
+
+module.exports = router;
