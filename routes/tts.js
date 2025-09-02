@@ -1,19 +1,39 @@
-// routes/tts.js — ElevenLabs TTS vía backend
+// routes/tts.js
 const express = require("express");
-const nodeFetch = require("node-fetch");
-
 const router = express.Router();
-const fetch = (...args) => nodeFetch(...args);
 
-/* ======== ElevenLabs TTS ========
-   POST /api/tts { text, lang?, voiceId? }
-   -> devuelve audio/mpeg
-   Env vars:
-     ELEVEN_API_KEY (obligatoria)
-     ELEVEN_VOICE_ID (opcional)
-     ELEVEN_MODEL (opcional, por defecto eleven_multilingual_v2)
-     ELEVEN_STABILITY, ELEVEN_SIMILARITY, ELEVEN_STYLE, ELEVEN_SPK_BOOST
-==================================*/
+// GET /api/tts/selftest  -> comprueba clave y conexión con ElevenLabs
+router.get("/selftest", async (_req, res) => {
+  try {
+    const apiKey = process.env.ELEVEN_API_KEY || "";
+    const model  = process.env.ELEVEN_MODEL || "eleven_multilingual_v2";
+    const voice  = process.env.ELEVEN_VOICE_ID || "(default)";
+    if (!apiKey) return res.status(200).json({ ok: false, hasKey: false, error: "ELEVEN_API_KEY missing" });
+
+    // ping rápido a /voices para verificar credenciales
+    const r = await fetch("https://api.elevenlabs.io/v1/voices", {
+      method: "GET",
+      headers: { "xi-api-key": apiKey, "accept": "application/json" }
+    });
+
+    if (!r.ok) {
+      const detail = await r.text().catch(() => "");
+      return res.status(r.status).json({ ok: false, hasKey: true, error: "upstream", detail: detail?.slice(0, 600) });
+    }
+    const data = await r.json().catch(() => ({}));
+    const voicesCount = Array.isArray(data?.voices) ? data.voices.length : 0;
+
+    res.json({ ok: true, hasKey: true, model, voiceId: voice, voicesCount });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+/*
+  POST /api/tts
+  body: { text: string, voiceId?: string }
+  -> audio/mpeg
+*/
 router.post("/", async (req, res) => {
   try {
     const apiKey = process.env.ELEVEN_API_KEY || "";
@@ -24,7 +44,7 @@ router.post("/", async (req, res) => {
     if (!t) return res.status(400).json({ error: "missing_text" });
 
     const model = process.env.ELEVEN_MODEL || "eleven_multilingual_v2";
-    const vid = voiceId || process.env.ELEVEN_VOICE_ID || "21m00Tcm4TlvDq8ikWAM"; // "Rachel" por defecto
+    const vid   = voiceId || process.env.ELEVEN_VOICE_ID || "21m00Tcm4TlvDq8ikWAM"; // Rachel por defecto
 
     const body = {
       text: t,
