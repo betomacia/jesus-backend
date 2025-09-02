@@ -1,4 +1,4 @@
-// routes/did.js — D-ID Streams proxy con “cookie echo” (robusto en multi-instancia)
+// routes/did.js — D-ID Streams proxy con “cookie echo” y captura de cookies en redirecciones
 const express = require("express");
 const nodeFetch = require("node-fetch");
 
@@ -35,7 +35,7 @@ const cookieJar = new Map(); // streamId -> cookie (string)
 // Utilidades
 const validSess = (s) => typeof s === "string" && /^sess_/i.test(s);
 
-/** Parsea el header Set-Cookie y arma:
+/** Parsea el header Set-Cookie(s) y arma:
  *  - cookie: "AWSALB=...; AWSALBCORS=...; session_id=sess_..."
  *  - session_id: "sess_..."
  */
@@ -80,6 +80,21 @@ function sessFromCookieStr(cookieStr) {
   return m ? m[1] : "";
 }
 
+/** Une todos los Set-Cookie presentes (incluye múltiples y redirecciones) */
+function collectSetCookies(...responses) {
+  const all = [];
+  for (const r of responses) {
+    try {
+      const raw = r.headers.raw && r.headers.raw()["set-cookie"];
+      if (Array.isArray(raw) && raw.length) all.push(...raw);
+    } catch {}
+    const single = r.headers.get && r.headers.get("set-cookie");
+    if (single) all.push(single);
+  }
+  // Devuelve en una sola cadena para parseo simple
+  return all.join(", ");
+}
+
 // Selftest
 router.get("/selftest", async (_req, res) => {
   try {
@@ -105,62 +120,54 @@ router.post("/streams", async (req, res) => {
       method: "POST",
       headers: didHeaders(),
       body: JSON.stringify({ source_url }),
-      redirect: "manual",
+      redirect: "manual", // importante para capturar Set-Cookie en 3xx
     };
 
-    const doRequest = async (url) => {
-      let r = await fetch(url, baseReq);
-      if (r.status >= 300 && r.status < 400) {
-        const loc = r.headers.get("location");
-        if (loc) r = await fetch(loc, baseReq);
+    // 1ª llamada (puede ser 3xx con Set-Cookie)
+    const r1 = await fetch(`${DID_BASE}/talks/streams`, baseReq);
+    let finalResp = r1;
+    let cookiesJoined = collectSetCookies(r1);
+
+    // Sigue la redirección manual si existe
+    if (r1.status >= 300 && r1.status < 400) {
+      const loc = r1.headers.get("location");
+      if (loc) {
+        const r2 = await fetch(loc, baseReq);
+        finalResp = r2;
+        cookiesJoined = collectSetCookies(r1, r2); // une cookies de ambas respuestas
       }
-      return r;
-    };
-
-    let attempt = 0, maxAttempts = 3, lastStatus = 0, lastBody = "";
-    let r = await doRequest(`${DID_BASE}/talks/streams`);
-
-    while (attempt < maxAttempts) {
-      lastStatus = r.status;
-      const setCookie = r.headers.get("set-cookie") || "";
-      const txt = await r.text().catch(() => "");
-      lastBody = txt;
-
-      let data = null;
-      try { data = txt ? JSON.parse(txt) : null; } catch { data = null; }
-
-      if (r.ok && data && data.id && data.offer) {
-        // Parsear cookies y corregir session_id si D-ID devolvió mal el campo
-        const { cookie, session_id: sessFromSetCookie } = parseSetCookie(setCookie);
-
-        if (!validSess(data.session_id) && sessFromSetCookie) {
-          console.warn("[DID] Upstream session_id inválido, corrigiendo:", data.session_id, "->", sessFromSetCookie);
-          data.session_id = sessFromSetCookie;
-        } else if (!validSess(data.session_id)) {
-          console.warn("[DID] WARNING: invalid session_id from upstream y no hay sess_ en cookies:", data.session_id || "(empty)");
-        }
-
-        if (cookie) {
-          const prev = cookieJar.get(data.id) || "";
-          const merged = mergeCookies(prev, cookie);
-          cookieJar.set(data.id, merged);
-          data.cookie = merged; // devolvemos cookie al front (eco)
-        }
-
-        return res.json({
-          ...data,
-          upstream_status: lastStatus
-        });
-      }
-
-      attempt++;
-      if (attempt >= maxAttempts) break;
-      await new Promise(r => setTimeout(r, 250 * attempt));
-      r = await doRequest(`${DID_BASE}/talks/streams`);
     }
 
-    console.error("[DID] streams create failed", lastStatus, lastBody || "");
-    return res.status(502).json({ error: "streams_create_failed", upstream_status: lastStatus, detail: safeJSON(lastBody) });
+    // Lee cuerpo final
+    const txt = await finalResp.text().catch(() => "");
+    let data = null;
+    try { data = txt ? JSON.parse(txt) : null; } catch { data = null; }
+
+    if (finalResp.ok && data && data.id && data.offer) {
+      // Extrae cookies (incluido session_id si vino en el 1er 302)
+      const { cookie, session_id: sessFromCookies } = parseSetCookie(cookiesJoined);
+
+      // Corrige session_id si el body viene mal y las cookies lo traen
+      if (!validSess(data.session_id) && sessFromCookies) {
+        console.warn("[DID] Upstream session_id inválido, corrigiendo:", data.session_id, "->", sessFromCookies);
+        data.session_id = sessFromCookies;
+      } else if (!validSess(data.session_id)) {
+        console.warn("[DID] WARNING: invalid session_id from upstream y no hay sess_ en cookies:", data.session_id || "(empty)");
+      }
+
+      // Guarda/une cookie en jar y reenvía al front
+      if (cookie) {
+        const prev = cookieJar.get(data.id) || "";
+        const merged = mergeCookies(prev, cookie);
+        cookieJar.set(data.id, merged);
+        data.cookie = merged; // devolvemos cookie al front (eco)
+      }
+
+      return res.json({ ...data, upstream_status: finalResp.status });
+    }
+
+    console.error("[DID] streams create failed", finalResp.status, txt || "");
+    return res.status(502).json({ error: "streams_create_failed", upstream_status: finalResp.status, detail: safeJSON(txt) });
   } catch (e) {
     console.error("streams create error", e);
     return res.status(500).json({ error: "streams_create_error" });
@@ -193,7 +200,7 @@ router.post("/streams/:id/sdp", async (req, res) => {
     });
 
     // Actualiza cookie jar si upstream setea cookies nuevas
-    const setCookie = r.headers.get("set-cookie") || "";
+    const setCookie = collectSetCookies(r);
     const pc = parseSetCookie(setCookie);
     if (pc.cookie) cookieJar.set(id, mergeCookies(mergedCookie, pc.cookie));
 
@@ -235,7 +242,7 @@ router.post("/streams/:id/ice", async (req, res) => {
       body: JSON.stringify(payload)
     });
 
-    const setCookie = r.headers.get("set-cookie") || "";
+    const setCookie = collectSetCookies(r);
     const pc = parseSetCookie(setCookie);
     if (pc.cookie) cookieJar.set(id, mergeCookies(mergedCookie, pc.cookie));
 
@@ -276,7 +283,7 @@ router.get("/streams/:id/ice", async (req, res) => {
       headers: { ...didHeaders(), ...(mergedCookie ? { Cookie: mergedCookie } : {}) }
     });
 
-    const setCookie = r.headers.get("set-cookie") || "";
+    const setCookie = collectSetCookies(r);
     const pc = parseSetCookie(setCookie);
     if (pc.cookie) cookieJar.set(id, mergeCookies(mergedCookie, pc.cookie));
 
@@ -285,7 +292,6 @@ router.get("/streams/:id/ice", async (req, res) => {
       const data = JSON.parse(txt);
       return res.status(r.ok ? 200 : r.status).json(data);
     } catch {
-      // Fallback NDJSON -> lines con "candidate"
       const candidates = txt
         .split(/\r?\n/)
         .map(s => { try { return JSON.parse(s); } catch { return null; } })
@@ -323,7 +329,7 @@ router.post("/streams/:id/talk", async (req, res) => {
       body: JSON.stringify({ session_id, script })
     });
 
-    const setCookie = r.headers.get("set-cookie") || "";
+    const setCookie = collectSetCookies(r);
     const pc = parseSetCookie(setCookie);
     if (pc.cookie) cookieJar.set(id, mergeCookies(mergedCookie, pc.cookie));
 
@@ -360,8 +366,7 @@ router.delete("/streams/:id", async (req, res) => {
       body: JSON.stringify({ session_id })
     });
 
-    // Limpia cookie jar
-    cookieJar.delete(id);
+    cookieJar.delete(id); // limpia jar
 
     const txt = await r.text().catch(() => "");
     const data = parseJSON(txt);
