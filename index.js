@@ -1,9 +1,6 @@
-// index.js — Backend limpio: lógica OpenAI + memoria por usuario
-// - 100% preguntas desde OpenAI (sin inyección local)
-// - Respuestas cortas (≤60 palabras), UNA pregunta opcional solo si la devuelve OpenAI
-// - Citas RVR1909 sin repetir
-// - FRAME básico (tema/sujeto/persona de apoyo)
-// - Rutas externas: /api/did (avatar) y /api/tts (ElevenLabs)
+// index.js — Backend minimalista: 100% preguntas desde OpenAI (sin inyección local)
+// Respuestas cortas (≤60 palabras), UNA pregunta opcional solo si la devuelve OpenAI,
+// citas RVR1909 sin repetir, memoria simple por usuario y FRAME básico sin desvíos.
 
 const express = require("express");
 const cors = require("cors");
@@ -17,15 +14,17 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-// Routers externos (no tocar lógica aquí)
-const didRouterRaw = require("./routes/did");
-const ttsRouterRaw = require("./routes/tts");
-const didRouter = didRouterRaw.default || didRouterRaw;
-const ttsRouter = ttsRouterRaw.default || ttsRouterRaw;
-
-app.use("/api/did", didRouter);
-app.use("/api/tts", ttsRouter);
-
+// ===== Montaje de routers externos (TTS y D-ID) =====
+function requireRouter(p) {
+  const mod = require(p);
+  const r = (mod && mod.default) || (mod && mod.router) || mod;
+  if (typeof r !== "function") {
+    throw new Error(`Router inválido en ${p}. Exporta con "module.exports = router".`);
+  }
+  return r;
+}
+app.use("/api/tts", requireRouter("./routes/tts"));
+app.use("/api/did", requireRouter("./routes/did"));
 
 // ---- OpenAI ----
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -149,7 +148,7 @@ function extractRecentBibleRefs(history = [], maxRefs = 3) {
   return found;
 }
 
-// FRAME básico
+// Detección muy simple de tema/sujeto y persona de apoyo (para el FRAME)
 function guessTopic(s = "") {
   const t = (s || "").toLowerCase();
   if (/(droga|adicci|alcohol|apuestas)/.test(t)) return "addiction";
@@ -317,7 +316,7 @@ async function askLLM({ persona, message, history = [], userId = "anon" }) {
     `last_bible_ref: ${lastRef || "(n/a)"}\n` +
     `banned_refs:\n- ${bannedRefs.join("\n- ") || "(none)"}\n` +
     (recentQs.length ? `ultimas_preguntas: ${recentQs.join(" | ")}` : "ultimas_preguntas: (ninguna)") + "\n" +
-    (shortHistory.length ? `Historial: ${shortHistory.join(" | ")}` : "Historial: (sin antecedentes)") + "\n";
+    (shortHistory.length ? `Historial: ${shortHistory.join(" | ")}` : "Historial: (sin antecedentes)") + "\n`;
 
   const resp = await completionWithTimeout({
     messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: header }],
@@ -417,4 +416,3 @@ const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`Servidor listo en puerto ${PORT}`);
 });
-
