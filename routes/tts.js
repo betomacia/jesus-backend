@@ -2,11 +2,9 @@
 const express = require("express");
 const router = express.Router();
 
-// Usa fetch nativo de Node 18+ / 20+ (Node 22 lo trae por defecto)
 const ELEVEN_API_KEY = process.env.ELEVEN_API_KEY || "";
 const DEFAULT_VOICE = process.env.ELEVEN_VOICE_ID || "21m00Tcm4TlvDq8ikWAM";
 
-// POST /api/tts  -> audio/mpeg
 router.post("/", async (req, res) => {
   try {
     const { text, voiceId } = req.body || {};
@@ -26,8 +24,6 @@ router.post("/", async (req, res) => {
       body: JSON.stringify({
         text: t,
         output_format: "mp3_44100_128",
-        // model_id: "eleven_multilingual_v2",
-        // voice_settings: { stability: 0.4, similarity_boost: 0.8 },
       }),
     });
 
@@ -46,4 +42,4 @@ router.post("/", async (req, res) => {
   }
 });
 
-module.exports = router; // <-- IMPORTANTE: export CommonJS
+module.exports = router; // <- IMPORTANTE
