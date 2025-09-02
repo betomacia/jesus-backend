@@ -1,6 +1,9 @@
-// index.js — Backend minimalista: 100% preguntas desde OpenAI (sin inyección local)
-// Respuestas cortas (≤60 palabras), UNA pregunta opcional solo si la devuelve OpenAI,
-// citas RVR1909 sin repetir, memoria simple por usuario y FRAME básico sin desvíos.
+// index.js — Backend limpio: lógica OpenAI + memoria por usuario
+// - 100% preguntas desde OpenAI (sin inyección local)
+// - Respuestas cortas (≤60 palabras), UNA pregunta opcional solo si la devuelve OpenAI
+// - Citas RVR1909 sin repetir
+// - FRAME básico (tema/sujeto/persona de apoyo)
+// - Rutas externas: /api/did (avatar) y /api/tts (ElevenLabs)
 
 const express = require("express");
 const cors = require("cors");
@@ -10,9 +13,16 @@ const path = require("path");
 const fs = require("fs/promises");
 require("dotenv").config();
 
+const didRouter = require("./routes/did");
+const ttsRouter = require("./routes/tts");
+
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
+
+// Routers externos (no tocar lógica aquí)
+app.use("/api/did", didRouter);
+app.use("/api/tts", ttsRouter);
 
 // ---- OpenAI ----
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -85,7 +95,6 @@ function cleanRef(ref = "") {
   return String(ref).replace(/\s*\([^)]*\)\s*/g, " ").replace(/\s+/g, " ").trim();
 }
 function stripQuestionsFromMessage(s = "") {
-  // El "message" NUNCA debe tener signos de pregunta
   const noTrailingQLines = (s || "")
     .split(/\n+/)
     .map((l) => l.trim())
@@ -137,7 +146,7 @@ function extractRecentBibleRefs(history = [], maxRefs = 3) {
   return found;
 }
 
-// Detección muy simple de tema/sujeto y persona de apoyo (para el FRAME)
+// FRAME básico
 function guessTopic(s = "") {
   const t = (s || "").toLowerCase();
   if (/(droga|adicci|alcohol|apuestas)/.test(t)) return "addiction";
@@ -162,7 +171,6 @@ function detectMainSubject(s = "") {
   if (/(mi\s+amig[oa])/.test(t)) return "friend";
   return "self";
 }
-// Persona de apoyo tipo “mi hija”, “mi primo”, etc. (para informar al modelo)
 const SUPPORT_WORDS = [
   "hijo","hija","madre","padre","mamá","mama","papá","papa","abuelo","abuela","nieto","nieta",
   "tío","tio","tía","tia","sobrino","sobrina","primo","prima","cuñado","cuñada","suegro","suegra","yerno","nuera",
@@ -399,49 +407,6 @@ app.get("/api/welcome", (_req, res) => {
       ref: "Salmos 27:1"
     }
   });
-});
-
-// ---------- NUEVO: Endpoint TTS (ElevenLabs vía backend) ----------
-app.post("/api/tts", async (req, res) => {
-  try {
-    const { text, voiceId } = req.body || {};
-    if (!text || !String(text).trim()) {
-      return res.status(400).json({ error: "Falta 'text'." });
-    }
-    const API_KEY = process.env.ELEVEN_API_KEY;
-    const VOICE_ID = voiceId || process.env.ELEVEN_VOICE_ID || "21m00Tcm4TlvDq8ikWAM";
-    if (!API_KEY) {
-      return res.status(501).json({ error: "ElevenLabs no configurado." });
-    }
-
-    const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(VOICE_ID)}`, {
-      method: "POST",
-      headers: {
-        "xi-api-key": API_KEY,
-        "accept": "audio/mpeg",
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        text: String(text),
-        output_format: "mp3_44100_128",
-        // model_id: "eleven_multilingual_v2", // opcional
-        // voice_settings: { stability: 0.4, similarity_boost: 0.8 }, // opcional
-      }),
-    });
-
-    if (!r.ok) {
-      const msg = await r.text().catch(() => "");
-      return res.status(r.status).json({ error: "ElevenLabs fallo", details: msg || r.statusText });
-    }
-
-    const ab = await r.arrayBuffer();
-    res.setHeader("Content-Type", "audio/mpeg");
-    res.setHeader("Cache-Control", "no-store");
-    res.send(Buffer.from(ab));
-  } catch (err) {
-    console.error("TTS ERROR:", err);
-    res.status(500).json({ error: "Error interno TTS" });
-  }
 });
 
 // ---------- Arranque ----------
