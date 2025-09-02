@@ -1,6 +1,7 @@
 // index.js — backend con FRAME persistente, memoria por usuario y anti-desvío GENERAL
 // Respuestas cortas (≤60 palabras), UNA pregunta opcional, citas RVR1909 sin repetir,
-// detección general de “persona de apoyo” y progresión forzada (canal→hora→apoyo→primer paso).
+// detección general de “persona de apoyo” y progresión forzada (goal→support/boundary→next_step→channel→time)
+// con compuerta para canal/tiempo y manejo de ambigüedad.
 
 const express = require("express");
 const cors = require("cors");
@@ -38,18 +39,19 @@ OBJETIVO
 MARCO (FRAME) Y MEMORIA
 - Usa el FRAME (topic_primary, main_subject, goal, risk, support_persons, constraints), avoid_slots, banned_refs, last_bible_ref y PERSISTENT_MEMORY como verdad.
 - NO cambies topic_primary salvo que el usuario lo pida o el texto cambie claramente de asunto.
-- Si support_np_detected es true, trátalo como relleno de slot de apoyo; NO redefinas el tema ni el sujeto principal.
+- Si support_np_detected es true, es un slot de apoyo; NO redefine tema ni sujeto principal.
 
 PROGRESO (ENTREVISTA GUIADA)
-- En cada turno identifica QUÉ dato falta y avanza: goal → risk → plan (canal, hora, mini-guion) → constraints → support_persons.
-- Si hay “ack” (sí/ok/vale), pasa de plan a PRÁCTICA/COMPROMISO (mini-guion 1–2 frases, elegir canal/hora, fijar límite). Evita repetir.
-- Evita repetir ideas/viñetas previas. Cada "message" aporta novedad accionable.
+- Identifica QUÉ dato falta y avanza: goal → support/boundary → next_step → (solo cuando corresponda) channel → time.
+- CompUERTA: NO preguntes por canal/tiempo hasta que exista un objetivo (goal) y una contraparte plausible (main_subject ≠ "self" o haya support_persons).
+- Si context_ambiguous=true (mensaje vago o exclamativo), pide primero dato clave (qué pasó, con quién, objetivo) y NO preguntes canal/tiempo.
+- Si hay “ack” (sí/ok/vale), pasa de plan a PRÁCTICA/COMPROMISO (mini-guion 1–2 frases, elegir canal/hora cuando la compuerta lo permita). Evita repetir.
 
 CONTENIDO
-- AMBIGUO: "message" con contención (1–2 frases) y “question” para el dato inicial clave.
+- AMBIGUO: "message" de contención (1–2 frases) y “question” que pida el dato inicial clave.
 - CONCRETO: "message" con 1–2 micro-pasos HOY (puedes usar “• …”), alineados al FRAME; “question” pide el siguiente dato o confirma un compromiso.
-- Autocuidado puede ir al final como complemento, NUNCA reemplaza la acción central.
-- Si support_np_detected es true, usa a esa persona SOLO como apoyo para el objetivo (acompañar llamada, estar presente, ayudar con logística). No propongas ocio salvo que el FRAME lo justifique explícitamente.
+- Autocuidado solo como complemento, NO reemplaza la acción central.
+- Si support_np_detected es true, usa a esa persona SOLO como apoyo (acompañar llamada, estar presente, ayudar logística). No propongas ocio salvo que el FRAME lo justifique explícitamente.
 
 BIBLIA (RVR1909, SIN AMBIGÜEDADES)
 - Elige la cita por el TEMA y los micro-pasos del "message", NO por palabras sueltas (“hijo” ≠ “el Hijo”).
@@ -60,7 +62,7 @@ BIBLIA (RVR1909, SIN AMBIGÜEDADES)
 
 REGLAS ESPECIALES
 - DESPEDIDA: bendición breve en "message"; verso de paz/consuelo (no repetido) en "bible"; SIN "question".
-- “question” debe diferir de las últimas (usa avoid_slots).
+- “question” debe diferir de las últimas (usa avoid_slots). Respeta la compuerta de canal/tiempo.
 
 FORMATO (OBLIGATORIO)
 {
@@ -119,6 +121,12 @@ function isGoodbye(msg = "") {
 }
 function isNegation(msg = "") {
   return /^\s*(no( lo sé| lo se)?|todav[ií]a no|a[úu]n no|no por ahora|m[aá]s tarde|no tengo ganas)\s*\.?$/i.test((msg || "").trim());
+}
+function isAmbiguousMsg(msg = "") {
+  const s = (msg || "").trim().toLowerCase();
+  if (!s) return true;
+  if (s.length < 8) return true;
+  return /^(ay|uff|no s[eé]|no se|no s[eé] bien|dios|pucha|mmm+|eh+|hola|ok|vale|sí|si)$/.test(s);
 }
 function compactHistory(history = [], keep = 8, maxLen = 260) {
   const arr = Array.isArray(history) ? history : [];
@@ -371,7 +379,15 @@ function extractRecentBibleRefs(history = [], maxRefs = 3) {
   return found;
 }
 
-// -------- Progresión forzada de pregunta (si LLM repite o se queda en blanco) --------
+// ------- Compuerta de canal/tiempo --------
+function canAskChannelOrTime(frame) {
+  const hasGoal = !!frame?.goal;
+  const hasTarget = frame?.main_subject && frame.main_subject !== "self";
+  const hasSupport = Array.isArray(frame?.support_persons) && frame.support_persons.length > 0;
+  return Boolean(hasGoal && (hasTarget || hasSupport));
+}
+
+// -------- Progresión forzada de pregunta (si LLM repite, vacía o prematura) --------
 function subjectNoun(frame) {
   switch (frame.main_subject) {
     case "partner": return "tu esposo/pareja";
@@ -388,29 +404,31 @@ function forcedNextQuestion(frame, mem, avoidSlots = [], userNegation = false) {
   mem.progress = mem.progress || {};
   const prog = mem.progress[topic] || { stage: 0, decided: {} };
 
-  // Orden de slots a cubrir
-  const plan = [
+  const basePlan = [
     { slot: "goal",       q: `¿Qué te gustaría lograr esta semana respecto a ${subjectNoun(frame)}?` },
-    { slot: "channel",    q: "¿Prefieres escribir un mensaje breve o hacer una llamada?" },
-    { slot: "time",       q: "¿A qué hora hoy te viene mejor intentarlo?" },
     { slot: "support_act",q: frame.support_persons?.length ? `¿Quieres que ${frame.support_persons[0].label} te acompañe o esté cerca?` : "" },
     { slot: "boundary",   q: "¿Hay algún límite claro que quieras expresar si la conversación se complica?" },
-    { slot: "next_step",  q: "¿Cuál será tu primer paso concreto hoy?" }
+    { slot: "next_step",  q: "¿Cuál será tu primer paso concreto hoy?" },
+    { slot: "channel",    q: "¿Prefieres escribir un mensaje breve o hacer una llamada?" },
+    { slot: "time",       q: "¿A qué hora hoy te viene mejor intentarlo?" }
   ];
 
-  // Si el usuario acaba de negar (“no tengo ganas”), evita “practice” y empuja a una decisión mínima (time/next_step).
-  const order = userNegation ? ["time","next_step","channel","support_act","boundary"] : ["goal","channel","time","support_act","boundary","next_step"];
+  // Aplica compuerta: si no se cumple, elimina channel/time del plan
+  const plan = canAskChannelOrTime(frame)
+    ? basePlan
+    : basePlan.filter(p => p.slot !== "channel" && p.slot !== "time");
+
+  const order = userNegation
+    ? ["time","next_step","goal","support_act","boundary","channel"]
+    : ["goal","support_act","boundary","next_step","channel","time"];
 
   for (const key of order) {
     const item = plan.find(p => p.slot === key);
     if (!item || !item.q) continue;
-    const classOfItem = classifyQuestion(item.q);
-    if (avoidSlots.includes(classOfItem)) continue;
-
-    // si ya está decidido en constraints, salta
+    const cls = classifyQuestion(item.q);
+    if (avoidSlots.includes(cls)) continue;
     if (key === "channel" && frame.constraints?.channel) continue;
     if (key === "time"    && frame.constraints?.time) continue;
-
     return item.q;
   }
   return "¿Cuál será tu primer paso concreto hoy?";
@@ -483,17 +501,6 @@ async function regenerateBibleAvoiding({ persona, message, focusHint, frame, ban
   return text && ref ? { text, ref } : null;
 }
 
-// --- Guardia anti-basura desde STT u otras integraciones ---
-function looksLikeJunk(s=""){
-  const t = String(s).trim().toLowerCase();
-  if (!t) return true;
-  const words = t.split(/\s+/).filter(Boolean);
-  const isAckV = /^(si|sí|ok|okay|vale|dale|de acuerdo|bien|genial)\.?$/.test(t);
-  if (isAckV) return false;
-  if (t.replace(/[^\p{L}\p{N}]/gu,"").length < 6 || words.length < 2) return true;
-  return false;
-}
-
 async function askLLM({ persona, message, history = [], userId = "anon", profile = {} }) {
   const mem = await readUserMemory(userId);
   mem.profile = { ...(mem.profile || {}), ...(profile || {}) };
@@ -506,6 +513,7 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
   const ack = isAck(message);
   const bye = isGoodbye(message);
   const userNegation = isNegation(message);
+  const contextAmbiguous = isAmbiguousMsg(message);
 
   const lastRefFromHistory = extractRecentBibleRefs(history, 1)[0] || "";
   const lastRef = mem.last_bible_ref || lastRefFromHistory || "";
@@ -531,6 +539,7 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
     `FRAME: ${JSON.stringify(frame)}\n` +
     `support_np_detected: ${frame.support_np_detected}\n` +
     `topic_primary_lock: true\n` +
+    `context_ambiguous: ${contextAmbiguous}\n` +
     `last_bible_ref: ${lastRef || "(n/a)"}\n` +
     `banned_refs:\n- ${bannedRefs.join("\n- ") || "(none)"}\n` +
     `avoid_slots: ${avoidSlots.join(", ") || "(none)"}\n` +
@@ -592,10 +601,10 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
       commonHeader +
       `INSTRUCCIONES:\n` +
       `- Mantén el MISMO topic_primary (topic_primary_lock). NO pivotear por support_np_detected.\n` +
-      `- De plan a práctica/compromiso con NOVEDAD (mini-guion, canal y hora, límite), sin repetir.\n` +
+      `- De plan a práctica/compromiso con NOVEDAD (mini-guion, eventualmente canal y hora SOLO si la compuerta se cumple), sin repetir.\n` +
       `- "message": afirmativo, ≤60 palabras, sin signos de pregunta.\n` +
       `- "bible": coherente con message; RVR1909; evita banned_refs.\n` +
-      `- "question": UNA sola; evita avoid_slots.\n`;
+      `- "question": UNA sola; evita avoid_slots; si context_ambiguous=true, NO canal/tiempo.\n`;
 
     let resp;
     try {
@@ -620,11 +629,13 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
     let text = (data?.bible?.text || "").toString().trim();
     let question = (data?.question || "").toString().trim();
 
-    // Antibucle de pregunta: si es vacía o cae en slots recientes, forzar progreso
+    // Antibucle/prematuro de pregunta
     const qClass = classifyQuestion(question);
     const recentQs2 = extractRecentAssistantQuestions(history, 4);
     const recentClasses = deriveAvoidSlots(recentQs2);
-    if (!question || recentClasses.includes(qClass)) {
+    const prematureChannelOrTime = (qClass === "channel" || qClass === "time") && !canAskChannelOrTime(frame);
+    const blockedByAmbiguity = contextAmbiguous && (qClass === "channel" || qClass === "time");
+    if (!question || recentClasses.includes(qClass) || prematureChannelOrTime || blockedByAmbiguity) {
       question = forcedNextQuestion(frame, mem, recentClasses, userNegation);
     }
 
@@ -662,7 +673,7 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
     `- Progrés con 1–2 micro-pasos HOY, concretos y alineados al FRAME (goal/risk/main_subject). Sin ocio genérico salvo vínculo explícito.\n` +
     `- "message": afirmativo, ≤60 palabras, sin signos de pregunta, sin repetir viñetas recientes.\n` +
     `- "bible": RVR1909; evita banned_refs; evita ambigüedad “hijo” vs “el Hijo”.\n` +
-    `- "question": UNA sola, siguiente dato/compromiso; evita avoid_slots.\n`;
+    `- "question": UNA sola, siguiente dato/compromiso; evita avoid_slots; si context_ambiguous=true, NO canal/tiempo.\n`;
 
   const resp = await completionWithTimeout({
     messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: userContent }],
@@ -679,11 +690,13 @@ async function askLLM({ persona, message, history = [], userId = "anon", profile
   let text = (data?.bible?.text || "").toString().trim();
   let question = (data?.question || "").toString().trim();
 
-  // Antibucle de pregunta en NORMAL
+  // Antibucle/prematuro en NORMAL
   const qClass = classifyQuestion(question);
-  if (!question || deriveAvoidSlots(extractRecentAssistantQuestions(history, 4)).includes(qClass)) {
-    const forced = forcedNextQuestion(frame, mem, deriveAvoidSlots(extractRecentAssistantQuestions(history, 4)), userNegation);
-    question = forced;
+  const recentClasses = deriveAvoidSlots(extractRecentAssistantQuestions(history, 4));
+  const prematureChannelOrTime = (qClass === "channel" || qClass === "time") && !canAskChannelOrTime(frame);
+  const blockedByAmbiguity = contextAmbiguous && (qClass === "channel" || qClass === "time");
+  if (!question || recentClasses.includes(qClass) || prematureChannelOrTime || blockedByAmbiguity) {
+    question = forcedNextQuestion(frame, mem, recentClasses, userNegation);
   }
 
   const hijoOnly = /\bhijo\b/i.test(message) && !/(Jes[uú]s|Cristo)/i.test(message);
@@ -720,19 +733,6 @@ app.post("/api/ask", async (req, res) => {
       userId = "anon",
       profile = {}
     } = req.body || {};
-
-    // Guardia anti-basura local (STT cortado, etc.)
-    if (looksLikeJunk(message)) {
-      return res.status(200).json({
-        message: "Estoy aquí. Dímelo con una frase completa para poder ayudarte.",
-        bible: {
-          text: "Clama a mí, y yo te responderé, y te enseñaré cosas grandes y ocultas que tú no conoces.",
-          ref: "Jeremías 33:3"
-        },
-        question: "¿Qué te preocupa ahora mismo?"
-      });
-    }
-
     const data = await askLLM({ persona, message, history, userId, profile });
 
     const out = {
