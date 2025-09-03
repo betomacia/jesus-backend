@@ -1,93 +1,284 @@
-// routes/a2e.js — Tokens para Agora (A2E) + endpoints de diagnóstico
+// routes/a2e.js — A2E WebRTC proxy (sin Agora)
+// Interfaz similar a /api/did: create -> sdp -> ice (post/get) -> talk -> delete
+// Todo parametrizable vía variables de entorno para adaptarlo a tu A2E.
+
 const express = require("express");
-const { RtcTokenBuilder, RtcRole } = require("agora-access-token");
+const nodeFetch = require("node-fetch");
 
 const router = express.Router();
+const fetch = (...args) => nodeFetch(...args);
 
-// Lee las variables de entorno (acepta alias)
-const AGORA_APP_ID =
-  process.env.AGORA_APP_ID ||
-  process.env.AGORA_APPID ||
-  "";
+// ===============================
+// Config por variables de entorno
+// ===============================
+const A2E_BASE = (process.env.A2E_BASE || "").replace(/\/+$/, ""); // ej: https://api.tu-a2e.com
+const A2E_API_KEY = process.env.A2E_API_KEY || "";
 
-const AGORA_APP_CERTIFICATE =
-  process.env.AGORA_APP_CERTIFICATE ||
-  process.env.AGORA_APP_CERT ||
-  "";
+// Modo auth: bearer | x-api-key | basic
+const A2E_AUTH_MODE = (process.env.A2E_AUTH_MODE || "bearer").toLowerCase();
+const A2E_BASIC_USER = process.env.A2E_BASIC_USER || "";
+const A2E_BASIC_PASS = process.env.A2E_BASIC_PASS || "";
 
-const TOKEN_TTL_SECONDS = Number(process.env.A2E_TOKEN_TTL || 3600);
+// Paths REST para mapear tu A2E real.
+// Usa {id} y {query} donde corresponda:
+const A2E_CREATE_PATH   = process.env.A2E_CREATE_PATH   || "/streams";                // POST  -> crea stream
+const A2E_SDP_PATH      = process.env.A2E_SDP_PATH      || "/streams/{id}/sdp";       // POST  -> enviar answer
+const A2E_ICE_POST_PATH = process.env.A2E_ICE_POST_PATH || "/streams/{id}/ice";       // POST  -> enviar ICE local
+const A2E_ICE_GET_PATH  = process.env.A2E_ICE_GET_PATH  || "/streams/{id}/ice{query}";// GET   -> obtener ICE remoto
+const A2E_TALK_PATH     = process.env.A2E_TALK_PATH     || "/streams/{id}";           // POST  -> hablar (texto/ssml)
+const A2E_DELETE_PATH   = process.env.A2E_DELETE_PATH   || "/streams/{id}";           // DELETE-> cerrar stream
 
-// Utilidad simple para canal/uid
-function randChannel() {
-  return "jesus-" + Math.random().toString(36).slice(2, 10);
-}
-function randUid() {
-  // Agora Web SDK NG suele usar enteros 1..2^31-1
-  return Math.floor(1 + Math.random() * 2147483646);
-}
+// Header name para api-key si no es Bearer
+const A2E_API_KEY_HEADER = process.env.A2E_API_KEY_HEADER || "x-api-key";
 
-// --- Diagnóstico mínimo
-router.get("/ping", (_req, res) => {
-  res.json({ ok: true, service: "a2e", time: Date.now() });
-});
+// ===============================
+// Helpers de auth y cabeceras
+// ===============================
+function a2eHeaders(extra = {}) {
+  const h = { Accept: "application/json", "Content-Type": "application/json", ...extra };
 
-// --- Diagnóstico de config
-router.get("/selftest", (_req, res) => {
-  const okId = Boolean(AGORA_APP_ID);
-  const okCert = Boolean(AGORA_APP_CERTIFICATE);
-  res.status(okId && okCert ? 200 : 500).json({
-    ok: okId && okCert,
-    hasAppId: okId,
-    hasCert: okCert,
-    appIdSampleLen: AGORA_APP_ID ? AGORA_APP_ID.length : 0,
-    ttlSeconds: TOKEN_TTL_SECONDS,
-    note: okId && okCert
-      ? "Config OK"
-      : "Faltan variables AGORA_APP_ID y/o AGORA_APP_CERTIFICATE"
-  });
-});
+  if (!A2E_API_KEY && A2E_AUTH_MODE !== "basic") return h;
 
-// --- Emisión de token
-// body opcional: { channel?: string, uid?: number, lang?: "es"|..., avatarUrl?: string }
-router.post("/token", async (req, res) => {
-  try {
-    if (!AGORA_APP_ID || !AGORA_APP_CERTIFICATE) {
-      return res.status(500).json({
-        error: "missing_env",
-        detail: "Debes configurar AGORA_APP_ID y AGORA_APP_CERTIFICATE en Railway."
-      });
+  if (A2E_AUTH_MODE === "bearer") {
+    h.Authorization = `Bearer ${A2E_API_KEY}`;
+  } else if (A2E_AUTH_MODE === "x-api-key") {
+    h[A2E_API_KEY_HEADER] = A2E_API_KEY;
+  } else if (A2E_AUTH_MODE === "basic") {
+    if (A2E_BASIC_USER || A2E_BASIC_PASS) {
+      h.Authorization = "Basic " + Buffer.from(`${A2E_BASIC_USER}:${A2E_BASIC_PASS}`).toString("base64");
     }
+  }
+  return h;
+}
 
-    const { channel: chIn, uid: uidIn } = req.body || {};
-    const channel = (chIn && String(chIn).trim()) || randChannel();
-    const uid = Number.isInteger(uidIn) ? uidIn : randUid();
+function mustBaseOK(res) {
+  if (!A2E_BASE) {
+    res.status(500).json({ error: "A2E_BASE_missing", hint: "Define A2E_BASE en variables de entorno" });
+    return false;
+  }
+  return true;
+}
+function pathJoin(base, path) {
+  return `${base}${path.startsWith("/") ? "" : "/"}${path}`;
+}
+function fillPath(tpl, params = {}) {
+  return tpl.replace(/\{(\w+)\}/g, (_, k) => encodeURIComponent(params[k] ?? ""));
+}
 
-    const role = RtcRole.PUBLISHER;
-    const now = Math.floor(Date.now() / 1000);
-    const privilegeExpiredTs = now + TOKEN_TTL_SECONDS;
+// Simple store si tu A2E no usa cookies ALB/“sess_…”
+const sessStore = new Map(); // id -> session_id
 
-    const token = RtcTokenBuilder.buildTokenWithUid(
-      AGORA_APP_ID,
-      AGORA_APP_CERTIFICATE,
-      channel,
-      uid,
-      role,
-      privilegeExpiredTs
-    );
-
-    return res.json({
-      appId: AGORA_APP_ID,
-      channel,
-      uid,
-      token,
-      expiresAt: privilegeExpiredTs
+// ===============================
+// Selftest: verifica auth/base
+// ===============================
+router.get("/selftest", async (_req, res) => {
+  try {
+    if (!mustBaseOK(res)) return;
+    const url = pathJoin(A2E_BASE, "/");
+    const r = await fetch(url, { method: "GET", headers: a2eHeaders() });
+    const txt = await r.text().catch(() => "");
+    let data = null; try { data = JSON.parse(txt); } catch {}
+    res.status(r.ok ? 200 : r.status).json({
+      base: A2E_BASE,
+      auth_mode: A2E_AUTH_MODE,
+      ok: r.ok,
+      status: r.status,
+      sample: data || txt.slice(0, 400)
     });
-  } catch (err) {
-    console.error("[A2E] token error:", err && err.message || err);
-    return res.status(500).json({
-      error: "token_build_failed",
-      detail: String(err && err.message || err)
+  } catch (e) {
+    res.status(500).json({ error: "selftest_failed", detail: String(e && e.message || e) });
+  }
+});
+
+// =========================================================
+// 1) CREAR STREAM
+// POST /api/a2e/streams { avatar_url?, lang? }
+// -> POST {A2E_BASE}{A2E_CREATE_PATH}
+// Debe devolver al menos: { id, offer, ice_servers, session_id? }
+// =========================================================
+router.post("/streams", async (req, res) => {
+  try {
+    if (!mustBaseOK(res)) return;
+    const { avatar_url, lang } = req.body || {};
+    const url = pathJoin(A2E_BASE, A2E_CREATE_PATH);
+
+    const body = JSON.stringify({ source_url: avatar_url, avatar_url, lang });
+    const r = await fetch(url, { method: "POST", headers: a2eHeaders(), body });
+
+    const txt = await r.text().catch(() => "");
+    let data = null; try { data = JSON.parse(txt); } catch {}
+
+    if (r.ok && data && data.id && data.offer) {
+      // Si upstream entrega session_id, lo guardamos
+      if (data.session_id) sessStore.set(data.id, data.session_id);
+      return res.json(data);
+    }
+    return res.status(r.status || 502).json(data ?? { raw: txt });
+  } catch (e) {
+    return res.status(500).json({ error: "a2e_streams_create_error", detail: String(e && e.message || e) });
+  }
+});
+
+// =========================================================
+// 2) ENVIAR SDP ANSWER
+// POST /api/a2e/streams/:id/sdp { answer, session_id? }
+// -> POST {A2E_BASE}{A2E_SDP_PATH}
+// =========================================================
+router.post("/streams/:id/sdp", async (req, res) => {
+  try {
+    if (!mustBaseOK(res)) return;
+    const { id } = req.params;
+    let { answer, session_id } = req.body || {};
+    if (!id || !answer) return res.status(400).json({ error: "missing_fields" });
+
+    // Recupera session_id si no llega
+    session_id = session_id || sessStore.get(id) || "";
+
+    const url = pathJoin(A2E_BASE, fillPath(A2E_SDP_PATH, { id }));
+    const r = await fetch(url, {
+      method: "POST",
+      headers: a2eHeaders(),
+      body: JSON.stringify({ answer, session_id })
     });
+
+    const txt = await r.text().catch(() => "");
+    let data = null; try { data = JSON.parse(txt); } catch {}
+    if (r.ok && data && data.session_id && !sessStore.get(id)) {
+      sessStore.set(id, data.session_id);
+    }
+    return res.status(r.ok ? 200 : r.status).json(data ?? { raw: txt });
+  } catch (e) {
+    return res.status(500).json({ error: "a2e_sdp_failed", detail: String(e && e.message || e) });
+  }
+});
+
+// =========================================================
+// 3) ENVIAR ICE (local)
+// POST /api/a2e/streams/:id/ice { candidate, sdpMid?, sdpMLineIndex?, session_id? }
+// -> POST {A2E_BASE}{A2E_ICE_POST_PATH}
+// =========================================================
+router.post("/streams/:id/ice", async (req, res) => {
+  try {
+    if (!mustBaseOK(res)) return;
+    const { id } = req.params;
+    let { candidate, sdpMid, sdpMLineIndex, session_id } = req.body || {};
+    if (!id || !candidate) return res.status(400).json({ error: "missing_fields" });
+
+    session_id = session_id || sessStore.get(id) || "";
+
+    const payload = { candidate, session_id };
+    if (sdpMid != null) payload.sdpMid = sdpMid;
+    if (sdpMLineIndex != null) payload.sdpMLineIndex = sdpMLineIndex;
+
+    const url = pathJoin(A2E_BASE, fillPath(A2E_ICE_POST_PATH, { id }));
+    const r = await fetch(url, {
+      method: "POST",
+      headers: a2eHeaders(),
+      body: JSON.stringify(payload)
+    });
+    const txt = await r.text().catch(() => "");
+    let data = null; try { data = JSON.parse(txt); } catch {}
+    return res.status(r.ok ? 200 : r.status).json(data ?? { raw: txt });
+  } catch (e) {
+    return res.status(500).json({ error: "a2e_ice_post_failed", detail: String(e && e.message || e) });
+  }
+});
+
+// =========================================================
+// 3b) OBTENER ICE (remoto)
+// GET /api/a2e/streams/:id/ice[?session_id=...]
+// -> GET {A2E_BASE}{A2E_ICE_GET_PATH}?session_id=...
+// =========================================================
+router.get("/streams/:id/ice", async (req, res) => {
+  try {
+    if (!mustBaseOK(res)) return;
+    const { id } = req.params;
+    let { session_id } = req.query || {};
+    if (!id) return res.status(400).json({ error: "missing_id" });
+
+    session_id = String(session_id || sessStore.get(id) || "");
+    const q = session_id ? `?session_id=${encodeURIComponent(session_id)}` : "";
+    const url = pathJoin(A2E_BASE, fillPath(A2E_ICE_GET_PATH, { id, query: q }));
+
+    const r = await fetch(url, { method: "GET", headers: a2eHeaders() });
+    const txt = await r.text().catch(() => "");
+
+    // Intento JSON directo
+    try {
+      const data = JSON.parse(txt);
+      return res.status(r.ok ? 200 : r.status).json(data);
+    } catch {
+      // Fallback NDJSON lineado -> { candidates: [...] }
+      const candidates = txt
+        .split(/\r?\n/)
+        .map((s) => { try { return JSON.parse(s); } catch { return null; } })
+        .filter(Boolean)
+        .flatMap((obj) => Array.isArray(obj?.candidates) ? obj.candidates : []);
+      return res.status(200).json({ candidates });
+    }
+  } catch (e) {
+    return res.status(200).json({ candidates: [] }); // silencioso
+  }
+});
+
+// =========================================================
+// 4) HABLAR (texto)
+// POST /api/a2e/streams/:id/talk { session_id?, script:{ type:"text", input:"..." } }
+// -> POST {A2E_BASE}{A2E_TALK_PATH}
+// =========================================================
+router.post("/streams/:id/talk", async (req, res) => {
+  try {
+    if (!mustBaseOK(res)) return;
+    const { id } = req.params;
+    let { session_id, script } = req.body || {};
+    if (!id || !script) return res.status(400).json({ error: "missing_fields" });
+
+    session_id = session_id || sessStore.get(id) || "";
+
+    // Puedes transformar el payload aquí si tu A2E usa otro formato:
+    // Por ejemplo, { text: "...", voice: "...", lang: "es" } etc.
+    const url = pathJoin(A2E_BASE, fillPath(A2E_TALK_PATH, { id }));
+    const r = await fetch(url, {
+      method: "POST",
+      headers: a2eHeaders(),
+      body: JSON.stringify({ session_id, script })
+    });
+    const txt = await r.text().catch(() => "");
+    let data = null; try { data = JSON.parse(txt); } catch {}
+    return res.status(r.ok ? 200 : r.status).json(data ?? { raw: txt });
+  } catch (e) {
+    return res.status(500).json({ error: "a2e_talk_failed", detail: String(e && e.message || e) });
+  }
+});
+
+// =========================================================
+/* 5) CERRAR STREAM */
+// DELETE /api/a2e/streams/:id { session_id? }
+// -> DELETE {A2E_BASE}{A2E_DELETE_PATH}
+// =========================================================
+router.delete("/streams/:id", async (req, res) => {
+  try {
+    if (!mustBaseOK(res)) return;
+    const { id } = req.params;
+    let { session_id } = req.body || {};
+    if (!id) return res.status(400).json({ error: "missing_id" });
+
+    session_id = session_id || sessStore.get(id) || "";
+
+    const url = pathJoin(A2E_BASE, fillPath(A2E_DELETE_PATH, { id }));
+    const r = await fetch(url, {
+      method: "DELETE",
+      headers: a2eHeaders(),
+      body: JSON.stringify({ session_id })
+    });
+
+    sessStore.delete(id);
+
+    const txt = await r.text().catch(() => "");
+    let data = null; try { data = JSON.parse(txt); } catch {}
+    return res.status(r.ok ? 200 : r.status).json(data ?? { raw: txt });
+  } catch (e) {
+    return res.status(500).json({ error: "a2e_delete_failed", detail: String(e && e.message || e) });
   }
 });
 
