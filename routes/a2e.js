@@ -1,55 +1,70 @@
-// routes/a2e.js — Token server para A2E (Agora RTC)
+// routes/a2e.js — Tokens para Agora (A2E) + endpoints de diagnóstico
 const express = require("express");
 const { RtcTokenBuilder, RtcRole } = require("agora-access-token");
-const crypto = require("crypto");
 
 const router = express.Router();
 
-// === Variables de entorno requeridas ===
-const AGORA_APP_ID = process.env.AGORA_APP_ID || process.env.A2E_APP_ID || "";
-const AGORA_APP_CERTIFICATE = process.env.AGORA_APP_CERTIFICATE || process.env.A2E_APP_CERTIFICATE || "";
+// Lee las variables de entorno (acepta alias)
+const AGORA_APP_ID =
+  process.env.AGORA_APP_ID ||
+  process.env.AGORA_APPID ||
+  "";
 
-// Opcionales
-const CHANNEL_PREFIX = process.env.A2E_CHANNEL_PREFIX || "jesus";
-const TOKEN_TTL_SECONDS = parseInt(process.env.A2E_TOKEN_TTL_SECONDS || "3600", 10); // 1 hora
+const AGORA_APP_CERTIFICATE =
+  process.env.AGORA_APP_CERTIFICATE ||
+  process.env.AGORA_APP_CERT ||
+  "";
 
-function okEnv() {
-  return Boolean(AGORA_APP_ID && AGORA_APP_CERTIFICATE);
-}
+const TOKEN_TTL_SECONDS = Number(process.env.A2E_TOKEN_TTL || 3600);
 
-// --- Helpers
-function randHex(n = 6) {
-  return crypto.randomBytes(Math.ceil(n / 2)).toString("hex").slice(0, n);
+// Utilidad simple para canal/uid
+function randChannel() {
+  return "jesus-" + Math.random().toString(36).slice(2, 10);
 }
 function randUid() {
-  // Agora UID numérico (1 .. 2^31-1). Evita 0.
-  return Math.floor(Math.random() * 2147483646) + 1;
+  // Agora Web SDK NG suele usar enteros 1..2^31-1
+  return Math.floor(1 + Math.random() * 2147483646);
 }
 
-// === Self test ===
+// --- Diagnóstico mínimo
+router.get("/ping", (_req, res) => {
+  res.json({ ok: true, service: "a2e", time: Date.now() });
+});
+
+// --- Diagnóstico de config
 router.get("/selftest", (_req, res) => {
-  res.json({
-    provider: "a2e",
-    hasAppId: !!AGORA_APP_ID,
-    hasCert: !!AGORA_APP_CERTIFICATE,
-    ttl: TOKEN_TTL_SECONDS,
-    prefix: CHANNEL_PREFIX
+  const okId = Boolean(AGORA_APP_ID);
+  const okCert = Boolean(AGORA_APP_CERTIFICATE);
+  res.status(okId && okCert ? 200 : 500).json({
+    ok: okId && okCert,
+    hasAppId: okId,
+    hasCert: okCert,
+    appIdSampleLen: AGORA_APP_ID ? AGORA_APP_ID.length : 0,
+    ttlSeconds: TOKEN_TTL_SECONDS,
+    note: okId && okCert
+      ? "Config OK"
+      : "Faltan variables AGORA_APP_ID y/o AGORA_APP_CERTIFICATE"
   });
 });
 
-// === Token ===
-// Body típico: { avatarUrl?: string, lang?: "es"|"en"|..., channel?: string }
+// --- Emisión de token
+// body opcional: { channel?: string, uid?: number, lang?: "es"|..., avatarUrl?: string }
 router.post("/token", async (req, res) => {
   try {
-    if (!okEnv()) {
-      return res.status(500).json({ error: "missing_agora_env", need: ["AGORA_APP_ID", "AGORA_APP_CERTIFICATE"] });
+    if (!AGORA_APP_ID || !AGORA_APP_CERTIFICATE) {
+      return res.status(500).json({
+        error: "missing_env",
+        detail: "Debes configurar AGORA_APP_ID y AGORA_APP_CERTIFICATE en Railway."
+      });
     }
 
-    const { channel: chReq } = req.body || {};
-    const channel = (chReq && String(chReq).trim()) || `${CHANNEL_PREFIX}-${randHex(8)}`;
-    const uid = randUid();
-    const role = RtcRole.PUBLISHER; // queremos enviar/recibir audio/video
-    const expireAt = Math.floor(Date.now() / 1000) + TOKEN_TTL_SECONDS;
+    const { channel: chIn, uid: uidIn } = req.body || {};
+    const channel = (chIn && String(chIn).trim()) || randChannel();
+    const uid = Number.isInteger(uidIn) ? uidIn : randUid();
+
+    const role = RtcRole.PUBLISHER;
+    const now = Math.floor(Date.now() / 1000);
+    const privilegeExpiredTs = now + TOKEN_TTL_SECONDS;
 
     const token = RtcTokenBuilder.buildTokenWithUid(
       AGORA_APP_ID,
@@ -57,24 +72,23 @@ router.post("/token", async (req, res) => {
       channel,
       uid,
       role,
-      expireAt
+      privilegeExpiredTs
     );
 
     return res.json({
-      provider: "a2e",
       appId: AGORA_APP_ID,
       channel,
       uid,
       token,
-      expireAt
+      expiresAt: privilegeExpiredTs
     });
-  } catch (e) {
-    console.error("[A2E] token error", e);
-    return res.status(500).json({ error: "a2e_token_failed", detail: String(e && e.message || e) });
+  } catch (err) {
+    console.error("[A2E] token error:", err && err.message || err);
+    return res.status(500).json({
+      error: "token_build_failed",
+      detail: String(err && err.message || err)
+    });
   }
 });
-
-// (Opcional) endpoint para “hablar” si luego integras TTS del lado servidor
-// router.post("/speak", async (req, res) => { ... });
 
 module.exports = router;
