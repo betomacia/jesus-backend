@@ -1,8 +1,4 @@
-// index.js — Backend limpio + rutas A2E/D-ID/TTS/ASK
-// - OpenAI JSON-mode para /api/ask (igual al tuyo)
-// - Proxy de D-ID (/api/did/*)
-// - Proxy de ElevenLabs TTS (/api/tts)
-// - Proxy A2E Streaming Avatar (/api/a2e/*)
+// index.js — Backend: OpenAI + rutas D-ID / TTS / A2E + static /public
 
 const express = require("express");
 const cors = require("cors");
@@ -15,6 +11,12 @@ require("dotenv").config();
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
+
+// --- STATIC: sirve tus imágenes locales (p.ej., /public/JESPANOL.jpeg) ---
+app.use("/public", express.static(path.join(__dirname, "public"), {
+  maxAge: "7d",
+  etag: true,
+}));
 
 // Routers externos
 const didRouterRaw = require("./routes/did");
@@ -407,9 +409,6 @@ app.get("/api/welcome", (_req, res) => {
     }
   });
 });
-
-// Salud simple
-app.get("/health", (_req, res) => res.json({ ok: true }));
 
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 8080;
