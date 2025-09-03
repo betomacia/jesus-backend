@@ -1,36 +1,40 @@
-// index.js — Backend limpio: lógica OpenAI + memoria por usuario
-// - 100% preguntas desde OpenAI (sin inyección local)
-// - Respuestas cortas (≤60 palabras), UNA pregunta opcional solo si la devuelve OpenAI
-// - Citas RVR1909 sin repetir
-// - FRAME básico (tema/sujeto/persona de apoyo)
-// - Rutas externas: /api/did (avatar) y /api/tts (ElevenLabs) y /api/a2e (tokens Agora)
-
+// index.js — Backend: OpenAI + memoria + D-ID + TTS + A2E (sin Agora)
 const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
-const OpenAI = require("openai");
 const path = require("path");
 const fs = require("fs/promises");
+const OpenAI = require("openai");
 require("dotenv").config();
 
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-// Routers externos (no tocar lógica aquí)
+// ===== Routers externos =====
 const didRouterRaw = require("./routes/did");
 const ttsRouterRaw = require("./routes/tts");
-const a2eRouterRaw = require("./routes/a2e"); // <-- NUEVO
+const a2eRouterRaw = require("./routes/a2e"); // <— NUEVO
 
 const didRouter = didRouterRaw?.default || didRouterRaw;
 const ttsRouter = ttsRouterRaw?.default || ttsRouterRaw;
-const a2eRouter = a2eRouterRaw?.default || a2eRouterRaw; // <-- NUEVO
+const a2eRouter = a2eRouterRaw?.default || a2eRouterRaw; // <— NUEVO
 
 app.use("/api/did", didRouter);
 app.use("/api/tts", ttsRouter);
-app.use("/api/a2e", a2eRouter); // <-- NUEVO
+app.use("/api/a2e", a2eRouter); // <— NUEVO
 
-// ---- OpenAI ----
+// ===== Stubs útiles =====
+app.post("/api/memory/sync", (_req, res) => {
+  // Silencia llamadas del front si existen; puedes persistir si quieres
+  res.status(200).json({ ok: true });
+});
+
+app.get("/health", (_req, res) => {
+  res.json({ ok: true, ts: Date.now() });
+});
+
+// ===== OpenAI =====
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 /**
@@ -74,7 +78,6 @@ FORMATO (OBLIGATORIO)
 }
 `;
 
-// Respuesta tipada por esquema (OpenAI JSON mode)
 const responseFormat = {
   type: "json_schema",
   json_schema: {
@@ -374,7 +377,7 @@ async function askLLM({ persona, message, history = [], userId = "anon" }) {
   };
 }
 
-// ---------- Rutas ----------
+// ---------- Rutas principales ----------
 app.post("/api/ask", async (req, res) => {
   try {
     const {
@@ -424,4 +427,7 @@ app.get("/api/welcome", (_req, res) => {
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`Servidor listo en puerto ${PORT}`);
+  if (process.env.A2E_BASE) {
+    console.log(`[A2E] BASE=${process.env.A2E_BASE} mode=${process.env.A2E_AUTH_MODE || "bearer"}`);
+  }
 });
