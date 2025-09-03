@@ -1,40 +1,34 @@
-// index.js — Backend: OpenAI + memoria + D-ID + TTS + A2E (sin Agora)
+// index.js — Backend limpio + rutas A2E/D-ID/TTS/ASK
+// - OpenAI JSON-mode para /api/ask (igual al tuyo)
+// - Proxy de D-ID (/api/did/*)
+// - Proxy de ElevenLabs TTS (/api/tts)
+// - NUEVO: Proxy A2E WebRTC (/api/a2e/*)
+
 const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
+const OpenAI = require("openai");
 const path = require("path");
 const fs = require("fs/promises");
-const OpenAI = require("openai");
 require("dotenv").config();
 
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-// ===== Routers externos =====
+// Routers externos
 const didRouterRaw = require("./routes/did");
 const ttsRouterRaw = require("./routes/tts");
-const a2eRouterRaw = require("./routes/a2e"); // <— NUEVO
-
+const a2eRouterRaw = require("./routes/a2e");
 const didRouter = didRouterRaw?.default || didRouterRaw;
 const ttsRouter = ttsRouterRaw?.default || ttsRouterRaw;
-const a2eRouter = a2eRouterRaw?.default || a2eRouterRaw; // <— NUEVO
+const a2eRouter = a2eRouterRaw?.default || a2eRouterRaw;
 
 app.use("/api/did", didRouter);
 app.use("/api/tts", ttsRouter);
-app.use("/api/a2e", a2eRouter); // <— NUEVO
+app.use("/api/a2e", a2eRouter);
 
-// ===== Stubs útiles =====
-app.post("/api/memory/sync", (_req, res) => {
-  // Silencia llamadas del front si existen; puedes persistir si quieres
-  res.status(200).json({ ok: true });
-});
-
-app.get("/health", (_req, res) => {
-  res.json({ ok: true, ts: Date.now() });
-});
-
-// ===== OpenAI =====
+// ---- OpenAI ----
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 /**
@@ -62,9 +56,9 @@ MARCO (FRAME)
 PROGRESO
 - Cada turno aporta novedad útil (micro-pasos concretos, mini-guion, decisión simple o límite).
 - Si el usuario solo reconoce (“sí/ok/vale”), avanza a práctica/compromiso sin repetir contenido.
-- Evita preguntar por canal/hora (p.ej., “¿mensaje o llamada?”) si el objetivo/voluntad de contacto aún no es claro.
+- Evita preguntar por canal/hora si el objetivo/voluntad de contacto aún no es claro.
 
-BIBLIA (RVR1909, SIN AMBIGÜEDADES)
+BIBLIA (RVR1909)
 - Ajusta la cita al tema y a los micro-pasos.
 - Usa RVR1909 literal y "Libro 0:0" en "ref".
 - Evita last_bible_ref y todas las banned_refs.
@@ -155,7 +149,6 @@ function extractRecentBibleRefs(history = [], maxRefs = 3) {
   return found;
 }
 
-// FRAME básico
 function guessTopic(s = "") {
   const t = (s || "").toLowerCase();
   if (/(droga|adicci|alcohol|apuestas)/.test(t)) return "addiction";
@@ -297,7 +290,6 @@ async function regenerateBibleAvoiding({ persona, message, frame, bannedRefs = [
 async function askLLM({ persona, message, history = [], userId = "anon" }) {
   const mem = await readUserMemory(userId);
 
-  // FRAME básico
   const support = detectSupportNP(message);
   const topic = guessTopic(message);
   const mainSubject = detectMainSubject(message);
@@ -341,28 +333,24 @@ async function askLLM({ persona, message, history = [], userId = "anon" }) {
   let data = {};
   try { data = JSON.parse(content); } catch { data = { message: content }; }
 
-  // Sanitización final
   let msg = stripQuestionsFromMessage((data?.message || "").toString());
   msg = limitWords(msg, 60);
 
   let ref = cleanRef((data?.bible?.ref || "").toString());
   let text = (data?.bible?.text || "").toString().trim();
 
-  // Evitar cita vetada/ambigua/repetida
   const hijoOnly = /\bhijo\b/i.test(message) && !/(Jes[uú]s|Cristo)/i.test(message);
   if (!ref || bannedRefs.includes(ref) || (hijoOnly && /Juan\s*8:36/i.test(ref))) {
     const alt = await regenerateBibleAvoiding({ persona, message, frame, bannedRefs, lastRef });
     if (alt) { ref = alt.ref; text = alt.text; }
   }
 
-  // Pregunta: SOLO si viene del modelo y no repite las últimas
   let question = (data?.question || "").toString().trim();
   const normalizedQ = normalizeQuestion(question);
   const isRepeat = !question ? false : recentQs.includes(normalizedQ);
   const malformed = question && !/\?\s*$/.test(question);
   if (!question || isRepeat || malformed) question = "";
 
-  // Actualizar memoria
   mem.last_bible_ref = ref || mem.last_bible_ref || "";
   mem.last_bible_refs = Array.from(new Set([...(mem.last_bible_refs || []), ref].filter(Boolean))).slice(-5);
   if (question) {
@@ -377,7 +365,7 @@ async function askLLM({ persona, message, history = [], userId = "anon" }) {
   };
 }
 
-// ---------- Rutas principales ----------
+// ---------- Rutas ----------
 app.post("/api/ask", async (req, res) => {
   try {
     const {
@@ -388,7 +376,6 @@ app.post("/api/ask", async (req, res) => {
     } = req.body || {};
 
     const data = await askLLM({ persona, message, history, userId });
-
     const out = {
       message: (data?.message || "").toString().trim(),
       bible: {
@@ -397,12 +384,10 @@ app.post("/api/ask", async (req, res) => {
       },
       ...(data?.question ? { question: data.question } : {})
     };
-
     res.setHeader("Content-Type", "application/json; charset=utf-8");
     res.status(200).json(out);
   } catch (err) {
     console.error("ASK ERROR:", err);
-    // Fallback SOLO por error técnico; sin pregunta
     res.status(200).json({
       message: "La paz sea contigo. Compárteme en pocas palabras lo esencial, y seguimos paso a paso.",
       bible: {
@@ -427,7 +412,4 @@ app.get("/api/welcome", (_req, res) => {
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`Servidor listo en puerto ${PORT}`);
-  if (process.env.A2E_BASE) {
-    console.log(`[A2E] BASE=${process.env.A2E_BASE} mode=${process.env.A2E_AUTH_MODE || "bearer"}`);
-  }
 });
