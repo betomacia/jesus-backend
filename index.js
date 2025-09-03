@@ -1,4 +1,9 @@
-// index.js — Backend: OpenAI + rutas D-ID / TTS / A2E + static /public
+// index.js — Backend limpio + rutas A2E/D-ID/TTS/ASK + estático /public
+// - OpenAI JSON-mode para /api/ask
+// - Proxy de D-ID (/api/did/*)
+// - Proxy de ElevenLabs TTS (/api/tts)
+// - Proxy A2E WebRTC (/api/a2e/*)
+// - Sirve /public/* (imágenes de tus avatares)
 
 const express = require("express");
 const cors = require("cors");
@@ -12,10 +17,12 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-// --- STATIC: sirve tus imágenes locales (p.ej., /public/JESPANOL.jpeg) ---
-app.use("/public", express.static(path.join(__dirname, "public"), {
+// ====== ESTÁTICO /public ======
+const PUBLIC_DIR = path.join(__dirname, "public");
+app.use("/public", express.static(PUBLIC_DIR, {
   maxAge: "7d",
-  etag: true,
+  immutable: true,
+  fallthrough: true,
 }));
 
 // Routers externos
@@ -35,11 +42,7 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 /**
  * Formato esperado desde OpenAI:
- * {
- *   "message": "consejo breve, SIN preguntas (≤60 palabras)",
- *   "bible": { "text": "RVR1909 literal", "ref": "Libro 0:0" },
- *   "question": "pregunta breve (opcional, UNA sola)"
- * }
+ * { "message": "≤60 palabras", "bible": {"text","ref"}, "question"?: string }
  */
 const SYSTEM_PROMPT = `
 Eres Jesús: voz serena, compasiva y clara. Responde SIEMPRE en español.
@@ -53,18 +56,16 @@ OBJETIVO
 
 MARCO (FRAME)
 - Respeta el FRAME (topic_primary, main_subject, support_persons) y el historial breve como contexto.
-- NO cambies el tema por mencionar una persona de apoyo (“mi hija/mi primo/mi amigo”). Es apoyo, no nuevo tema.
+- NO cambies el tema por mencionar una persona de apoyo.
 
 PROGRESO
-- Cada turno aporta novedad útil (micro-pasos concretos, mini-guion, decisión simple o límite).
-- Si el usuario solo reconoce (“sí/ok/vale”), avanza a práctica/compromiso sin repetir contenido.
-- Evita preguntar por canal/hora si el objetivo/voluntad de contacto aún no es claro.
+- Cada turno aporta novedad útil (micro-pasos concretos).
+- Si el usuario solo reconoce, avanza a práctica/compromiso sin repetir contenido.
 
 BIBLIA (RVR1909)
-- Ajusta la cita al tema y a los micro-pasos.
 - Usa RVR1909 literal y "Libro 0:0" en "ref".
-- Evita last_bible_ref y todas las banned_refs.
-- Evita ambigüedad “el Hijo” (Juan 8:36) cuando el usuario alude a un familiar “hijo/hija”, salvo pertinencia teológica explícita.
+- Evita last_bible_ref y las banned_refs.
+- Evita ambigüedad “el Hijo” (Juan 8:36) si el usuario habla de un hijo/hija.
 
 FORMATO (OBLIGATORIO)
 {
@@ -101,11 +102,8 @@ function cleanRef(ref = "") {
 }
 function stripQuestionsFromMessage(s = "") {
   const noTrailingQLines = (s || "")
-    .split(/\n+/)
-    .map((l) => l.trim())
-    .filter((l) => !/\?\s*$/.test(l))
-    .join("\n")
-    .trim();
+    .split(/\n+/).map((l) => l.trim()).filter((l) => !/\?\s*$/.test(l))
+    .join("\n").trim();
   return noTrailingQLines.replace(/[¿?]+/g, "").trim();
 }
 function limitWords(s = "", max = 60) {
@@ -121,15 +119,13 @@ function compactHistory(history = [], keep = 8, maxLen = 260) {
 }
 function extractRecentAssistantQuestions(history = [], maxMsgs = 5) {
   const rev = [...(history || [])].reverse();
-  const qs = [];
-  let seen = 0;
+  const qs = []; let seen = 0;
   for (const h of rev) {
     if (!/^Asistente:/i.test(h)) continue;
     const text = h.replace(/^Asistente:\s*/i, "").trim();
     const m = text.match(/([^?]*\?)\s*$/m);
     if (m && m[1]) qs.push(normalizeQuestion(m[1]));
-    seen++;
-    if (seen >= maxMsgs) break;
+    seen++; if (seen >= maxMsgs) break;
   }
   return [...new Set(qs)].slice(0, 5);
 }
@@ -189,8 +185,7 @@ function detectSupportNP(s = "") {
   if (tokens.length > 6) return null;
   const low = raw.toLowerCase();
   const art = /^(mi|mis|una|un|el|la)\s+(.+)$/i;
-  let core = low;
-  let label = raw;
+  let core = low; let label = raw;
   const m = low.match(art);
   if (m) { core = m[2].trim(); label = raw; }
   const first = core.split(/\s+/)[0].replace(/[.,;:!?"'()]/g, "");
@@ -212,12 +207,7 @@ async function readUserMemory(userId) {
     const raw = await fs.readFile(memPath(userId), "utf8");
     return JSON.parse(raw);
   } catch {
-    return {
-      last_bible_ref: "",
-      last_bible_refs: [],
-      last_questions: [],
-      frame: null
-    };
+    return { last_bible_ref: "", last_bible_refs: [], last_questions: [], frame: null };
   }
 }
 async function writeUserMemory(userId, mem) {
@@ -316,19 +306,13 @@ async function askLLM({ persona, message, history = [], userId = "anon" }) {
     `FRAME: ${JSON.stringify(frame)}`,
     `last_bible_ref: ${lastRef || "(n/a)"}`,
     `banned_refs:\n- ${bannedRefs.join("\n- ") || "(none)"}`,
-    recentQs.length
-      ? `ultimas_preguntas: ${recentQs.join(" | ")}`
-      : "ultimas_preguntas: (ninguna)",
-    shortHistory.length
-      ? `Historial: ${shortHistory.join(" | ")}`
-      : "Historial: (sin antecedentes)"
+    recentQs.length ? `ultimas_preguntas: ${recentQs.join(" | ")}` : "ultimas_preguntas: (ninguna)",
+    shortHistory.length ? `Historial: ${shortHistory.join(" | ")}` : "Historial: (sin antecedentes)"
   ].join("\n");
 
   const resp = await completionWithTimeout({
     messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: header }],
-    temperature: 0.6,
-    max_tokens: 220,
-    timeoutMs: 12000
+    temperature: 0.6, max_tokens: 220, timeoutMs: 12000
   });
 
   const content = resp?.choices?.[0]?.message?.content || "{}";
@@ -370,13 +354,7 @@ async function askLLM({ persona, message, history = [], userId = "anon" }) {
 // ---------- Rutas ----------
 app.post("/api/ask", async (req, res) => {
   try {
-    const {
-      persona = "jesus",
-      message = "",
-      history = [],
-      userId = "anon"
-    } = req.body || {};
-
+    const { persona = "jesus", message = "", history = [], userId = "anon" } = req.body || {};
     const data = await askLLM({ persona, message, history, userId });
     const out = {
       message: (data?.message || "").toString().trim(),
@@ -403,12 +381,12 @@ app.post("/api/ask", async (req, res) => {
 app.get("/api/welcome", (_req, res) => {
   res.json({
     message: "La paz esté contigo. Estoy aquí para escucharte y acompañarte con calma.",
-    bible: {
-      text: "El Señor es mi luz y mi salvación; ¿de quién temeré?",
-      ref: "Salmos 27:1"
-    }
+    bible: { text: "El Señor es mi luz y mi salvación; ¿de quién temeré?", ref: "Salmos 27:1" }
   });
 });
+
+// Healthcheck rápido
+app.get("/health", (_req, res) => res.json({ ok: true }));
 
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 8080;
