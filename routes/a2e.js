@@ -182,4 +182,149 @@ router.post("/streams/:id/ice", async (req, res) => {
     if (!mustBaseOK(res)) return;
     const { id } = req.params;
     let { candidate, sdpMid, sdpMLineIndex, session_id } = req.body || {};
-    if (!id || !
+    if (!id || !candidate) return res.status(400).json({ error: "missing_fields" });
+
+    session_id = session_id || sessStore.get(id) || "";
+
+    const payload = { candidate, session_id };
+    if (sdpMid != null) payload.sdpMid = sdpMid;
+    if (sdpMLineIndex != null) payload.sdpMLineIndex = sdpMLineIndex;
+
+    const url = pathJoin(A2E_BASE, fillPath(A2E_ICE_POST_PATH, { id }));
+    if (DEBUG) console.log("[A2E] ICE(POST) ->", url, { candidate: !!candidate, session_id: !!session_id });
+
+    const r = await fetch(url, {
+      method: "POST",
+      headers: a2eHeaders(),
+      body: JSON.stringify(payload)
+    });
+    const txt = await r.text().catch(() => "");
+    if (DEBUG) console.log("[A2E] ICE(POST) status", r.status, txt.slice(0, 200));
+    let data = null; try { data = JSON.parse(txt); } catch {}
+    return res.status(r.ok ? 200 : r.status).json(data ?? { raw: txt });
+  } catch (e) {
+    return res.status(500).json({ error: "a2e_ice_post_failed", detail: String(e && e.message || e) });
+  }
+});
+
+// =========================================================
+// 3b) OBTENER ICE (remoto)
+// GET /api/a2e/streams/:id/ice[?session_id=...]
+// =========================================================
+router.get("/streams/:id/ice", async (req, res) => {
+  try {
+    if (!mustBaseOK(res)) return;
+    const { id } = req.params;
+    let { session_id } = req.query || {};
+    if (!id) return res.status(400).json({ error: "missing_id" });
+
+    session_id = String(session_id || sessStore.get(id) || "");
+    const q = session_id ? `?session_id=${encodeURIComponent(session_id)}` : "";
+    const url = pathJoin(A2E_BASE, fillPath(A2E_ICE_GET_PATH, { id, query: q }));
+
+    if (DEBUG) console.log("[A2E] ICE(GET) ->", url);
+    const r = await fetch(url, { method: "GET", headers: a2eHeaders() });
+    const txt = await r.text().catch(() => "");
+    if (DEBUG) console.log("[A2E] ICE(GET) status", r.status, txt.slice(0, 200));
+
+    try {
+      const data = JSON.parse(txt);
+      return res.status(r.ok ? 200 : r.status).json(data);
+    } catch {
+      const candidates = txt
+        .split(/\r?\n/)
+        .map((s) => { try { return JSON.parse(s); } catch { return null; } })
+        .filter(Boolean)
+        .flatMap((obj) => Array.isArray(obj?.candidates) ? obj.candidates : []);
+      return res.status(200).json({ candidates });
+    }
+  } catch (e) {
+    return res.status(200).json({ candidates: [] });
+  }
+});
+
+// =========================================================
+// 4) HABLAR (texto)
+// POST /api/a2e/streams/:id/talk { session_id?, script:{ type:"text", input:"..." , lang? , voice? } }
+// Además, por compatibilidad, añadimos: { text, language, voice }
+// =========================================================
+router.post("/streams/:id/talk", async (req, res) => {
+  try {
+    if (!mustBaseOK(res)) return;
+    const { id } = req.params;
+    let { session_id, script } = req.body || {};
+    if (!id || !script) return res.status(400).json({ error: "missing_fields" });
+
+    session_id = session_id || sessStore.get(id) || "";
+
+    // Compat: “script.type === text”
+    let text = "";
+    let voice = A2E_DEFAULT_VOICE;
+    let language = A2E_DEFAULT_LANG;
+
+    if (script && script.type === "text") {
+      text = (script.input || "").toString();
+      if (script.voice) voice = script.voice;
+      if (script.lang)  language = script.lang;
+    }
+
+    const compatPayload = {
+      session_id,
+      script,                  // payload “oficial” esperado
+      // Compat extra por si el vendor espera otras claves
+      text,
+      language,
+      voice
+    };
+
+    const url = pathJoin(A2E_BASE, fillPath(A2E_TALK_PATH, { id }));
+    if (DEBUG) console.log("[A2E] TALK ->", url, { len: text.length, voice, language, hasSession: !!session_id });
+
+    const r = await fetch(url, {
+      method: "POST",
+      headers: a2eHeaders(),
+      body: JSON.stringify(compatPayload)
+    });
+    const txt = await r.text().catch(() => "");
+    if (DEBUG) console.log("[A2E] TALK status", r.status, txt.slice(0, 200));
+    let data = null; try { data = JSON.parse(txt); } catch {}
+    return res.status(r.ok ? 200 : r.status).json(data ?? { raw: txt });
+  } catch (e) {
+    return res.status(500).json({ error: "a2e_talk_failed", detail: String(e && e.message || e) });
+  }
+});
+
+// =========================================================
+// 5) CERRAR STREAM
+// DELETE /api/a2e/streams/:id { session_id? }
+// =========================================================
+router.delete("/streams/:id", async (req, res) => {
+  try {
+    if (!mustBaseOK(res)) return;
+    const { id } = req.params;
+    let { session_id } = req.body || {};
+    if (!id) return res.status(400).json({ error: "missing_id" });
+
+    session_id = session_id || sessStore.get(id) || "";
+
+    const url = pathJoin(A2E_BASE, fillPath(A2E_DELETE_PATH, { id }));
+    if (DEBUG) console.log("[A2E] DELETE ->", url, { hasSession: !!session_id });
+
+    const r = await fetch(url, {
+      method: "DELETE",
+      headers: a2eHeaders(),
+      body: JSON.stringify({ session_id })
+    });
+
+    sessStore.delete(id);
+
+    const txt = await r.text().catch(() => "");
+    if (DEBUG) console.log("[A2E] DELETE status", r.status, txt.slice(0, 200));
+    let data = null; try { data = JSON.parse(txt); } catch {}
+    return res.status(r.ok ? 200 : r.status).json(data ?? { raw: txt });
+  } catch (e) {
+    return res.status(500).json({ error: "a2e_delete_failed", detail: String(e && e.message || e) });
+  }
+});
+
+module.exports = router;
