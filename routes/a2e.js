@@ -1,6 +1,6 @@
 // routes/a2e.js — A2E WebRTC proxy (sin Agora)
-// Interfaz: /api/a2e/streams -> sdp -> ice (post/get) -> talk -> delete
-// Ajustable por ENV. Incluye "compat mode" en bodies y logs con DEBUG_A2E=1
+// Interfaz tipo /api/did: create -> sdp -> ice (post/get) -> talk -> delete
+// Incluye selftest y un "guesser" de rutas para diagnosticar 405.
 
 const express = require("express");
 const nodeFetch = require("node-fetch");
@@ -11,32 +11,27 @@ const fetch = (...args) => nodeFetch(...args);
 // ===============================
 // Config por variables de entorno
 // ===============================
-const A2E_BASE = (process.env.A2E_BASE || "").replace(/\/+$/, ""); // ej: https://video.a2e.ai
+const A2E_BASE = (process.env.A2E_BASE || "").replace(/\/+$/, ""); // p.ej. https://video.a2e.ai
 const A2E_API_KEY = process.env.A2E_API_KEY || "";
-const DEBUG = String(process.env.DEBUG_A2E || "0") === "1";
 
 // Modo auth: bearer | x-api-key | basic
 const A2E_AUTH_MODE = (process.env.A2E_AUTH_MODE || "bearer").toLowerCase();
 const A2E_BASIC_USER = process.env.A2E_BASIC_USER || "";
 const A2E_BASIC_PASS = process.env.A2E_BASIC_PASS || "";
 
-// Paths REST (ajusta si tu A2E usa otros)
-const A2E_CREATE_PATH   = process.env.A2E_CREATE_PATH   || "/streams";
-const A2E_SDP_PATH      = process.env.A2E_SDP_PATH      || "/streams/{id}/sdp";
-const A2E_ICE_POST_PATH = process.env.A2E_ICE_POST_PATH || "/streams/{id}/ice";
-const A2E_ICE_GET_PATH  = process.env.A2E_ICE_GET_PATH  || "/streams/{id}/ice{query}";
-const A2E_TALK_PATH     = process.env.A2E_TALK_PATH     || "/streams/{id}";
-const A2E_DELETE_PATH   = process.env.A2E_DELETE_PATH   || "/streams/{id}";
+// Paths REST (overrides opcionales)
+const A2E_CREATE_PATH   = process.env.A2E_CREATE_PATH   || "/streams";                // POST
+const A2E_SDP_PATH      = process.env.A2E_SDP_PATH      || "/streams/{id}/sdp";       // POST
+const A2E_ICE_POST_PATH = process.env.A2E_ICE_POST_PATH || "/streams/{id}/ice";       // POST
+const A2E_ICE_GET_PATH  = process.env.A2E_ICE_GET_PATH  || "/streams/{id}/ice{query}";// GET
+const A2E_TALK_PATH     = process.env.A2E_TALK_PATH     || "/streams/{id}";           // POST
+const A2E_DELETE_PATH   = process.env.A2E_DELETE_PATH   || "/streams/{id}";           // DELETE
 
 // Header name para api-key si no es Bearer
 const A2E_API_KEY_HEADER = process.env.A2E_API_KEY_HEADER || "x-api-key";
 
-// Voz/lenguaje por defecto si el proveedor lo permite
-const A2E_DEFAULT_VOICE = process.env.A2E_DEFAULT_VOICE || "male_calm";
-const A2E_DEFAULT_LANG  = process.env.A2E_DEFAULT_LANG  || "es";
-
 // ===============================
-// Helpers
+// Helpers de auth y cabeceras
 // ===============================
 function a2eHeaders(extra = {}) {
   const h = { Accept: "application/json", "Content-Type": "application/json", ...extra };
@@ -45,9 +40,7 @@ function a2eHeaders(extra = {}) {
   } else if (A2E_AUTH_MODE === "x-api-key" && A2E_API_KEY) {
     h[A2E_API_KEY_HEADER] = A2E_API_KEY;
   } else if (A2E_AUTH_MODE === "basic") {
-    if (A2E_BASIC_USER || A2E_BASIC_PASS) {
-      h.Authorization = "Basic " + Buffer.from(`${A2E_BASIC_USER}:${A2E_BASIC_PASS}`).toString("base64");
-    }
+    h.Authorization = "Basic " + Buffer.from(`${A2E_BASIC_USER}:${A2E_BASIC_PASS}`).toString("base64");
   }
   return h;
 }
@@ -58,25 +51,23 @@ function mustBaseOK(res) {
   }
   return true;
 }
-function pathJoin(base, path) {
-  return `${base}${path.startsWith("/") ? "" : "/"}${path}`;
-}
+function pathJoin(base, p) { return `${base}${p.startsWith("/") ? "" : "/"}${p}`; }
 function fillPath(tpl, params = {}) {
   return tpl.replace(/\{(\w+)\}/g, (_, k) => encodeURIComponent(params[k] ?? ""));
 }
 
-// Simple store si tu A2E no usa cookies ALB/“sess_…”
+// Simple store si tu A2E no usa cookies/ALB ni session_id
 const sessStore = new Map(); // id -> session_id
 
 // ===============================
-// Selftest
+// Selftest: verifica base/auth rápido
 // ===============================
 router.get("/selftest", async (_req, res) => {
   try {
     if (!mustBaseOK(res)) return;
     const url = pathJoin(A2E_BASE, "/");
-    if (DEBUG) console.log("[A2E] SELFTEST", url);
     const r = await fetch(url, { method: "GET", headers: a2eHeaders() });
+    const allow = r.headers.get("allow") || "";
     const txt = await r.text().catch(() => "");
     let data = null; try { data = JSON.parse(txt); } catch {}
     res.status(r.ok ? 200 : r.status).json({
@@ -84,6 +75,7 @@ router.get("/selftest", async (_req, res) => {
       auth_mode: A2E_AUTH_MODE,
       ok: r.ok,
       status: r.status,
+      allow,
       sample: data || txt.slice(0, 400)
     });
   } catch (e) {
@@ -91,11 +83,56 @@ router.get("/selftest", async (_req, res) => {
   }
 });
 
+// ===============================
+// Guesser: prueba rutas típicas
+// ===============================
+router.post("/guess-paths", async (req, res) => {
+  try {
+    if (!mustBaseOK(res)) return;
+    const { avatar_url, lang } = req.body || {};
+    const candidates = [
+      // más comunes
+      "/streams", "/v1/streams", "/api/streams",
+      "/webrtc/streams", "/v1/webrtc/streams",
+      "/talks/streams", "/v1/talks/streams",
+      // por si usan “sessions”
+      "/sessions", "/v1/sessions", "/webrtc/sessions",
+    ];
+
+    const results = [];
+    for (const p of candidates) {
+      const url = pathJoin(A2E_BASE, p);
+      try {
+        const r = await fetch(url, {
+          method: "POST",
+          headers: a2eHeaders(),
+          body: JSON.stringify({ avatar_url, lang, source_url: avatar_url })
+        });
+        const allow = r.headers.get("allow") || "";
+        const ct = r.headers.get("content-type") || "";
+        const txt = await r.text().catch(() => "");
+        let data = null; try { data = JSON.parse(txt); } catch {}
+        results.push({
+          path: p, status: r.status, ok: r.ok, allow, content_type: ct,
+          has_offer: !!data?.offer, has_id: !!data?.id,
+          sample: data || txt.slice(0, 240)
+        });
+        if (r.ok && data?.id && data?.offer) break; // ya está
+      } catch (e) {
+        results.push({ path: p, error: String(e && e.message || e) });
+      }
+    }
+    res.json({ base: A2E_BASE, results });
+  } catch (e) {
+    res.status(500).json({ error: "guess_failed", detail: String(e && e.message || e) });
+  }
+});
+
 // =========================================================
 // 1) CREAR STREAM
 // POST /api/a2e/streams { avatar_url?, lang? }
-// Body compat: envia varias claves posibles (source_url, avatar_url, photo, image_url, language…)
-// Espera: { id, offer, ice_servers, session_id? }
+// -> POST {A2E_BASE}{A2E_CREATE_PATH}
+// Debe devolver al menos: { id, offer, ice_servers, session_id? }
 // =========================================================
 router.post("/streams", async (req, res) => {
   try {
@@ -103,36 +140,20 @@ router.post("/streams", async (req, res) => {
     const { avatar_url, lang } = req.body || {};
     const url = pathJoin(A2E_BASE, A2E_CREATE_PATH);
 
-    const language = (lang || A2E_DEFAULT_LANG || "es").toLowerCase();
-    const photo = avatar_url || "";
+    const body = JSON.stringify({ source_url: avatar_url, avatar_url, lang });
+    const r = await fetch(url, { method: "POST", headers: a2eHeaders(), body });
 
-    const compatBody = {
-      // claves "compatibles" con varios vendors
-      source_url: photo,
-      avatar_url: photo,
-      image_url: photo,
-      photo_url: photo,
-      photo,
-      avatar: photo,
-      lang: language,
-      language
-    };
-
-    if (DEBUG) console.log("[A2E] CREATE ->", url, compatBody);
-    const r = await fetch(url, {
-      method: "POST",
-      headers: a2eHeaders(),
-      body: JSON.stringify(compatBody)
-    });
-
+    const allow = r.headers.get("allow") || "";
     const txt = await r.text().catch(() => "");
-    if (DEBUG) console.log("[A2E] CREATE status", r.status, txt.slice(0, 400));
     let data = null; try { data = JSON.parse(txt); } catch {}
 
     if (r.ok && data && data.id && data.offer) {
       if (data.session_id) sessStore.set(data.id, data.session_id);
+      res.setHeader("X-Upstream-URL", url);
       return res.json(data);
     }
+    res.setHeader("X-Upstream-URL", url);
+    res.setHeader("X-Upstream-Allow", allow);
     return res.status(r.status || 502).json(data ?? { raw: txt });
   } catch (e) {
     return res.status(500).json({ error: "a2e_streams_create_error", detail: String(e && e.message || e) });
@@ -142,6 +163,7 @@ router.post("/streams", async (req, res) => {
 // =========================================================
 // 2) ENVIAR SDP ANSWER
 // POST /api/a2e/streams/:id/sdp { answer, session_id? }
+// -> POST {A2E_BASE}{A2E_SDP_PATH}
 // =========================================================
 router.post("/streams/:id/sdp", async (req, res) => {
   try {
@@ -151,10 +173,7 @@ router.post("/streams/:id/sdp", async (req, res) => {
     if (!id || !answer) return res.status(400).json({ error: "missing_fields" });
 
     session_id = session_id || sessStore.get(id) || "";
-
     const url = pathJoin(A2E_BASE, fillPath(A2E_SDP_PATH, { id }));
-    if (DEBUG) console.log("[A2E] SDP ->", url, { hasAnswer: !!answer, session_id: session_id ? "(set)" : "" });
-
     const r = await fetch(url, {
       method: "POST",
       headers: a2eHeaders(),
@@ -162,7 +181,6 @@ router.post("/streams/:id/sdp", async (req, res) => {
     });
 
     const txt = await r.text().catch(() => "");
-    if (DEBUG) console.log("[A2E] SDP status", r.status, txt.slice(0, 200));
     let data = null; try { data = JSON.parse(txt); } catch {}
     if (r.ok && data && data.session_id && !sessStore.get(id)) {
       sessStore.set(id, data.session_id);
@@ -176,6 +194,7 @@ router.post("/streams/:id/sdp", async (req, res) => {
 // =========================================================
 // 3) ENVIAR ICE (local)
 // POST /api/a2e/streams/:id/ice { candidate, sdpMid?, sdpMLineIndex?, session_id? }
+// -> POST {A2E_BASE}{A2E_ICE_POST_PATH}
 // =========================================================
 router.post("/streams/:id/ice", async (req, res) => {
   try {
@@ -185,21 +204,17 @@ router.post("/streams/:id/ice", async (req, res) => {
     if (!id || !candidate) return res.status(400).json({ error: "missing_fields" });
 
     session_id = session_id || sessStore.get(id) || "";
-
     const payload = { candidate, session_id };
     if (sdpMid != null) payload.sdpMid = sdpMid;
     if (sdpMLineIndex != null) payload.sdpMLineIndex = sdpMLineIndex;
 
     const url = pathJoin(A2E_BASE, fillPath(A2E_ICE_POST_PATH, { id }));
-    if (DEBUG) console.log("[A2E] ICE(POST) ->", url, { candidate: !!candidate, session_id: !!session_id });
-
     const r = await fetch(url, {
       method: "POST",
       headers: a2eHeaders(),
       body: JSON.stringify(payload)
     });
     const txt = await r.text().catch(() => "");
-    if (DEBUG) console.log("[A2E] ICE(POST) status", r.status, txt.slice(0, 200));
     let data = null; try { data = JSON.parse(txt); } catch {}
     return res.status(r.ok ? 200 : r.status).json(data ?? { raw: txt });
   } catch (e) {
@@ -210,6 +225,7 @@ router.post("/streams/:id/ice", async (req, res) => {
 // =========================================================
 // 3b) OBTENER ICE (remoto)
 // GET /api/a2e/streams/:id/ice[?session_id=...]
+// -> GET {A2E_BASE}{A2E_ICE_GET_PATH}?session_id=...
 // =========================================================
 router.get("/streams/:id/ice", async (req, res) => {
   try {
@@ -222,10 +238,8 @@ router.get("/streams/:id/ice", async (req, res) => {
     const q = session_id ? `?session_id=${encodeURIComponent(session_id)}` : "";
     const url = pathJoin(A2E_BASE, fillPath(A2E_ICE_GET_PATH, { id, query: q }));
 
-    if (DEBUG) console.log("[A2E] ICE(GET) ->", url);
     const r = await fetch(url, { method: "GET", headers: a2eHeaders() });
     const txt = await r.text().catch(() => "");
-    if (DEBUG) console.log("[A2E] ICE(GET) status", r.status, txt.slice(0, 200));
 
     try {
       const data = JSON.parse(txt);
@@ -245,8 +259,8 @@ router.get("/streams/:id/ice", async (req, res) => {
 
 // =========================================================
 // 4) HABLAR (texto)
-// POST /api/a2e/streams/:id/talk { session_id?, script:{ type:"text", input:"..." , lang? , voice? } }
-// Además, por compatibilidad, añadimos: { text, language, voice }
+// POST /api/a2e/streams/:id/talk { session_id?, script:{ type:"text", input:"..." } }
+// -> POST {A2E_BASE}{A2E_TALK_PATH}
 // =========================================================
 router.post("/streams/:id/talk", async (req, res) => {
   try {
@@ -257,36 +271,13 @@ router.post("/streams/:id/talk", async (req, res) => {
 
     session_id = session_id || sessStore.get(id) || "";
 
-    // Compat: “script.type === text”
-    let text = "";
-    let voice = A2E_DEFAULT_VOICE;
-    let language = A2E_DEFAULT_LANG;
-
-    if (script && script.type === "text") {
-      text = (script.input || "").toString();
-      if (script.voice) voice = script.voice;
-      if (script.lang)  language = script.lang;
-    }
-
-    const compatPayload = {
-      session_id,
-      script,                  // payload “oficial” esperado
-      // Compat extra por si el vendor espera otras claves
-      text,
-      language,
-      voice
-    };
-
     const url = pathJoin(A2E_BASE, fillPath(A2E_TALK_PATH, { id }));
-    if (DEBUG) console.log("[A2E] TALK ->", url, { len: text.length, voice, language, hasSession: !!session_id });
-
     const r = await fetch(url, {
       method: "POST",
       headers: a2eHeaders(),
-      body: JSON.stringify(compatPayload)
+      body: JSON.stringify({ session_id, script })
     });
     const txt = await r.text().catch(() => "");
-    if (DEBUG) console.log("[A2E] TALK status", r.status, txt.slice(0, 200));
     let data = null; try { data = JSON.parse(txt); } catch {}
     return res.status(r.ok ? 200 : r.status).json(data ?? { raw: txt });
   } catch (e) {
@@ -308,8 +299,6 @@ router.delete("/streams/:id", async (req, res) => {
     session_id = session_id || sessStore.get(id) || "";
 
     const url = pathJoin(A2E_BASE, fillPath(A2E_DELETE_PATH, { id }));
-    if (DEBUG) console.log("[A2E] DELETE ->", url, { hasSession: !!session_id });
-
     const r = await fetch(url, {
       method: "DELETE",
       headers: a2eHeaders(),
@@ -319,7 +308,6 @@ router.delete("/streams/:id", async (req, res) => {
     sessStore.delete(id);
 
     const txt = await r.text().catch(() => "");
-    if (DEBUG) console.log("[A2E] DELETE status", r.status, txt.slice(0, 200));
     let data = null; try { data = JSON.parse(txt); } catch {}
     return res.status(r.ok ? 200 : r.status).json(data ?? { raw: txt });
   } catch (e) {
