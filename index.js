@@ -1,6 +1,9 @@
 // index.js — Backend limpio: lógica OpenAI + memoria por usuario
-// - OpenAI JSON mode
-// - Rutas externas: /api/did (avatar D-ID), /api/tts (ElevenLabs), /api/a2e (avatar A2E)
+// - 100% preguntas desde OpenAI (sin inyección local)
+// - Respuestas cortas (≤60 palabras), UNA pregunta opcional solo si la devuelve OpenAI
+// - Citas RVR1909 sin repetir
+// - FRAME básico (tema/sujeto/persona de apoyo)
+// - Rutas externas: /api/did (avatar) y /api/tts (ElevenLabs) y /api/a2e (tokens Agora)
 
 const express = require("express");
 const cors = require("cors");
@@ -11,12 +14,10 @@ const fs = require("fs/promises");
 require("dotenv").config();
 
 const app = express();
+app.use(cors());
+app.use(bodyParser.json());
 
-// ---------- Middlewares ----------
-app.use(cors());                    // CORS abierto (sirve para Bolt/preview)
-app.use(bodyParser.json({ limit: "5mb" }));
-
-// ---------- Routers externos ----------
+// Routers externos (no tocar lógica aquí)
 const didRouterRaw = require("./routes/did");
 const ttsRouterRaw = require("./routes/tts");
 const a2eRouterRaw = require("./routes/a2e"); // <-- NUEVO
@@ -27,9 +28,9 @@ const a2eRouter = a2eRouterRaw?.default || a2eRouterRaw; // <-- NUEVO
 
 app.use("/api/did", didRouter);
 app.use("/api/tts", ttsRouter);
-app.use("/api/a2e", a2eRouter);     // <-- NUEVO: /api/a2e/token, /api/a2e/speak, /api/a2e/leave
+app.use("/api/a2e", a2eRouter); // <-- NUEVO
 
-// ---------- OpenAI ----------
+// ---- OpenAI ----
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 /**
