@@ -1,20 +1,27 @@
 {
   "name": "jesus-backend",
   "version": "1.0.0",
-  "private": true,
+  "description": "Backend: OpenAI + memoria + TTS ElevenLabs + D-ID Streams + A2E (Agora) tokens",
   "main": "index.js",
   "type": "commonjs",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "start:dev": "nodemon index.js"
+  },
+  "dependencies": {
+    "agora-access-token": "^2.0.4",
+    "body-parser": "^1.20.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "node-fetch": "^2.7.0",
+    "openai": "^4.57.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
   },
   "engines": {
     "node": ">=18"
   },
-  "dependencies": {
-    "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
-    "express": "^4.19.2",
-    "openai": "^4.55.0",
-    "body-parser": "^1.20.2"
-  }
+  "license": "MIT"
 }
