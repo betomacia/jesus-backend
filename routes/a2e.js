@@ -1,11 +1,5 @@
 // routes/a2e.js — A2E Streaming proxy (con bootstrap de avatares desde tu backend)
-// - Auth: Bearer A2E_API_KEY
-// - GET  /api/a2e/selftest               -> sanity
-// - GET  /api/a2e/avatars                -> lista A2E
-// - POST /api/a2e/create-avatar-from-url -> crear 1 avatar desde URL
-// - GET  /api/a2e/ensure-avatar-id?name=JESPANOL -> resolver ID por nombre
-// - POST /api/a2e/bootstrap-avatars      -> crea/reusa JESPANOL/JINGLE/... desde /public
-// - POST /api/a2e/token                  -> pide token (acepta avatar_id | avatar_name | avatar_url)
+// Sanea A2E_BASE por si viene con varias URLs separadas por coma o espacios.
 
 const express = require("express");
 const nodeFetch = require("node-fetch");
@@ -14,12 +8,21 @@ const router = express.Router();
 const fetch = (...args) => nodeFetch(...args);
 
 // ===============================
-// Config (env)
+// Config (env) + saneo de A2E_BASE
 // ===============================
-const A2E_BASE = (process.env.A2E_BASE || "https://video.a2e.ai").replace(/\/+$/, "");
+function pickFirstValidBase(s) {
+  const parts = String(s || "")
+    .split(/[,\s]+/)               // coma o espacio
+    .map(x => x.trim())
+    .filter(Boolean);
+  const firstHttp = parts.find(x => /^https?:\/\//i.test(x));
+  return (firstHttp || "https://video.a2e.ai").replace(/\/+$/, "");
+}
+
+const A2E_BASE = pickFirstValidBase(process.env.A2E_BASE);
 const A2E_API_KEY = process.env.A2E_API_KEY || "";
 
-// Base pública de tus imágenes. Ej: https://jesus-backend-production-.../public
+// Base pública de tus imágenes (ej: https://<tu-backend>/public)
 const A2E_AVATAR_BASE_URL = (process.env.A2E_AVATAR_BASE_URL || "").replace(/\/+$/, "");
 
 // ===============================
@@ -84,7 +87,7 @@ router.get("/avatars", async (_req, res) => {
 });
 
 // ===============================
-// Crear un avatar desde URL (intenta varias rutas conocidas)
+// Crear un avatar desde URL
 // ===============================
 router.post("/create-avatar-from-url", async (req, res) => {
   try {
@@ -94,7 +97,7 @@ router.post("/create-avatar-from-url", async (req, res) => {
       return res.status(400).json({ error: "missing_name_or_image_url" });
     }
 
-    // 1) Si ya existe, devolverlo
+    // 1) si ya existe, reusar
     try {
       const rl = await fetch(pathJoin(A2E_BASE, "/api/v1/streaming-avatar/all_avatars"), {
         method: "GET", headers: a2eHeaders()
@@ -106,30 +109,19 @@ router.post("/create-avatar-from-url", async (req, res) => {
       }
     } catch {}
 
-    // 2) Intentos de creación (distintos tenants)
-    const candidates = [
-      { path: "/api/v1/streaming-avatar/create",        body: { name, image_url } },
-      { path: "/api/v1/streaming-avatar/create_avatar", body: { name, image_url } },
-      { path: "/api/v1/avatar/create",                  body: { name, image_url } },
-      { path: "/api/v1/avatars",                        body: { name, image_url } },
-    ];
-    const errors = [];
-    for (const c of candidates) {
-      try {
-        const url = pathJoin(A2E_BASE, c.path);
-        const r = await fetch(url, { method: "POST", headers: a2eHeaders(), body: JSON.stringify(c.body) });
-        const { data, raw, txt } = await tryJson(r);
-        if (r.ok && (data?._id || data?.data?._id)) {
-          const obj = data?._id ? data : (data?.data || data);
-          return res.json({ code: 0, created: true, data: obj });
-        }
-        errors.push({ path: c.path, status: r.status, sample: data || (raw ? String(raw).slice(0, 200) : txt?.slice(0, 200)) });
-      } catch (e) {
-        errors.push({ path: c.path, error: String(e && e.message || e) });
-      }
+    // 2) crear
+    const url = pathJoin(A2E_BASE, "/api/v1/streaming-avatar/create");
+    const r = await fetch(url, {
+      method: "POST",
+      headers: a2eHeaders(),
+      body: JSON.stringify({ name, image_url })
+    });
+    const { data, raw, txt } = await tryJson(r);
+    if (r.ok && (data?._id || data?.data?._id)) {
+      const obj = data?._id ? data : (data?.data || data);
+      return res.json({ code: 0, created: true, data: obj });
     }
-
-    return res.status(502).json({ error: "avatar_create_failed", name, image_url, tried: errors });
+    return res.status(r.status || 502).json({ error: "avatar_create_failed", sample: data || (raw ? String(raw).slice(0, 200) : txt?.slice(0, 200)) });
   } catch (e) {
     return res.status(500).json({ error: "create_avatar_from_url_error", detail: String(e && e.message || e) });
   }
@@ -159,13 +151,7 @@ router.get("/ensure-avatar-id", async (req, res) => {
 });
 
 // ===============================
-// Bootstrap masivo: crea/reusa tus 6 avatares desde /public
-// POST /api/a2e/bootstrap-avatars
-// body opcional:
-//   {
-//     base: "https://<tu-backend>/public",
-//     avatars: [{ name:"JESPANOL", file:"JESPANOL.jpeg" }, ...]
-//   }
+// Bootstrap masivo desde /public
 // ===============================
 router.post("/bootstrap-avatars", async (req, res) => {
   try {
@@ -191,7 +177,7 @@ router.post("/bootstrap-avatars", async (req, res) => {
         ];
 
     const results = [];
-    // 1) cache de existentes
+    // cache de existentes
     let existing = [];
     try {
       const r = await fetch(pathJoin(A2E_BASE, "/api/v1/streaming-avatar/all_avatars"), {
@@ -204,13 +190,11 @@ router.post("/bootstrap-avatars", async (req, res) => {
     for (const av of avatars) {
       const name = av.name;
       const image_url = `${base}/${av.file}`;
-      // si existe, reusar
       const found = existing.find(a => (a.name || "").toLowerCase() === name.toLowerCase());
       if (found?._id) {
         results.push({ name, image_url, id: found._id, created: false });
         continue;
       }
-      // crear
       const r = await fetch(pathJoin(A2E_BASE, "/api/v1/streaming-avatar/create"), {
         method: "POST",
         headers: a2eHeaders(),
@@ -262,7 +246,7 @@ router.post("/token", async (req, res) => {
       } catch {}
     }
 
-    // Si nos pasan URL y no hay id -> intentar crear on-the-fly
+    // Si pasan URL y no hay id -> intentar crear
     if (!avatar_id && avatar_url) {
       const name = avatar_name || "JESPANOL";
       const r = await fetch(pathJoin(A2E_BASE, "/api/v1/streaming-avatar/create"), {
