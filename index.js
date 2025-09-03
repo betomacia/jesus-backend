@@ -2,7 +2,7 @@
 // - OpenAI JSON-mode para /api/ask (igual al tuyo)
 // - Proxy de D-ID (/api/did/*)
 // - Proxy de ElevenLabs TTS (/api/tts)
-// - NUEVO: Proxy A2E WebRTC (/api/a2e/*)
+// - Proxy A2E Streaming Avatar (/api/a2e/*)
 
 const express = require("express");
 const cors = require("cors");
@@ -407,6 +407,9 @@ app.get("/api/welcome", (_req, res) => {
     }
   });
 });
+
+// Salud simple
+app.get("/health", (_req, res) => res.json({ ok: true }));
 
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 8080;
