@@ -1,4 +1,4 @@
-// routes/did.js — D-ID Streams proxy con “cookie echo”, captura de cookies y reintentos robustos
+// routes/did.js — D-ID Streams proxy robusto (reintentos, captura de cookies y cookie-echo)
 const express = require("express");
 const nodeFetch = require("node-fetch");
 
@@ -8,7 +8,7 @@ const DID_API_KEY = process.env.DID_API_KEY || "";
 const DID_USER = process.env.DID_USERNAME || "";
 const DID_PASS = process.env.DID_PASSWORD || "";
 
-// OJO: para Streams la base es SIN /v1
+// Base SIN /v1 para Streams
 const DID_BASE = process.env.DID_BASE || "https://api.d-id.com";
 const fetch = (...args) => nodeFetch(...args);
 
@@ -20,24 +20,22 @@ const authMode = DID_API_KEY
 const didHeaders = () => {
   const h = { "Content-Type": "application/json", Accept: "application/json" };
   if (authMode === "API_KEY") {
-    // Basic base64("APIKEY:")
-    h.Authorization = "Basic " + Buffer.from(`${DID_API_KEY}:`).toString("base64");
+    h.Authorization = "Basic " + Buffer.from(`${DID_API_KEY}:`).toString("base64"); // "APIKEY:"
   } else if (authMode === "USER_PASS") {
-    // Basic base64("user:pass")
-    h.Authorization = "Basic " + Buffer.from(`${DID_USER}:${DID_PASS}`).toString("base64");
+    h.Authorization = "Basic " + Buffer.from(`${DID_USER}:${DID_PASS}`).toString("base64"); // "user:pass"
   }
   return h;
 };
 
-// === Cookie jar en memoria por streamId (para stickiness del ALB) ===
-const cookieJar = new Map(); // streamId -> cookie (string)
+// === Cookie jar en memoria por streamId ===
+const cookieJar = new Map(); // streamId -> cookie string
 
-// Utilidades
+// Utils
 const validSess = (s) => typeof s === "string" && /^sess_/i.test(s);
 
-/** Parsea el header Set-Cookie(s) y arma:
- *  - cookie: "AWSALB=...; AWSALBCORS=...; session_id=sess_..."
- *  - session_id: "sess_..."
+/** Parsea Set-Cookie(s) y arma:
+ *  cookie: "AWSALB=...; AWSALBCORS=...; session_id=sess_..."
+ *  session_id: "sess_..."
  */
 function parseSetCookie(setCookieHeader) {
   const out = { cookie: "", session_id: "" };
@@ -56,7 +54,6 @@ function parseSetCookie(setCookieHeader) {
   return out;
 }
 
-/** Mezcla/actualiza pares clave=valor de varias cadenas Cookie */
 function mergeCookies(...cookieStrings) {
   const map = new Map();
   for (const s of cookieStrings) {
@@ -69,31 +66,31 @@ function mergeCookies(...cookieStrings) {
   return Array.from(map.entries()).map(([k,v]) => `${k}=${v}`).join("; ");
 }
 
-/** Toma cookie “eco” desde header o body */
 function takeEchoCookie(req) {
   return (req.get("x-did-cookie") || req.body?.cookie || "").trim();
 }
-
-/** Extrae session_id=sess_... desde una cookie string */
 function sessFromCookieStr(cookieStr) {
   const m = String(cookieStr || "").match(/session_id=(sess_[^;]+)/i);
   return m ? m[1] : "";
 }
-
-/** Une todos los Set-Cookie presentes (incluye múltiples y redirecciones) */
 function collectSetCookies(...responses) {
   const all = [];
   for (const r of responses) {
+    // arrays (node-fetch)
     try {
       const raw = r.headers.raw && r.headers.raw()["set-cookie"];
       if (Array.isArray(raw) && raw.length) all.push(...raw);
     } catch {}
-    const single = r.headers.get && r.headers.get("set-cookie");
-    if (single) all.push(single);
+    // single
+    try {
+      const single = r.headers.get && r.headers.get("set-cookie");
+      if (single) all.push(single);
+    } catch {}
   }
-  // Devuelve en una sola cadena para parseo simple
   return all.join(", ");
 }
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const jitter = (n) => Math.floor(n * (0.85 + Math.random() * 0.3));
 
 // Selftest
 router.get("/selftest", async (_req, res) => {
@@ -107,7 +104,7 @@ router.get("/selftest", async (_req, res) => {
 });
 
 /* =========================================================
-   1) CREAR STREAM (REINTENTOS)
+   1) CREAR STREAM (reintentos agresivos)
    POST /api/did/streams { source_url }
    -> POST https://api.d-id.com/talks/streams
    ========================================================= */
@@ -120,23 +117,22 @@ router.post("/streams", async (req, res) => {
       method: "POST",
       headers: didHeaders(),
       body: JSON.stringify({ source_url }),
-      redirect: "manual", // importante para capturar Set-Cookie en 3xx
+      redirect: "manual",
     };
 
     const tryOnce = async () => {
-      // 1ª llamada (puede ser 3xx con Set-Cookie)
       const r1 = await fetch(`${DID_BASE}/talks/streams`, baseReq);
       let finalResp = r1;
       let cookiesJoined = collectSetCookies(r1);
 
-      // Sigue hasta 3 redirecciones manuales como máximo
+      // sigue hasta 3 hops máximo
       let hops = 0;
       while (finalResp.status >= 300 && finalResp.status < 400 && hops < 3) {
         const loc = finalResp.headers.get("location");
         if (!loc) break;
-        const rn = await fetch(loc, baseReq);
-        cookiesJoined = collectSetCookies({ headers: { raw: () => ({"set-cookie": []}) }, get: () => "" }, rn, { headers: finalResp.headers, get: finalResp.headers.get }); // asegura incluir prev+nuevo
-        finalResp = rn;
+        const rN = await fetch(loc, baseReq);
+        cookiesJoined = collectSetCookies(finalResp, rN);
+        finalResp = rN;
         hops++;
       }
 
@@ -147,7 +143,7 @@ router.post("/streams", async (req, res) => {
       return { finalResp, data, cookiesJoined, raw: txt };
     };
 
-    const MAX_TRIES = 5;
+    const MAX_TRIES = 12; // subimos a 12
     let lastTxt = "", lastStatus = 0;
 
     for (let attempt = 1; attempt <= MAX_TRIES; attempt++) {
@@ -156,35 +152,43 @@ router.post("/streams", async (req, res) => {
       lastStatus = finalResp.status;
 
       if (finalResp.ok && data && data.id && data.offer) {
-        // Extrae cookies (incluido session_id si vino en alguna hop)
+        // 1) extrae cookies (si traen session_id=sess_…)
         const { cookie, session_id: sessFromCookies } = parseSetCookie(cookiesJoined);
 
-        // Corrige session_id si el body viene mal y las cookies lo traen
-        if (!validSess(data.session_id) && sessFromCookies) {
-          console.warn("[DID] Upstream session_id inválido, corrigiendo:", data.session_id, "->", sessFromCookies);
-          data.session_id = sessFromCookies;
+        // 2) corrige body si viene corrupto:
+        //    - casos corruptos traen data.session_id que empieza con "AWSALB="
+        const bodySess = data.session_id || "";
+        const looksCorrupt = /^AWSALB=/i.test(bodySess);
+
+        if (looksCorrupt) {
+          console.warn("[DID] body.session_id corrupto (AWSALB=…); ignorando valor del body en attempt", attempt);
+          data.session_id = ""; // lo invalidamos explícitamente
         }
 
-        // Si AÚN no hay session_id válido, reintenta (transitorio de ALB)
+        if (!validSess(data.session_id) && validSess(sessFromCookies)) {
+          data.session_id = sessFromCookies; // reparar con cookie
+        }
+
+        // 3) si AÚN no hay sess_ válido, reintenta (intermitencia ALB)
         if (!validSess(data.session_id || "")) {
           console.warn(`[DID] intento ${attempt}/${MAX_TRIES}: sin session_id (cookies solo ALB). Reintentando…`);
-          await new Promise(r => setTimeout(r, 150 * attempt));
+          await sleep(jitter(120 + attempt * 160)); // backoff con jitter
           continue;
         }
 
-        // Guarda/une cookie en jar y reenvía al front
+        // 4) guarda cookie merged y devuélvela al front (cookie-echo)
         if (cookie) {
           const prev = cookieJar.get(data.id) || "";
           const merged = mergeCookies(prev, cookie);
           cookieJar.set(data.id, merged);
-          data.cookie = merged; // devolvemos cookie al front (eco)
+          data.cookie = merged;
         }
 
         return res.json({ ...data, upstream_status: finalResp.status, attempts: attempt });
       }
 
-      // Si fallo HTTP, breve backoff y reintentar
-      await new Promise(r => setTimeout(r, 200 * attempt));
+      // error HTTP: backoff + retry
+      await sleep(jitter(140 + attempt * 180));
     }
 
     console.error("[DID] streams create failed", lastStatus, lastTxt || "");
@@ -198,7 +202,6 @@ router.post("/streams", async (req, res) => {
 /* =========================================================
    2) ENVIAR SDP ANSWER
    POST /api/did/streams/:id/sdp { answer, session_id, cookie? }
-   -> POST https://api.d-id.com/talks/streams/{id}/sdp
    ========================================================= */
 router.post("/streams/:id/sdp", async (req, res) => {
   try {
@@ -210,7 +213,6 @@ router.post("/streams/:id/sdp", async (req, res) => {
     const echoCookie = takeEchoCookie(req);
     const mergedCookie = mergeCookies(jarCookie, echoCookie);
 
-    // Repara session_id desde cookie si viene vacío/incorrecto
     if (!validSess(session_id || "")) session_id = sessFromCookieStr(mergedCookie);
     if (!session_id) return res.status(400).json({ error: "missing_session_id" });
 
@@ -220,7 +222,6 @@ router.post("/streams/:id/sdp", async (req, res) => {
       body: JSON.stringify({ answer, session_id })
     });
 
-    // Actualiza cookie jar si upstream setea cookies nuevas
     const setCookie = collectSetCookies(r);
     const pc = parseSetCookie(setCookie);
     if (pc.cookie) cookieJar.set(id, mergeCookies(mergedCookie, pc.cookie));
@@ -235,9 +236,8 @@ router.post("/streams/:id/sdp", async (req, res) => {
 });
 
 /* =========================================================
-   3) ENVIAR ICE (local -> upstream)
+   3) ENVIAR ICE (LOCAL)
    POST /api/did/streams/:id/ice { candidate, sdpMid?, sdpMLineIndex?, session_id, cookie? }
-   -> POST https://api.d-id.com/talks/streams/{id}/ice
    ========================================================= */
 router.post("/streams/:id/ice", async (req, res) => {
   try {
@@ -278,8 +278,7 @@ router.post("/streams/:id/ice", async (req, res) => {
 
 /* =========================================================
    3b) OBTENER ICE REMOTO
-   GET /api/did/streams/:id/ice[?session_id=...]  (+ x-did-cookie)
-   -> GET https://api.d-id.com/talks/streams/{id}/ice?session_id=...
+   GET /api/did/streams/:id/ice[?session_id=...] (+ x-did-cookie)
    ========================================================= */
 router.get("/streams/:id/ice", async (req, res) => {
   try {
@@ -293,8 +292,8 @@ router.get("/streams/:id/ice", async (req, res) => {
 
     if (!validSess(String(session_id || ""))) session_id = sessFromCookieStr(mergedCookie);
 
-    // Si aún no hay sess_, devolvemos OK "vacío"
     if (!session_id) {
+      // sin ruido: el front seguirá pollinando
       return res.status(200).json({ candidates: [] });
     }
 
@@ -327,9 +326,8 @@ router.get("/streams/:id/ice", async (req, res) => {
 });
 
 /* =========================================================
-   4) HABLAR (texto)
+   4) HABLAR
    POST /api/did/streams/:id/talk { session_id, script:{...}, cookie? }
-   -> POST https://api.d-id.com/talks/streams/{id}
    ========================================================= */
 router.post("/streams/:id/talk", async (req, res) => {
   try {
@@ -365,8 +363,7 @@ router.post("/streams/:id/talk", async (req, res) => {
 
 /* =========================================================
    5) CERRAR STREAM
-   DELETE /api/did/streams/:id  { session_id }
-   -> DELETE https://api.d-id.com/talks/streams/{id}
+   DELETE /api/did/streams/:id { session_id }
    ========================================================= */
 router.delete("/streams/:id", async (req, res) => {
   try {
@@ -387,7 +384,7 @@ router.delete("/streams/:id", async (req, res) => {
       body: JSON.stringify({ session_id })
     });
 
-    cookieJar.delete(id); // limpia jar
+    cookieJar.delete(id);
 
     const txt = await r.text().catch(() => "");
     const data = parseJSON(txt);
