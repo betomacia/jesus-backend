@@ -19,16 +19,20 @@ app.use(bodyParser.json());
 
 // ====== ESTÁTICO /public ======
 const PUBLIC_DIR = path.join(__dirname, "public");
-app.use("/public", express.static(PUBLIC_DIR, {
-  maxAge: "7d",
-  immutable: true,
-  fallthrough: true,
-}));
+app.use(
+  "/public",
+  express.static(PUBLIC_DIR, {
+    maxAge: "7d",
+    immutable: true,
+    fallthrough: true,
+  })
+);
 
-// Routers externos
+// ====== Routers externos ======
 const didRouterRaw = require("./routes/did");
 const ttsRouterRaw = require("./routes/tts");
 const a2eRouterRaw = require("./routes/a2e");
+
 const didRouter = didRouterRaw?.default || didRouterRaw;
 const ttsRouter = ttsRouterRaw?.default || ttsRouterRaw;
 const a2eRouter = a2eRouterRaw?.default || a2eRouterRaw;
@@ -37,7 +41,7 @@ app.use("/api/did", didRouter);
 app.use("/api/tts", ttsRouter);
 app.use("/api/a2e", a2eRouter);
 
-// ---- OpenAI ----
+// ====== OpenAI ======
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 /**
@@ -86,14 +90,14 @@ const responseFormat = {
         bible: {
           type: "object",
           properties: { text: { type: "string" }, ref: { type: "string" } },
-          required: ["text", "ref"]
+          required: ["text", "ref"],
         },
-        question: { type: "string" }
+        question: { type: "string" },
       },
       required: ["message", "bible"],
-      additionalProperties: false
-    }
-  }
+      additionalProperties: false,
+    },
+  },
 };
 
 // ---------- Utilidades ligeras ----------
@@ -102,8 +106,11 @@ function cleanRef(ref = "") {
 }
 function stripQuestionsFromMessage(s = "") {
   const noTrailingQLines = (s || "")
-    .split(/\n+/).map((l) => l.trim()).filter((l) => !/\?\s*$/.test(l))
-    .join("\n").trim();
+    .split(/\n+/)
+    .map((l) => l.trim())
+    .filter((l) => !/\?\s*$/.test(l))
+    .join("\n")
+    .trim();
   return noTrailingQLines.replace(/[¿?]+/g, "").trim();
 }
 function limitWords(s = "", max = 60) {
@@ -119,13 +126,15 @@ function compactHistory(history = [], keep = 8, maxLen = 260) {
 }
 function extractRecentAssistantQuestions(history = [], maxMsgs = 5) {
   const rev = [...(history || [])].reverse();
-  const qs = []; let seen = 0;
+  const qs = [];
+  let seen = 0;
   for (const h of rev) {
     if (!/^Asistente:/i.test(h)) continue;
     const text = h.replace(/^Asistente:\s*/i, "").trim();
     const m = text.match(/([^?]*\?)\s*$/m);
     if (m && m[1]) qs.push(normalizeQuestion(m[1]));
-    seen++; if (seen >= maxMsgs) break;
+    seen++;
+    if (seen >= maxMsgs) break;
   }
   return [...new Set(qs)].slice(0, 5);
 }
@@ -185,9 +194,13 @@ function detectSupportNP(s = "") {
   if (tokens.length > 6) return null;
   const low = raw.toLowerCase();
   const art = /^(mi|mis|una|un|el|la)\s+(.+)$/i;
-  let core = low; let label = raw;
+  let core = low;
+  let label = raw;
   const m = low.match(art);
-  if (m) { core = m[2].trim(); label = raw; }
+  if (m) {
+    core = m[2].trim();
+    label = raw;
+  }
   const first = core.split(/\s+/)[0].replace(/[.,;:!?"'()]/g, "");
   if (!first) return null;
   if (!SUPPORT_WORDS.includes(first)) return null;
@@ -196,7 +209,11 @@ function detectSupportNP(s = "") {
 
 // ---------- Memoria por usuario ----------
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
-async function ensureDataDir() { try { await fs.mkdir(DATA_DIR, { recursive: true }); } catch {} }
+async function ensureDataDir() {
+  try {
+    await fs.mkdir(DATA_DIR, { recursive: true });
+  } catch {}
+}
 function memPath(uid) {
   const safe = String(uid || "anon").replace(/[^a-z0-9_-]/gi, "_");
   return path.join(DATA_DIR, `mem_${safe}.json`);
@@ -216,17 +233,22 @@ async function writeUserMemory(userId, mem) {
 }
 
 // ---------- OpenAI helpers ----------
-async function completionWithTimeout({ messages, temperature = 0.6, max_tokens = 220, timeoutMs = 12000 }) {
+async function completionWithTimeout({
+  messages,
+  temperature = 0.6,
+  max_tokens = 220,
+  timeoutMs = 12000,
+}) {
   const call = openai.chat.completions.create({
     model: "gpt-4o",
     temperature,
     max_tokens,
     messages,
-    response_format: responseFormat
+    response_format: responseFormat,
   });
   return await Promise.race([
     call,
-    new Promise((_, reject) => setTimeout(() => reject(new Error("TIMEOUT")), timeoutMs))
+    new Promise((_, reject) => setTimeout(() => reject(new Error("TIMEOUT")), timeoutMs)),
   ]);
 }
 
@@ -240,16 +262,22 @@ const bibleOnlyFormat = {
         bible: {
           type: "object",
           properties: { text: { type: "string" }, ref: { type: "string" } },
-          required: ["text", "ref"]
-        }
+          required: ["text", "ref"],
+        },
       },
       required: ["bible"],
-      additionalProperties: false
-    }
-  }
+      additionalProperties: false,
+    },
+  },
 };
 
-async function regenerateBibleAvoiding({ persona, message, frame, bannedRefs = [], lastRef = "" }) {
+async function regenerateBibleAvoiding({
+  persona,
+  message,
+  frame,
+  bannedRefs = [],
+  lastRef = "",
+}) {
   const sys = `Devuelve SOLO JSON con {"bible":{"text":"…","ref":"Libro 0:0"}} en RVR1909.
 - Ajusta la cita al tema y micro-pasos.
 - Evita ambigüedad “hijo” (familiar) vs “el Hijo” (Cristo) salvo pertinencia teológica explícita.
@@ -267,12 +295,16 @@ async function regenerateBibleAvoiding({ persona, message, frame, bannedRefs = [
     temperature: 0.4,
     max_tokens: 120,
     messages: [{ role: "system", content: sys }, { role: "user", content: usr }],
-    response_format: bibleOnlyFormat
+    response_format: bibleOnlyFormat,
   });
 
   const content = r?.choices?.[0]?.message?.content || "{}";
   let data = {};
-  try { data = JSON.parse(content); } catch { data = {}; }
+  try {
+    data = JSON.parse(content);
+  } catch {
+    data = {};
+  }
   const text = (data?.bible?.text || "").toString().trim();
   const ref = cleanRef((data?.bible?.ref || "").toString());
   return text && ref ? { text, ref } : null;
@@ -287,15 +319,24 @@ async function askLLM({ persona, message, history = [], userId = "anon" }) {
   const mainSubject = detectMainSubject(message);
   const frame = {
     topic_primary: topic,
-    main_subject: mem.frame?.topic_primary === topic ? (mem.frame?.main_subject || mainSubject) : mainSubject,
-    support_persons: support ? [{ label: support.label }] : (mem.frame?.topic_primary === topic ? (mem.frame?.support_persons || []) : []),
+    main_subject:
+      mem.frame?.topic_primary === topic
+        ? mem.frame?.main_subject || mainSubject
+        : mainSubject,
+    support_persons: support
+      ? [{ label: support.label }]
+      : mem.frame?.topic_primary === topic
+      ? mem.frame?.support_persons || []
+      : [],
   };
   mem.frame = frame;
 
   const lastRefFromHistory = extractRecentBibleRefs(history, 1)[0] || "";
   const lastRef = mem.last_bible_ref || lastRefFromHistory || "";
   const recentRefs = extractRecentBibleRefs(history, 3);
-  const bannedRefs = Array.from(new Set([...(mem.last_bible_refs || []), lastRef, ...recentRefs].filter(Boolean))).slice(-5);
+  const bannedRefs = Array.from(
+    new Set([...(mem.last_bible_refs || []), lastRef, ...recentRefs].filter(Boolean))
+  ).slice(-5);
 
   const recentQs = extractRecentAssistantQuestions(history, 5);
 
@@ -306,18 +347,28 @@ async function askLLM({ persona, message, history = [], userId = "anon" }) {
     `FRAME: ${JSON.stringify(frame)}`,
     `last_bible_ref: ${lastRef || "(n/a)"}`,
     `banned_refs:\n- ${bannedRefs.join("\n- ") || "(none)"}`,
-    recentQs.length ? `ultimas_preguntas: ${recentQs.join(" | ")}` : "ultimas_preguntas: (ninguna)",
-    shortHistory.length ? `Historial: ${shortHistory.join(" | ")}` : "Historial: (sin antecedentes)"
+    recentQs.length
+      ? `ultimas_preguntas: ${recentQs.join(" | ")}`
+      : "ultimas_preguntas: (ninguna)",
+    shortHistory.length
+      ? `Historial: ${shortHistory.join(" | ")}`
+      : "Historial: (sin antecedentes)",
   ].join("\n");
 
   const resp = await completionWithTimeout({
     messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: header }],
-    temperature: 0.6, max_tokens: 220, timeoutMs: 12000
+    temperature: 0.6,
+    max_tokens: 220,
+    timeoutMs: 12000,
   });
 
   const content = resp?.choices?.[0]?.message?.content || "{}";
   let data = {};
-  try { data = JSON.parse(content); } catch { data = { message: content }; }
+  try {
+    data = JSON.parse(content);
+  } catch {
+    data = { message: content };
+  }
 
   let msg = stripQuestionsFromMessage((data?.message || "").toString());
   msg = limitWords(msg, 60);
@@ -328,7 +379,10 @@ async function askLLM({ persona, message, history = [], userId = "anon" }) {
   const hijoOnly = /\bhijo\b/i.test(message) && !/(Jes[uú]s|Cristo)/i.test(message);
   if (!ref || bannedRefs.includes(ref) || (hijoOnly && /Juan\s*8:36/i.test(ref))) {
     const alt = await regenerateBibleAvoiding({ persona, message, frame, bannedRefs, lastRef });
-    if (alt) { ref = alt.ref; text = alt.text; }
+    if (alt) {
+      ref = alt.ref;
+      text = alt.text;
+    }
   }
 
   let question = (data?.question || "").toString().trim();
@@ -338,16 +392,25 @@ async function askLLM({ persona, message, history = [], userId = "anon" }) {
   if (!question || isRepeat || malformed) question = "";
 
   mem.last_bible_ref = ref || mem.last_bible_ref || "";
-  mem.last_bible_refs = Array.from(new Set([...(mem.last_bible_refs || []), ref].filter(Boolean))).slice(-5);
+  mem.last_bible_refs = Array.from(
+    new Set([...(mem.last_bible_refs || []), ref].filter(Boolean))
+  ).slice(-5);
   if (question) {
-    mem.last_questions = Array.from(new Set([...(mem.last_questions || []), normalizedQ])).slice(-6);
+    mem.last_questions = Array.from(
+      new Set([...(mem.last_questions || []), normalizedQ])
+    ).slice(-6);
   }
   await writeUserMemory(userId, mem);
 
   return {
     message: msg || "Estoy contigo. Demos un paso pequeño y realista hoy.",
-    bible: { text: text || "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu.", ref: ref || "Salmos 34:18" },
-    ...(question ? { question } : {})
+    bible: {
+      text:
+        text ||
+        "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu.",
+      ref: ref || "Salmos 34:18",
+    },
+    ...(question ? { question } : {}),
   };
 }
 
@@ -360,20 +423,22 @@ app.post("/api/ask", async (req, res) => {
       message: (data?.message || "").toString().trim(),
       bible: {
         text: (data?.bible?.text || "").toString().trim(),
-        ref: (data?.bible?.ref || "").toString().trim()
+        ref: (data?.bible?.ref || "").toString().trim(),
       },
-      ...(data?.question ? { question: data.question } : {})
+      ...(data?.question ? { question: data.question } : {}),
     };
     res.setHeader("Content-Type", "application/json; charset=utf-8");
     res.status(200).json(out);
   } catch (err) {
     console.error("ASK ERROR:", err);
     res.status(200).json({
-      message: "La paz sea contigo. Compárteme en pocas palabras lo esencial, y seguimos paso a paso.",
+      message:
+        "La paz sea contigo. Compárteme en pocas palabras lo esencial, y seguimos paso a paso.",
       bible: {
-        text: "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu.",
-        ref: "Salmos 34:18"
-      }
+        text:
+          "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu.",
+        ref: "Salmos 34:18",
+      },
     });
   }
 });
@@ -381,7 +446,7 @@ app.post("/api/ask", async (req, res) => {
 app.get("/api/welcome", (_req, res) => {
   res.json({
     message: "La paz esté contigo. Estoy aquí para escucharte y acompañarte con calma.",
-    bible: { text: "El Señor es mi luz y mi salvación; ¿de quién temeré?", ref: "Salmos 27:1" }
+    bible: { text: "El Señor es mi luz y mi salvación; ¿de quién temeré?", ref: "Salmos 27:1" },
   });
 });
 
