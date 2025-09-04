@@ -3,13 +3,15 @@
 // A2E_BASE=https://api.a2e.ai
 // A2E_API_KEY=TU_TOKEN_A2E
 // A2E_AUTH_MODE=bearer
-// A2E_API_KEY_HEADER=Authorization   (por defecto)
+// A2E_API_KEY_HEADER=Authorization
 // PUBLIC_BASE=https://TU-APP.up.railway.app/public
-// (opcionales, por si tu cuenta usa otros paths)
+//
+// (opcionales, por si tu cuenta usa paths alternativos)
 // A2E_CHARACTER_LIST=/api/v1/anchor/character_list
 // A2E_CREATE_FROM_IMAGE=/api/v1/userVideoTwin/startTraining
 // A2E_AVATARS_PATH=/api/v1/streaming-avatar/all_avatars
 // A2E_SPEAK_PATHS=/api/v1/streaming-avatar/direct-speak,/api/v1/streaming-avatar/speak
+// A2E_PROGRESS_PATH=/api/v1/userVideoTwin/queryProgress   <-- si tu cuenta expone progreso por task_id
 
 const express = require("express");
 const fetch = (...args) => import("node-fetch").then(({ default: f }) => f(...args));
@@ -29,6 +31,7 @@ const A2E_SPEAK_PATHS  = (process.env.A2E_SPEAK_PATHS ||
 
 const A2E_CHARACTER_LIST    = process.env.A2E_CHARACTER_LIST    || "/api/v1/anchor/character_list";
 const A2E_CREATE_FROM_IMAGE = process.env.A2E_CREATE_FROM_IMAGE || "/api/v1/userVideoTwin/startTraining";
+const A2E_PROGRESS_PATH     = process.env.A2E_PROGRESS_PATH     || "/api/v1/userVideoTwin/queryProgress";
 
 function a2eHeaders(extra = {}) {
   const h = { Accept: "application/json", "Content-Type": "application/json", ...extra };
@@ -177,6 +180,7 @@ router.get("/list-all", async (_req, res) => {
 router.get("/ensure-avatar", async (req, res) => {
   try {
     if (!mustBaseOK(res)) return;
+
     const name = String(req.query.name || "jesus-es").trim();
     const img  = String(req.query.image || "JESPANOL.jpeg").trim();
 
@@ -193,7 +197,7 @@ router.get("/ensure-avatar", async (req, res) => {
         const ltxt = await lr.text().catch(()=> "");
         let lj = null; try { lj = JSON.parse(ltxt); } catch {}
         const arr = (lj?.data && Array.isArray(lj.data)) ? lj.data : [];
-        const found = arr.find((x) => x?.name === name && (x?._id || x?.id));
+        const found = arr.find((x) => String(x?.name || "").trim() === name && (x?._id || x?.id));
         if (found) {
           const id = found._id || found.id;
           return res.json({ avatar_id: id, pending: false, from: p });
@@ -201,7 +205,7 @@ router.get("/ensure-avatar", async (req, res) => {
       } catch {}
     }
 
-    // 2) crear si no existe
+    // 2) crear si no existe aún
     if (!PUBLIC_BASE) {
       return res.status(500).json({ error: "PUBLIC_BASE_missing", hint: "Define PUBLIC_BASE (https://TU-APP/public)" });
     }
@@ -220,9 +224,16 @@ router.get("/ensure-avatar", async (req, res) => {
         });
         const ctxt = await cr.text().catch(() => "");
         let cj = null; try { cj = JSON.parse(ctxt); } catch {}
-        last = { path: p, status: cr.status, body: cj || ctxt.slice(0, 300) };
+
+        // Intenta extraer task_id con distintos nombres comunes
+        const task_id =
+          (cj && (cj.task_id || cj.taskId || cj.job_id || cj.queue_id)) || null;
+
+        last = { path: p, status: cr.status, body: cj || ctxt.slice(0, 300), task_id };
+
+        // Muchos endpoints devuelven 200/202 incluso en cola
         if (cr.ok && (!cj || typeof cj.code !== "number" || cj.code === 0)) {
-          return res.json({ pending: true, path: p, note: "entrenando; vuelve a consultar en 30-60s" });
+          return res.json({ pending: true, path: p, note: "entrenando; vuelve a consultar en 30-60s", ...(task_id ? { task_id } : {}) });
         }
       } catch (e) {
         last = { path: p, error: String(e?.message || e) };
@@ -231,6 +242,66 @@ router.get("/ensure-avatar", async (req, res) => {
     return res.status(502).json({ error: "create_failed", last });
   } catch (e) {
     res.status(500).json({ error: "ensure_avatar_failed", detail: String(e?.message || e) });
+  }
+});
+
+// --- ENSURE-AVATAR STATUS: verifica si ya existe o consulta progreso por task_id ---
+router.get("/ensure-avatar/status", async (req, res) => {
+  try {
+    if (!mustBaseOK(res)) return;
+
+    const name = String(req.query.name || "").trim();
+    const task_id = String(req.query.task_id || req.query.taskId || "").trim();
+
+    // 1) Comprobar si YA existe por nombre (método más fiable)
+    if (name) {
+      const listPaths = [
+        A2E_CHARACTER_LIST,
+        "/api/v1/anchor/list",
+        "/api/v1/streaming-avatar/anchor_list",
+        A2E_AVATARS_PATH,
+      ];
+      for (const p of listPaths) {
+        try {
+          const lr = await fetch(join(A2E_BASE, p), { method: "GET", headers: a2eHeaders() });
+          const ltxt = await lr.text().catch(()=> "");
+          let lj = null; try { lj = JSON.parse(ltxt); } catch {}
+          const arr = (lj?.data && Array.isArray(lj.data)) ? lj.data : [];
+          const found = arr.find((x) => String(x?.name || "").trim() === name && (x?._id || x?.id));
+          if (found) {
+            const id = found._id || found.id;
+            return res.json({ pending: false, avatar_id: id, from: p });
+          }
+        } catch {}
+      }
+    }
+
+    // 2) (Opcional) Si nos dieron task_id, intenta consultar progreso
+    if (task_id) {
+      try {
+        const pr = await fetch(join(A2E_BASE, A2E_PROGRESS_PATH), {
+          method: "GET",
+          headers: a2eHeaders(),
+        });
+        // Muchas cuentas requieren query param: /queryProgress?task_id=...
+        // Intento #2 con query param:
+        const pr2 = await fetch(join(A2E_BASE, `${A2E_PROGRESS_PATH}?task_id=${encodeURIComponent(task_id)}`), {
+          method: "GET",
+          headers: a2eHeaders(),
+        }).catch(() => null);
+
+        const txt = pr2 ? await pr2.text().catch(()=> "") : await pr.text().catch(()=> "");
+        let pj = null; try { pj = JSON.parse(txt); } catch {}
+        return res.json({ pending: true, task_id, progress_raw: pj || txt.slice(0, 200) });
+      } catch (e) {
+        return res.json({ pending: true, task_id, progress_error: String(e?.message || e) });
+      }
+    }
+
+    // 3) Si no hay name ni task_id válidos, seguimos pending
+    return res.json({ pending: true, hint: "pasa ?name=jesus-es o ?task_id=..." });
+  } catch (e) {
+    res.status(500).json({ error: "ensure_avatar_status_failed", detail: String(e?.message || e) });
   }
 });
 
