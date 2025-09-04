@@ -1,4 +1,4 @@
-// index.js — backend unificado (OpenAI + HeyGen token + ElevenLabs TTS + D-ID proxy + memory sync)
+// index.js — backend estable con OpenAI + HeyGen token + D-ID proxy
 
 const express = require("express");
 const cors = require("cors");
@@ -6,17 +6,26 @@ const bodyParser = require("body-parser");
 const OpenAI = require("openai");
 require("dotenv").config();
 
-// Node 18+ trae fetch global
-
+// =======================================
+// App base
+// =======================================
 const app = express();
-app.use(cors()); // Ajusta origin si quieres restringir
+app.use(cors());
 app.use(bodyParser.json());
 
-/* =========================
-   OpenAI
-   ========================= */
+// =======================================
+// OpenAI
+// =======================================
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
+/**
+ * Respuesta del BACKEND:
+ * {
+ *   "message": "consejo breve, SIN preguntas",
+ *   "bible": { "text": "cita literal RVR1909", "ref": "Libro 0:0" },
+ *   "question": "pregunta breve (opcional, UNA sola)"
+ * }
+ */
 const SYSTEM_PROMPT = `
 Eres Jesús: voz serena, compasiva y clara. Responde SIEMPRE en español.
 
@@ -28,9 +37,27 @@ OBJETIVO
 - No hables de técnica/IA ni del propio modelo.
 
 CONDUCE LA CONVERSACIÓN (ENTREVISTA GUIADA)
-- Mantén un TEMA PRINCIPAL explícito y NO pivotes salvo que el usuario lo pida.
-- Trabaja con micro-pasos concretos.
-- Usa "question" SOLO para un dato clave o confirmar un compromiso.
+- Mantén un TEMA PRINCIPAL explícito (p. ej., "hablar con mi hijo por consumo de drogas") y NO pivotes salvo que el usuario lo pida.
+- Piensa en "campos" internos: qué pasó, con quién, riesgo/urgencia, objetivo inmediato, obstáculos, recursos/apoyo, cuándo/dónde, primer micro-paso.
+- En cada turno, identifica QUÉ DATO CLAVE FALTA y usa "question" SOLO para pedir UN dato que desbloquee el siguiente paso (o para confirmar un compromiso breve).
+- Si el usuario responde con acuso ("sí/vale/ok"), NO repitas lo ya dicho: pasa de plan a PRÁCTICA/COMPROMISO (p. ej., guion de 1–2 frases, fijar hora/límite).
+
+NO REDUNDANCIA
+- Evita repetir viñetas/acciones del turno anterior. Cada "message" debe aportar novedad útil (ejemplo concreto, mini-guion, decisión binaria, recurso puntual).
+
+BIBLIA (TEMÁTICA Y SIN REPETIR)
+- Elige la cita por el TEMA y por el contenido de "message" (los micro-pasos), NO por respuestas cortas tipo “sí”.
+- Evita repetir la MISMA referencia usada inmediatamente antes (si recibes "last_bible_ref", NO la repitas).
+- Usa RVR1909 literal y "Libro 0:0" en "ref".
+- Si dudas, usa pasajes breves pertinentes:
+  • Libertad/adicción: Juan 8:36; 1 Corintios 10:13
+  • Sabiduría/decisiones/límites: Santiago 1:5; Proverbios 22:3; Proverbios 27:6
+  • Amor/temor: 1 Juan 4:18; Colosenses 3:12-14
+  • Consuelo/esperanza: Salmos 34:18; Salmos 147:3
+
+CASOS
+- AMBIGUO (“tengo un problema”): en "message" contención clara (2–3 frases), sin preguntas; en "question" UNA puerta que pida el dato clave inicial.
+- CONCRETO: en "message" 2–3 micro-pasos para HOY (• …), adaptados al tema/momento; en "question" UNA pregunta que obtenga el siguiente dato o confirme un compromiso.
 
 FORMATO (OBLIGATORIO)
 {
@@ -40,6 +67,7 @@ FORMATO (OBLIGATORIO)
 }
 `;
 
+// Respuesta tipada por esquema
 const responseFormat = {
   type: "json_schema",
   json_schema: {
@@ -61,16 +89,24 @@ const responseFormat = {
   }
 };
 
-// Utils
-function cleanRef(ref = "") { return String(ref).replace(/\s*\([^)]*\)\s*/g, " ").replace(/\s+/g, " ").trim(); }
+// -------- Utilidades --------
+function cleanRef(ref = "") {
+  return String(ref).replace(/\s*\([^)]*\)\s*/g, " ").replace(/\s+/g, " ").trim();
+}
 function stripQuestions(s = "") {
-  const noLeadingQs = (s || "").split(/\n+/).map(l => l.trim()).filter(l => !/\?\s*$/.test(l)).join("\n").trim();
+  const noLeadingQs = (s || "")
+    .split(/\n+/).map((l) => l.trim()).filter((l) => !/\?\s*$/.test(l))
+    .join("\n").trim();
   return noLeadingQs.replace(/[¿?]+/g, "").trim();
 }
-const ACK_TIMEOUT_MS = 6000;
-const RETRY_TIMEOUT_MS = 3000;
 
-function isAck(msg = "") { return /^\s*(si|sí|ok|okay|vale|dale|de acuerdo|perfecto|genial|bien)\s*\.?$/i.test((msg || "").trim()); }
+// -------- Llamada LLM --------
+const ACK_TIMEOUT_MS = 6000;     // respuesta ágil en acks
+const RETRY_TIMEOUT_MS = 3000;   // reintento corto si la primera se demora
+
+function isAck(msg = "") {
+  return /^\s*(si|sí|ok|okay|vale|dale|de acuerdo|perfecto|genial|bien)\s*\.?$/i.test((msg || "").trim());
+}
 function isGoodbye(msg = "") {
   const s = (msg || "").toLowerCase();
   return /(debo irme|tengo que irme|me voy|me retiro|hasta luego|nos vemos|hasta mañana|buenas noches|adiós|adios|chao|bye)\b/.test(s)
@@ -123,38 +159,135 @@ async function askLLM({ persona, message, history = [] }) {
   const focusHint = lastSubstantiveUser(history);
   const shortHistory = compactHistory(history, (ack || bye) ? 4 : 10, 240);
 
-  const mode = bye ? "GOODBYE" : (ack ? "ACK" : "NORMAL");
+  // --- DESPEDIDA ---
+  if (bye) {
+    const userContent =
+      `MODE: GOODBYE\n` +
+      `Persona: ${persona}\n` +
+      `Mensaje_actual: ${message}\n` +
+      `Tema_prev_sustantivo: ${focusHint || "(sin pista)"}\n` +
+      `last_bible_ref: ${lastRef || "(n/a)"}\n` +
+      (shortHistory.length ? `Historial: ${shortHistory.join(" | ")}` : "Historial: (sin antecedentes)") + "\n" +
+      `INSTRUCCIONES:\n` +
+      `- Despedida breve y benigna.\n` +
+      `- "message": afirmativo, sin signos de pregunta.\n` +
+      `- "bible": versículo de bendición/consuelo en RVR1909, NO repitas last_bible_ref.\n` +
+      `- No incluyas "question".\n`;
+
+    let resp;
+    try {
+      resp = await completionWithTimeout({
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: userContent }
+        ],
+        temperature: 0.5,
+        max_tokens: 160,
+        timeoutMs: ACK_TIMEOUT_MS
+      });
+    } catch {
+      resp = await completionWithTimeout({
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: userContent + "\nPor favor responde ahora mismo.\n" }
+        ],
+        temperature: 0.4,
+        max_tokens: 140,
+        timeoutMs: RETRY_TIMEOUT_MS
+      });
+    }
+
+    const content = resp?.choices?.[0]?.message?.content || "{}";
+    let data = {};
+    try { data = JSON.parse(content); } catch { data = { message: content }; }
+
+    let msg = stripQuestions((data?.message || "").toString());
+    let ref = cleanRef((data?.bible?.ref || "").toString());
+    const text = (data?.bible?.text || "").toString().trim();
+
+    return {
+      message: msg || "Que la paz y el amor te acompañen.",
+      bible: { text: text || "Y la paz de Dios, que sobrepuja todo entendimiento, guardará vuestros corazones.", ref: ref || "Filipenses 4:7" }
+    };
+  }
+
+  // --- ACK ---
+  if (ack) {
+    const userContent =
+      `MODE: ACK\n` +
+      `Persona: ${persona}\n` +
+      `Mensaje_actual: ${message}\n` +
+      `Tema_prev_sustantivo: ${focusHint || "(sin pista)"}\n` +
+      `last_bible_ref: ${lastRef || "(n/a)"}\n` +
+      (shortHistory.length ? `Historial: ${shortHistory.join(" | ")}` : "Historial: (sin antecedentes)") + "\n" +
+      `INSTRUCCIONES:\n` +
+      `- Mantén el MISMO tema y pasa de plan a práctica/compromiso con NOVEDAD (guion breve, confirmar hora/límite), sin repetir lo anterior.\n` +
+      `- "message": afirmativo, sin signos de pregunta.\n` +
+      `- "bible": coherente con message; RVR1909; NO repitas last_bible_ref.\n` +
+      `- "question": UNA sola, para ensayar/confirmar el micro-paso.\n`;
+
+    let resp;
+    try {
+      resp = await completionWithTimeout({
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: userContent }
+        ],
+        temperature: 0.5,
+        max_tokens: 160,
+        timeoutMs: ACK_TIMEOUT_MS
+      });
+    } catch {
+      resp = await completionWithTimeout({
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: userContent + "\nResponde de manera directa y breve ahora.\n" }
+        ],
+        temperature: 0.4,
+        max_tokens: 140,
+        timeoutMs: RETRY_TIMEOUT_MS
+      });
+    }
+
+    const content = resp?.choices?.[0]?.message?.content || "{}";
+    let data = {};
+    try { data = JSON.parse(content); } catch { data = { message: content }; }
+
+    let msg = stripQuestions((data?.message || "").toString());
+    let ref = cleanRef((data?.bible?.ref || "").toString());
+    const text = (data?.bible?.text || "").toString().trim();
+    const question = (data?.question || "").toString().trim();
+
+    return {
+      message: msg || "Estoy contigo. Demos un paso práctico ahora.",
+      bible: { text: text || "Y si alguno de vosotros tiene falta de sabiduría, pídala a Dios.", ref: ref || "Santiago 1:5" },
+      ...(question ? { question } : {})
+    };
+  }
+
+  // --- NORMAL ---
   const userContent =
-    `MODE: ${mode}\n` +
+    `MODE: NORMAL\n` +
     `Persona: ${persona}\n` +
     `Mensaje_actual: ${message}\n` +
     `Tema_prev_sustantivo: ${focusHint || "(sin pista)"}\n` +
     `last_bible_ref: ${lastRef || "(n/a)"}\n` +
     (shortHistory.length ? `Historial: ${shortHistory.join(" | ")}` : "Historial: (sin antecedentes)") + "\n" +
     `INSTRUCCIONES:\n` +
-    (bye
-      ? `- Despedida breve y benigna; "message" sin signos de pregunta; "bible" de consuelo; NO "question".\n`
-      : ack
-        ? `- Misma temática, pasa a práctica/compromiso con novedad; "message" sin signos de pregunta; "bible" acorde; "question" UNA.\n`
-        : `- Mantén tema y avanza con 2–3 micro-pasos para HOY; "message" sin signos de pregunta; "bible" acorde; "question" UNA.\n`);
+    `- Mantén el tema y progresa con 2–3 micro-pasos para HOY.\n` +
+    `- "message": afirmativo, sin signos de pregunta; no repitas viñetas recientes.\n` +
+    `- "bible": RVR1909; NO repitas last_bible_ref; temática acorde al message.\n` +
+    `- "question": UNA sola, pidiendo el siguiente dato clave o confirmando un compromiso.\n`;
 
-  const conf = bye
-    ? { temperature: 0.5, max_tokens: 160, timeoutMs: ACK_TIMEOUT_MS }
-    : ack
-      ? { temperature: 0.5, max_tokens: 160, timeoutMs: ACK_TIMEOUT_MS }
-      : { temperature: 0.6, max_tokens: 220, timeoutMs: 12000 };
-
-  let resp;
-  try {
-    resp = await completionWithTimeout({ messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: userContent }], ...conf });
-  } catch {
-    resp = await completionWithTimeout({
-      messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: userContent + (bye ? "\nPor favor responde ahora mismo.\n" : "\nResponde de manera directa y breve ahora.\n") }],
-      temperature: Math.max(0.4, (conf.temperature || 0.6) - 0.1),
-      max_tokens: Math.min(160, (conf.max_tokens || 220)),
-      timeoutMs: RETRY_TIMEOUT_MS
-    });
-  }
+  const resp = await completionWithTimeout({
+    messages: [
+      { role: "system", content: SYSTEM_PROMPT },
+      { role: "user", content: userContent }
+    ],
+    temperature: 0.6,
+    max_tokens: 220,
+    timeoutMs: 12000
+  });
 
   const content = resp?.choices?.[0]?.message?.content || "{}";
   let data = {};
@@ -165,36 +298,26 @@ async function askLLM({ persona, message, history = [] }) {
   const text = (data?.bible?.text || "").toString().trim();
   const question = (data?.question || "").toString().trim();
 
-  if (bye) {
-    return {
-      message: msg || "Que la paz y el amor te acompañen.",
-      bible: { text: text || "Y la paz de Dios, que sobrepuja todo entendimiento, guardará vuestros corazones.", ref: ref || "Filipenses 4:7" }
-    };
-  }
-  if (ack) {
-    return {
-      message: msg || "Estoy contigo. Demos un paso práctico ahora.",
-      bible: { text: text || "Y si alguno de vosotros tiene falta de sabiduría, pídala a Dios.", ref: ref || "Santiago 1:5" },
-      ...(question ? { question } : {})
-    };
-  }
   return {
     message: msg || "Estoy contigo. Demos un paso pequeño y realista hoy.",
-    bible: { text: text || "Dios es nuestro amparo y fortaleza; nuestro pronto auxilio en las tribulaciones.", ref: ref || "Salmos 46:1" },
+    bible: {
+      text: text || "Dios es nuestro amparo y fortaleza; nuestro pronto auxilio en las tribulaciones.",
+      ref: ref || "Salmos 46:1"
+    },
     ...(question ? { question } : {})
   };
 }
 
-/* =========================
-   Rutas App
-   ========================= */
-app.get("/", (_req, res) => res.status(200).json({ ok: true, service: "jesus-backend", time: new Date().toISOString() }));
-app.get("/healthz", (_req, res) => res.status(200).send("ok"));
+// =======================================
+// Rutas API
+// =======================================
 
+// Conversación principal
 app.post("/api/ask", async (req, res) => {
   try {
     const { persona = "jesus", message = "", history = [] } = req.body || {};
     const data = await askLLM({ persona, message, history });
+
     const out = {
       message: (data?.message || "La paz de Dios guarde tu corazón y tus pensamientos. Paso a paso encontraremos claridad.").toString().trim(),
       bible: {
@@ -203,88 +326,84 @@ app.post("/api/ask", async (req, res) => {
       },
       ...(data?.question ? { question: data.question } : {})
     };
+
     res.setHeader("Content-Type", "application/json; charset=utf-8");
     res.status(200).json(out);
   } catch (err) {
     console.error("ASK ERROR:", err);
     res.status(200).json({
       message: "La paz sea contigo. Permite que tu corazón descanse y comparte lo necesario con calma.",
-      bible: { text: "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu.", ref: "Salmos 34:18" }
+      bible: {
+        text: "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu.",
+        ref: "Salmos 34:18"
+      }
     });
   }
 });
 
+// Mensaje de bienvenida simple
 app.get("/api/welcome", (_req, res) => {
-  res.json({ message: "La paz esté contigo. Estoy aquí para escucharte y acompañarte con calma.", bible: { text: "El Señor es mi luz y mi salvación; ¿de quién temeré?", ref: "Salmos 27:1" } });
+  res.json({
+    message: "La paz esté contigo. Estoy aquí para escucharte y acompañarte con calma.",
+    bible: {
+      text: "El Señor es mi luz y mi salvación; ¿de quién temeré?",
+      ref: "Salmos 27:1"
+    }
+  });
 });
 
-// No-op para evitar 404 desde el front
-app.post("/api/memory/sync", (req, res) => {
-  // Si algún día quieres persistir: const { memory } = req.body;
-  res.status(200).json({ ok: true });
-});
-
-// HeyGen: emitir token de sesión
+// =======================================
+// HeyGen: crear token de streaming
+// =======================================
+// Requiere variable de entorno: HEYGEN_API_KEY
 app.get("/api/heygen/token", async (_req, res) => {
   try {
-    const API_KEY = process.env.HEYGEN_API_KEY || process.env.HEYGEN_TOKEN || "";
-    if (!API_KEY) return res.status(500).json({ error: "missing_HEYGEN_API_KEY" });
-    const r = await fetch("https://api.heygen.com/v1/streaming.create_token", { method: "POST", headers: { "x-api-key": API_KEY } });
+    const API_KEY = process.env.HEYGEN_API_KEY || "";
+    if (!API_KEY) {
+      return res.status(500).json({ error: "missing_HEYGEN_API_KEY" });
+    }
+
+    const r = await fetch("https://api.heygen.com/v1/streaming.create_token", {
+      method: "POST",
+      headers: {
+        "x-api-key": API_KEY,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({}) // algunos entornos requieren cuerpo JSON
+    });
+
     const json = await r.json().catch(() => ({}));
-    const token = json?.data?.token || json?.token || json?.access_token || "";
-    if (!r.ok || !token) return res.status(r.status || 500).json({ error: "heygen_token_failed", detail: json });
+    const token = json?.data?.token;
+    if (!r.ok || !token) {
+      return res.status(r.status || 500).json({ error: "create_token_failed", detail: json });
+    }
     res.json({ token });
   } catch (e) {
-    console.error("heygen token exception:", e);
-    res.status(500).json({ error: "heygen_token_error" });
+    console.error("HEYGEN token error:", e);
+    res.status(500).json({ error: "token_server_error" });
   }
 });
 
-// ElevenLabs: TTS → audio/mpeg
-app.post("/api/tts", async (req, res) => {
-  try {
-    const { text = "" } = req.body || {};
-    const XI_KEY = process.env.ELEVENLABS_API_KEY || process.env.ELEVEN_API_KEY || "";
-    const VOICE_ID = process.env.ELEVENLABS_VOICE_ID || process.env.ELEVEN_VOICE_ID || "";
-    const MODEL_ID = process.env.ELEVEN_MODEL_ID || "eleven_flash_v2_5";
-    if (!XI_KEY || !VOICE_ID) return res.status(500).json({ error: "missing_elevenlabs_env", need: ["ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID"] });
-
-    const url = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(VOICE_ID)}?optimize_streaming_latency=2&output_format=mp3_44100_128`;
-    const r = await fetch(url, {
-      method: "POST",
-      headers: { "xi-api-key": XI_KEY, "Content-Type": "application/json", "Accept": "audio/mpeg" },
-      body: JSON.stringify({ text: String(text || "").slice(0, 5000), model_id: MODEL_ID, voice_settings: { stability: 0.5, similarity_boost: 0.75 } })
-    });
-    if (!r.ok) { const msg = await r.text().catch(() => ""); return res.status(r.status).send(msg); }
-
-    res.setHeader("Content-Type", "audio/mpeg");
-    if (r.body && r.body.pipeTo) {
-      const { Readable } = require("stream");
-      Readable.fromWeb(r.body).pipe(res);
-    } else {
-      const buf = await r.arrayBuffer();
-      res.end(Buffer.from(buf));
-    }
-  } catch (e) {
-    console.error("tts exception:", e);
-    res.status(500).json({ error: "tts_failed" });
-  }
-});
-
-// D-ID proxy (si existe routes/did.js)
+// =======================================
+// D-ID proxy (Streams + ElevenLabs)
+// =======================================
 try {
-  const didRouter = require("./routes/did");
-  app.use("/api/did", didRouter);
+  const didRoutes = require("./routes/did");
+  app.use("/api/did", didRoutes);
   console.log("D-ID routes mounted at /api/did");
 } catch (e) {
-  console.warn("D-ID routes not mounted (./routes/did no encontrado o con error).", e?.message || e);
+  console.warn("D-ID routes not mounted:", e && e.message ? e.message : e);
 }
 
-/* =========================
-   Arranque
-   ========================= */
-const PORT = Number(process.env.PORT) || 8080;
-const HOST = "0.0.0.0";
+// Salud
+app.get("/health", (_req, res) => res.json({ ok: true }));
+
+// =======================================
+// Arranque
+// =======================================
+const PORT = process.env.PORT || 3000;
+const HOST = process.env.HOST || "0.0.0.0";
+
 app.listen(PORT, HOST, () => {
   console.log(`Servidor listo en puerto ${PORT} (host ${HOST})`);
 });
