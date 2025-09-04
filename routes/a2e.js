@@ -1,11 +1,11 @@
 // routes/a2e.js — Proxy A2E (Agora + Direct Speak + Bootstrap de avatar + utilidades)
-// ENV necesarias (Railway):
+// ENV necesarias (en tu backend / Railway):
 // A2E_BASE=https://api.a2e.ai
 // A2E_API_KEY=TU_TOKEN_A2E
 // A2E_AUTH_MODE=bearer
 // A2E_API_KEY_HEADER=Authorization   (por defecto)
 // PUBLIC_BASE=https://TU-APP.up.railway.app/public
-// (opcionales según tu cuenta)
+// (opcionales, por si tu cuenta usa otros paths)
 // A2E_CHARACTER_LIST=/api/v1/anchor/character_list
 // A2E_CREATE_FROM_IMAGE=/api/v1/userVideoTwin/startTraining
 // A2E_AVATARS_PATH=/api/v1/streaming-avatar/all_avatars
@@ -41,6 +41,9 @@ function mustBaseOK(res) {
   return true;
 }
 const join = (b, p) => `${b}${p.startsWith("/") ? "" : "/"}${p}`;
+
+// --- PING simple para verificar montaje del router ---
+router.get("/ping", (_req, res) => { res.json({ ok: true, scope: "a2e-router" }); });
 
 // --- health simple ---
 router.get("/selftest", async (_req, res) => {
