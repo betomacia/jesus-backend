@@ -27,8 +27,8 @@ const A2E_SPEAK_PATHS  = (process.env.A2E_SPEAK_PATHS ||
   "/api/v1/streaming-avatar/direct-speak,/api/v1/streaming-avatar/speak")
   .split(",").map(s => s.trim()).filter(Boolean);
 
-const A2E_CHARACTER_LIST   = process.env.A2E_CHARACTER_LIST   || "/api/v1/anchor/character_list";
-const A2E_CREATE_FROM_IMAGE= process.env.A2E_CREATE_FROM_IMAGE|| "/api/v1/userVideoTwin/startTraining";
+const A2E_CHARACTER_LIST    = process.env.A2E_CHARACTER_LIST    || "/api/v1/anchor/character_list";
+const A2E_CREATE_FROM_IMAGE = process.env.A2E_CREATE_FROM_IMAGE || "/api/v1/userVideoTwin/startTraining";
 
 function a2eHeaders(extra = {}) {
   const h = { Accept: "application/json", "Content-Type": "application/json", ...extra };
@@ -49,9 +49,7 @@ router.get("/selftest", async (_req, res) => {
     const r = await fetch(join(A2E_BASE, "/"), { method: "GET", headers: a2eHeaders() });
     const txt = await r.text().catch(() => "");
     res.json({
-      base: A2E_BASE,
-      auth: !!A2E_API_KEY,
-      status: r.status,
+      base: A2E_BASE, auth: !!A2E_API_KEY, status: r.status,
       content_type: r.headers.get("content-type") || "",
       sample: txt.slice(0, 240),
     });
@@ -81,9 +79,7 @@ router.post("/token", async (req, res) => {
     if (!avatar_id) return res.status(400).json({ error: "missing_avatar_id" });
 
     const r = await fetch(join(A2E_BASE, A2E_TOKEN_PATH), {
-      method: "POST",
-      headers: a2eHeaders(),
-      body: JSON.stringify({ avatar_id, expire_seconds }),
+      method: "POST", headers: a2eHeaders(), body: JSON.stringify({ avatar_id, expire_seconds }),
     });
     const txt = await r.text().catch(() => "");
     let data = null; try { data = JSON.parse(txt); } catch {}
