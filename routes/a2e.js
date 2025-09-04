@@ -1,7 +1,7 @@
 // routes/a2e.js — Proxy A2E (Agora + Direct Speak + Bootstrap de avatar)
-// Requiere env:
+// ENV requeridas:
 // A2E_BASE=https://video.a2e.ai
-// A2E_API_KEY=BearerTokenDeA2E (NO pongas "Bearer " aquí; este archivo lo agrega solo si corresponde)
+// A2E_API_KEY=TU_TOKEN_A2E (NO pongas "Bearer " aquí; abajo se añade si corresponde)
 // A2E_AUTH_MODE=bearer  (o x-api-key)
 // A2E_API_KEY_HEADER=Authorization (si usas bearer)
 // PUBLIC_BASE=https://TU-APP.up.railway.app/public  (para crear avatar desde imagen pública)
@@ -27,7 +27,7 @@ const A2E_SPEAK_PATHS = (process.env.A2E_SPEAK_PATHS ||
   .map((s) => s.trim())
   .filter(Boolean);
 
-// ====== (Opcional) Endpoints de gestión de “character/anchor” (pueden variar por cuenta A2E) ======
+// (Opcional) Endpoints de “character/anchor” (pueden variar por cuenta A2E)
 const A2E_CHARACTER_LIST = process.env.A2E_CHARACTER_LIST || "/api/v1/anchor/character_list";
 const A2E_CREATE_FROM_IMAGE = process.env.A2E_CREATE_FROM_IMAGE || "/api/v1/userVideoTwin/startTraining";
 
@@ -56,7 +56,7 @@ function mustBaseOK(res) {
 
 const join = (b, p) => `${b}${p.startsWith("/") ? "" : "/"}${p}`;
 
-// ========= Health / auto-test =========
+// ========= Health =========
 router.get("/selftest", async (_req, res) => {
   try {
     if (!mustBaseOK(res)) return;
@@ -84,9 +84,7 @@ router.get("/avatars", async (_req, res) => {
     });
     const txt = await r.text().catch(() => "");
     let data = null;
-    try {
-      data = JSON.parse(txt);
-    } catch {}
+    try { data = JSON.parse(txt); } catch {}
     res.status(r.ok ? 200 : r.status).json(data ?? { raw: txt });
   } catch (e) {
     res.status(500).json({ error: "avatars_failed", detail: String(e?.message || e) });
@@ -107,11 +105,8 @@ router.post("/token", async (req, res) => {
     });
     const txt = await r.text().catch(() => "");
     let data = null;
-    try {
-      data = JSON.parse(txt);
-    } catch {}
+    try { data = JSON.parse(txt); } catch {}
 
-    // A2E suele devolver { code, data?, msg? } con 200 aunque haya error
     if (r.ok) {
       if (data && typeof data.code === "number" && data.code !== 0) {
         return res.status(502).json(data);
@@ -125,7 +120,6 @@ router.post("/token", async (req, res) => {
 });
 
 // ========= Direct Speak =========
-// Front llama a /api/a2e/talk { text, lang? }
 router.post("/talk", async (req, res) => {
   try {
     if (!mustBaseOK(res)) return;
@@ -142,9 +136,7 @@ router.post("/talk", async (req, res) => {
         });
         const txt = await r.text().catch(() => "");
         let data = null;
-        try {
-          data = JSON.parse(txt);
-        } catch {}
+        try { data = JSON.parse(txt); } catch {}
         if (r.ok) {
           if (data && typeof data.code === "number" && data.code !== 0) {
             lastErr = data;
@@ -171,7 +163,6 @@ router.post("/leave", async (req, res) => {
     const { channel, uid } = req.body || {};
     if (!channel) return res.status(400).json({ error: "missing_channel" });
 
-    // Ajusta si tu A2E usa otra ruta para "leave"
     const r = await fetch(join(A2E_BASE, "/api/v1/streaming-avatar/leave"), {
       method: "POST",
       headers: a2eHeaders(),
@@ -179,9 +170,7 @@ router.post("/leave", async (req, res) => {
     });
     const txt = await r.text().catch(() => "");
     let data = null;
-    try {
-      data = JSON.parse(txt);
-    } catch {}
+    try { data = JSON.parse(txt); } catch {}
     res.status(r.ok ? 200 : r.status).json(data ?? { raw: txt });
   } catch (e) {
     res.status(500).json({ error: "leave_failed", detail: String(e?.message || e) });
@@ -203,18 +192,14 @@ router.get("/avatar-id", async (req, res) => {
     });
     const listTxt = await listResp.text().catch(() => "");
     let list = null;
-    try {
-      list = JSON.parse(listTxt);
-    } catch {}
+    try { list = JSON.parse(listTxt); } catch {}
     const wantedName = `jesus-${lang}`;
     const found = (list?.data || []).find((x) => x?.name === wantedName && x?._id);
     if (found?._id) return res.json({ avatar_id: found._id, pending: false });
 
     // 2) si no existe, lo creamos desde tu imagen pública
     if (!PUBLIC_BASE) {
-      return res
-        .status(500)
-        .json({ error: "PUBLIC_BASE_missing", hint: "Define PUBLIC_BASE (https://TU-APP/public)" });
+      return res.status(500).json({ error: "PUBLIC_BASE_missing", hint: "Define PUBLIC_BASE (https://TU-APP/public)" });
     }
     const fileByLang = {
       es: "JESPANOL.jpeg",
@@ -232,17 +217,15 @@ router.get("/avatar-id", async (req, res) => {
       headers: a2eHeaders(),
       body: JSON.stringify({
         name: wantedName,
-        gender: "male", // opcional
-        image_url, // tu imagen pública
+        gender: "male",
+        image_url,
       }),
     });
     const createTxt = await createResp.text().catch(() => "");
     let created = null;
-    try {
-      created = JSON.parse(createTxt);
-    } catch {}
+    try { created = JSON.parse(createTxt); } catch {}
 
-    // El entrenamiento tarda. Indica pending:true y que el front reintente.
+    // Entrenamiento asíncrono: devolvemos pending:true
     return res.json({
       pending: true,
       task_id: created?.data?._id || null,
