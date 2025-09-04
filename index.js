@@ -10,6 +10,12 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
+// ---- helper fetch (usa global fetch en Node >=18 o node-fetch si hace falta) ----
+const doFetch = (...args) =>
+  (typeof fetch === "function"
+    ? fetch(...args)
+    : import("node-fetch").then(({ default: f }) => f(...args)));
+
 // ---- OpenAI ----
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -342,6 +348,44 @@ app.get("/api/welcome", (_req, res) => {
       ref: "Salmos 27:1"
     }
   });
+});
+
+// --- Nuevo: token de sesión para HeyGen Streaming Avatar ---
+app.get("/api/heygen/token", async (_req, res) => {
+  try {
+    const key = process.env.HEYGEN_API_KEY || "";
+    if (!key) {
+      return res.status(500).json({ error: "missing_heygen_key" });
+    }
+
+    const r = await doFetch("https://api.heygen.com/v1/streaming.create_token", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${key}`,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+      },
+      body: JSON.stringify({}) // sin payload
+    });
+
+    const json = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      return res.status(r.status).json({
+        error: "token_failed",
+        detail: json
+      });
+    }
+
+    // La API devuelve { data: { token: "..." } } (o { token })
+    const token = json?.data?.token || json?.token;
+    if (!token) {
+      return res.status(502).json({ error: "no_token_in_response", detail: json });
+    }
+    return res.json({ token });
+  } catch (e) {
+    console.error("HEYGEN TOKEN ERROR:", e);
+    return res.status(500).json({ error: "token_error", detail: String(e && e.message || e) });
+  }
 });
 
 // -------- Arranque --------
