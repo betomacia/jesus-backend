@@ -1,90 +1,137 @@
 // routes/tts.js
 const express = require("express");
-const fetch = require("node-fetch");
-
 const router = express.Router();
 
-// Acepta alias de variable para evitar errores de nombre
-function getApiKey() {
-  return (
-    process.env.ELEVEN_API_KEY ||
-    process.env.ELEVENLABS_API_KEY ||
-    process.env.ELEVEN_LABS_API_KEY ||
-    process.env.NEXT_PUBLIC_ELEVEN_API_KEY ||
-    ""
-  );
+// Usa fetch nativo (Node 18+). Si quieres compatibilidad con Node <18, descomenta:
+// const fetch = global.fetch || ((...a) => import("node-fetch").then(({default: f}) => f(...a)));
+
+const API_BASE = "https://api.elevenlabs.io/v1";
+const DEFAULT_MODEL = process.env.ELEVEN_MODEL || "eleven_multilingual_v2";
+// Voz fallback conocida (Rachel). Puedes cambiarla por otra pública si prefieres.
+const FALLBACK_VOICE_ID = process.env.ELEVEN_VOICE_FALLBACK || "21m00Tcm4TlvDq8ikWAM";
+
+function getKey() {
+  return process.env.ELEVEN_API_KEY || "";
+}
+function keyPreview(k) {
+  return k ? `${k.slice(0, 4)}… (${k.length} chars)` : "";
+}
+function cfgVoiceId() {
+  return process.env.ELEVEN_VOICE_ID || "";
 }
 
-function getVoiceId() {
-  return (
-    process.env.ELEVEN_VOICE_ID ||
-    process.env.ELEVENLABS_VOICE_ID ||
-    "21m00Tcm4TlvDq8ikWAM" // voz por defecto
-  );
+// --- Utilidad: verifica si una voz existe / es accesible con tu key ---
+async function checkVoiceExists(apiKey, voiceId) {
+  try {
+    const r = await fetch(`${API_BASE}/voices/${encodeURIComponent(voiceId)}`, {
+      method: "GET",
+      headers: { "xi-api-key": apiKey, Accept: "application/json" },
+    });
+    if (r.status === 404) return false;
+    return r.ok;
+  } catch {
+    return false;
+  }
 }
 
-router.get("/selftest", (_req, res) => {
-  const key = getApiKey();
+// --- Selftest: comprueba key y disponibilidad de la voz configurada ---
+router.get("/selftest", async (_req, res) => {
+  const apiKey = getKey();
+  const hasKey = !!apiKey;
+  const voiceId = cfgVoiceId();
+  let voiceOk = false;
+
+  if (hasKey && voiceId) {
+    voiceOk = await checkVoiceExists(apiKey, voiceId);
+  }
+
   res.json({
-    ok: !!key,
-    hasKey: !!key,
-    // máscara de 4 chars para depurar sin filtrar la clave
-    keyPreview: key ? `${key.slice(0, 4)}… (${key.length} chars)` : null,
-    model: process.env.ELEVEN_MODEL || "eleven_multilingual_v2",
-    voiceId: getVoiceId(),
+    ok: hasKey,
+    hasKey,
+    keyPreview: keyPreview(apiKey),
+    model: DEFAULT_MODEL,
+    voiceId: voiceId || "(none)",
+    voiceOk: voiceId ? voiceOk : null,
+    fallbackVoice: FALLBACK_VOICE_ID,
   });
 });
 
-// POST /api/tts  { text, voiceId? } -> audio/mpeg
+// --- Llamada al TTS upstream (una voz) ---
+async function callTTS({ apiKey, voiceId, text }) {
+  const url = `${API_BASE}/text-to-speech/${encodeURIComponent(
+    voiceId
+  )}?optimize_streaming_latency=0&output_format=mp3_44100_128`;
+
+  const body = {
+    text: String(text || ""),
+    model_id: DEFAULT_MODEL,
+    voice_settings: {
+      stability: Number(process.env.ELEVEN_STABILITY ?? 0.4),
+      similarity_boost: Number(process.env.ELEVEN_SIMILARITY ?? 0.8),
+      style: Number(process.env.ELEVEN_STYLE ?? 0.1),
+      use_speaker_boost: process.env.ELEVEN_SPK_BOOST === "false" ? false : true,
+    },
+  };
+
+  const r = await fetch(url, {
+    method: "POST",
+    headers: {
+      "xi-api-key": apiKey,
+      "Content-Type": "application/json",
+      Accept: "audio/mpeg",
+    },
+    body: JSON.stringify(body),
+  });
+
+  return r;
+}
+
+// --- Endpoint principal: POST /api/tts ---
 router.post("/", async (req, res) => {
   try {
-    const API_KEY = getApiKey();
-    if (!API_KEY) return res.status(501).json({ error: "ELEVEN_API_KEY missing" });
+    const apiKey = getKey();
+    if (!apiKey) return res.status(501).json({ error: "elevenlabs_key_missing" });
 
     const { text, voiceId } = req.body || {};
     const t = String(text || "").trim();
     if (!t) return res.status(400).json({ error: "missing_text" });
 
-    const vid = voiceId || getVoiceId();
-    const model = process.env.ELEVEN_MODEL || "eleven_multilingual_v2";
+    // 1) Primer intento con voiceId de la petición o el configurado (si hay), si no, directamente con fallback
+    const firstVoice = (voiceId || cfgVoiceId() || FALLBACK_VOICE_ID).trim();
 
-    const url = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(
-      vid
-    )}?optimize_streaming_latency=0&output_format=mp3_44100_128`;
+    let r = await callTTS({ apiKey, voiceId: firstVoice, text: t });
 
-    const r = await fetch(url, {
-      method: "POST",
-      headers: {
-        "xi-api-key": API_KEY,
-        Accept: "audio/mpeg",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        text: t,
-        model_id: model,
-        voice_settings: {
-          stability: Number(process.env.ELEVEN_STABILITY ?? 0.4),
-          similarity_boost: Number(process.env.ELEVEN_SIMILARITY ?? 0.8),
-          style: Number(process.env.ELEVEN_STYLE ?? 0.1),
-          use_speaker_boost: process.env.ELEVEN_SPK_BOOST === "false" ? false : true,
-        },
-      }),
-    });
-
-    if (!r.ok) {
-      const msg = await r.text().catch(() => "");
-      return res
-        .status(r.status)
-        .json({ error: "elevenlabs_upstream", detail: msg?.slice(0, 800) || r.statusText });
+    // 2) Si la voz no existe (404), intenta con la voz fallback
+    if (r.status === 404 && firstVoice !== FALLBACK_VOICE_ID) {
+      console.warn(`[TTS] Voice not found (${firstVoice}). Falling back to ${FALLBACK_VOICE_ID}`);
+      r = await callTTS({ apiKey, voiceId: FALLBACK_VOICE_ID, text: t });
+      if (!r.ok) {
+        const detail = await r.text().catch(() => "");
+        return res
+          .status(r.status)
+          .json({ error: "elevenlabs_upstream_after_fallback", detail: detail?.slice(0, 1200) || "" });
+      }
+      const ab = await r.arrayBuffer();
+      res.setHeader("Content-Type", "audio/mpeg");
+      res.setHeader("X-TTS-Fallback", "1");
+      return res.send(Buffer.from(ab));
     }
 
+    // 3) Cualquier otro error upstream
+    if (!r.ok) {
+      const detail = await r.text().catch(() => "");
+      return res
+        .status(r.status)
+        .json({ error: "elevenlabs_upstream", detail: detail?.slice(0, 1200) || "" });
+    }
+
+    // 4) OK normal
     const ab = await r.arrayBuffer();
     res.setHeader("Content-Type", "audio/mpeg");
-    res.setHeader("Cache-Control", "no-store");
-    res.send(Buffer.from(ab));
+    return res.send(Buffer.from(ab));
   } catch (e) {
-    console.error("TTS route error:", e);
-    res.status(500).json({ error: "tts_failed" });
+    console.error("TTS error:", e);
+    return res.status(500).json({ error: "tts_failed" });
   }
 });
 
