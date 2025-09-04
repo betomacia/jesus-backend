@@ -1,4 +1,4 @@
-// index.js — backend estable, sin bancos locales; ACK/GOODBYE rápidos vía OpenAI
+// index.js — backend unificado (OpenAI + HeyGen token + ElevenLabs TTS + D-ID proxy)
 
 const express = require("express");
 const cors = require("cors");
@@ -6,17 +6,14 @@ const bodyParser = require("body-parser");
 const OpenAI = require("openai");
 require("dotenv").config();
 
+// Node 18+ trae fetch global; si tu entorno fuera Node<18>, descomenta:
+// const fetch = (...a) => import("node-fetch").then(({default: f}) => f(...a));
+
 const app = express();
-app.use(cors());
+app.use(cors()); // si quieres restringir, usa { origin: ["https://TU-APP.web.app", ...] }
 app.use(bodyParser.json());
 
-// ---- helper fetch (usa global fetch en Node >=18 o node-fetch si hace falta) ----
-const doFetch = (...args) =>
-  (typeof fetch === "function"
-    ? fetch(...args)
-    : import("node-fetch").then(({ default: f }) => f(...args)));
-
-// ---- OpenAI ----
+// ---------- OpenAI ----------
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 /**
@@ -102,9 +99,8 @@ function stripQuestions(s = "") {
 }
 
 // -------- Llamada LLM --------
-// ACK = respuestas tipo "sí/ok/vale"; GOODBYE = despedidas ("me voy", "debo irme", etc.)
-const ACK_TIMEOUT_MS = 6000;     // respuesta ágil en acks
-const RETRY_TIMEOUT_MS = 3000;   // reintento corto si la primera se demora
+const ACK_TIMEOUT_MS = 6000;
+const RETRY_TIMEOUT_MS = 3000;
 
 function isAck(msg = "") {
   return /^\s*(si|sí|ok|okay|vale|dale|de acuerdo|perfecto|genial|bien)\s*\.?$/i.test((msg || "").trim());
@@ -161,7 +157,6 @@ async function askLLM({ persona, message, history = [] }) {
   const focusHint = lastSubstantiveUser(history);
   const shortHistory = compactHistory(history, (ack || bye) ? 4 : 10, 240);
 
-  // --- DESPEDIDA (sin pregunta), TODO desde OpenAI ---
   if (bye) {
     const userContent =
       `MODE: GOODBYE\n` +
@@ -210,11 +205,9 @@ async function askLLM({ persona, message, history = [] }) {
     return {
       message: msg || "Que la paz y el amor te acompañen.",
       bible: { text: text || "Y la paz de Dios, que sobrepuja todo entendimiento, guardará vuestros corazones.", ref: ref || "Filipenses 4:7" }
-      // sin question
     };
   }
 
-  // --- ACK (“sí/ok/vale”), TODO desde OpenAI, con fast-path ---
   if (ack) {
     const userContent =
       `MODE: ACK\n` +
@@ -268,7 +261,7 @@ async function askLLM({ persona, message, history = [] }) {
     };
   }
 
-  // --- NORMAL ---
+  // NORMAL
   const userContent =
     `MODE: NORMAL\n` +
     `Persona: ${persona}\n` +
@@ -311,7 +304,11 @@ async function askLLM({ persona, message, history = [] }) {
   };
 }
 
-// -------- Rutas --------
+// --------- Rutas App ---------
+app.get("/", (_req, res) => {
+  res.status(200).json({ ok: true, service: "jesus-backend", time: new Date().toISOString() });
+});
+
 app.post("/api/ask", async (req, res) => {
   try {
     const { persona = "jesus", message = "", history = [] } = req.body || {};
@@ -350,45 +347,90 @@ app.get("/api/welcome", (_req, res) => {
   });
 });
 
-// --- Nuevo: token de sesión para HeyGen Streaming Avatar ---
+// --------- HeyGen: emitir token de sesión ---------
 app.get("/api/heygen/token", async (_req, res) => {
   try {
-    const key = process.env.HEYGEN_API_KEY || "";
-    if (!key) {
-      return res.status(500).json({ error: "missing_heygen_key" });
-    }
+    const API_KEY = process.env.HEYGEN_API_KEY || process.env.HEYGEN_TOKEN || "";
+    if (!API_KEY) return res.status(500).json({ error: "missing_HEYGEN_API_KEY" });
 
-    const r = await doFetch("https://api.heygen.com/v1/streaming.create_token", {
+    const r = await fetch("https://api.heygen.com/v1/streaming.create_token", {
       method: "POST",
-      headers: {
-        "Authorization": `Bearer ${key}`,
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-      },
-      body: JSON.stringify({}) // sin payload
+      headers: { "x-api-key": API_KEY }
     });
 
     const json = await r.json().catch(() => ({}));
-    if (!r.ok) {
-      return res.status(r.status).json({
-        error: "token_failed",
-        detail: json
-      });
+    // Normalizamos el output a { token: "..." }
+    const token = json?.data?.token || json?.token || json?.access_token || "";
+    if (!r.ok || !token) {
+      console.error("HEYGEN TOKEN ERROR:", r.status, json);
+      return res.status(r.status || 500).json({ error: "heygen_token_failed", detail: json });
     }
-
-    // La API devuelve { data: { token: "..." } } (o { token })
-    const token = json?.data?.token || json?.token;
-    if (!token) {
-      return res.status(502).json({ error: "no_token_in_response", detail: json });
-    }
-    return res.json({ token });
+    res.json({ token });
   } catch (e) {
-    console.error("HEYGEN TOKEN ERROR:", e);
-    return res.status(500).json({ error: "token_error", detail: String(e && e.message || e) });
+    console.error("heygen token exception:", e);
+    res.status(500).json({ error: "heygen_token_error" });
   }
 });
 
-// -------- Arranque --------
+// --------- ElevenLabs: TTS → audio/mpeg ---------
+app.post("/api/tts", async (req, res) => {
+  try {
+    const { text = "" } = req.body || {};
+    const XI_KEY = process.env.ELEVENLABS_API_KEY || process.env.ELEVEN_API_KEY || "";
+    const VOICE_ID = process.env.ELEVENLABS_VOICE_ID || process.env.ELEVEN_VOICE_ID || "";
+    const MODEL_ID = process.env.ELEVEN_MODEL_ID || "eleven_flash_v2_5";
+
+    if (!XI_KEY || !VOICE_ID) {
+      return res.status(500).json({ error: "missing_elevenlabs_env", need: ["ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID"] });
+    }
+    const url = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(VOICE_ID)}?optimize_streaming_latency=2&output_format=mp3_44100_128`;
+
+    const r = await fetch(url, {
+      method: "POST",
+      headers: {
+        "xi-api-key": XI_KEY,
+        "Content-Type": "application/json",
+        "Accept": "audio/mpeg"
+      },
+      body: JSON.stringify({
+        text: String(text || "").slice(0, 5000),
+        model_id: MODEL_ID,
+        voice_settings: { stability: 0.5, similarity_boost: 0.75 }
+      })
+    });
+
+    if (!r.ok) {
+      const msg = await r.text().catch(() => "");
+      console.error("ELEVEN TTS ERROR", r.status, msg);
+      return res.status(r.status).send(msg);
+    }
+
+    // stream -> cliente
+    res.setHeader("Content-Type", "audio/mpeg");
+    if (r.body && r.body.pipeTo) {
+      // Web Streams (Node 18)
+      const { Readable } = require("stream");
+      Readable.fromWeb(r.body).pipe(res);
+    } else {
+      const buf = await r.arrayBuffer();
+      res.end(Buffer.from(buf));
+    }
+  } catch (e) {
+    console.error("tts exception:", e);
+    res.status(500).json({ error: "tts_failed" });
+  }
+});
+
+// --------- D-ID: proxy Streams (tu routes/did.js) ---------
+try {
+  const didRouter = require("./routes/did");
+  app.use("/api/did", didRouter);
+  console.log("D-ID routes mounted at /api/did");
+} catch (e) {
+  console.warn("D-ID routes not mounted (./routes/did no encontrado o con error).", e?.message || e);
+}
+
+// --------- Arranque ---------
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`Servidor listo en puerto ${PORT}`);
