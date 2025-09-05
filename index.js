@@ -401,6 +401,58 @@ app.get("/api/welcome", (_req, res) => {
   });
 });
 
+// ---------- HeyGen: token & quota ----------
+// Requiere: process.env.HEYGEN_API_KEY
+app.get("/api/heygen/token", async (_req, res) => {
+  try {
+    const API_KEY = process.env.HEYGEN_API_KEY;
+    if (!API_KEY) return res.status(500).json({ error: "missing_api_key", message: "Define HEYGEN_API_KEY en .env" });
+
+    // Crear Server Session Token (para /v1/streaming.new)
+    const r = await fetch("https://api.heygen.com/v1/streaming.create_token", {
+      method: "POST",
+      headers: {
+        "X-Api-Key": API_KEY,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({}) // sin payload
+    });
+
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      return res.status(r.status).json(j || { error: "heygen_create_token_failed" });
+    }
+
+    // La API devuelve { data: { token: "..." } }
+    const token = j?.data?.token || j?.token || "";
+    if (!token) return res.status(502).json({ error: "no_token_in_response", raw: j });
+
+    res.json({ token, token_type: "sa_from_api_key" });
+  } catch (e) {
+    console.error("HEYGEN TOKEN ERROR:", e);
+    res.status(500).json({ error: "heygen_token_exception", detail: String(e) });
+  }
+});
+
+// (Opcional) consultar cuota restante de HeyGen
+app.get("/api/heygen/quota", async (_req, res) => {
+  try {
+    const API_KEY = process.env.HEYGEN_API_KEY;
+    if (!API_KEY) return res.status(500).json({ error: "missing_api_key", message: "Define HEYGEN_API_KEY en .env" });
+
+    const r = await fetch("https://api.heygen.com/v1/user.get_remaining_quota", {
+      method: "GET",
+      headers: { "X-Api-Key": API_KEY }
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) return res.status(r.status).json(j || { error: "heygen_quota_failed" });
+    res.json(j);
+  } catch (e) {
+    console.error("HEYGEN QUOTA ERROR:", e);
+    res.status(500).json({ error: "heygen_quota_exception", detail: String(e) });
+  }
+});
+
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
