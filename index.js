@@ -162,7 +162,7 @@ function detectMainSubject(s = "") {
   if (/(mi\s+amig[oa])/.test(t)) return "friend";
   return "self";
 }
-// Persona de apoyo tipo “mi hija”, “mi primo”, etc. (para informar al modelo)
+// Persona de apoyo tipo “mi hija”, “mi primo”, etc.
 const SUPPORT_WORDS = [
   "hijo","hija","madre","padre","mamá","mama","papá","papa","abuelo","abuela","nieto","nieta",
   "tío","tio","tía","tia","sobrino","sobrina","primo","prima","cuñado","cuñada","suegro","suegra","yerno","nuera",
@@ -401,57 +401,56 @@ app.get("/api/welcome", (_req, res) => {
   });
 });
 
-// ---------- HeyGen: token & quota ----------
-// Requiere: process.env.HEYGEN_API_KEY
-app.get("/api/heygen/token", async (_req, res) => {
+// === HeyGen: token efímero para Streaming Avatar ===
+// Requiere en .env del backend: HEYGEN_API_KEY=sk-xxxxx (tu clave real de HeyGen)
+app.get("/api/heygen/token", async (req, res) => {
   try {
-    const API_KEY = process.env.HEYGEN_API_KEY;
-    if (!API_KEY) return res.status(500).json({ error: "missing_api_key", message: "Define HEYGEN_API_KEY en .env" });
+    console.log(`[HEYGEN] /api/heygen/token from ${req.ip || "unknown"}`);
 
-    // Crear Server Session Token (para /v1/streaming.new)
-    const r = await fetch("https://api.heygen.com/v1/streaming.create_token", {
-      method: "POST",
-      headers: {
-        "X-Api-Key": API_KEY,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({}) // sin payload
-    });
-
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok) {
-      return res.status(r.status).json(j || { error: "heygen_create_token_failed" });
+    const apiKey = process.env.HEYGEN_API_KEY;
+    if (!apiKey) {
+      console.error("[HEYGEN] Falta HEYGEN_API_KEY en el backend");
+      return res.status(500).json({ error: "HEYGEN_API_KEY missing" });
     }
 
-    // La API devuelve { data: { token: "..." } }
-    const token = j?.data?.token || j?.token || "";
-    if (!token) return res.status(502).json({ error: "no_token_in_response", raw: j });
-
-    res.json({ token, token_type: "sa_from_api_key" });
-  } catch (e) {
-    console.error("HEYGEN TOKEN ERROR:", e);
-    res.status(500).json({ error: "heygen_token_exception", detail: String(e) });
-  }
-});
-
-// (Opcional) consultar cuota restante de HeyGen
-app.get("/api/heygen/quota", async (_req, res) => {
-  try {
-    const API_KEY = process.env.HEYGEN_API_KEY;
-    if (!API_KEY) return res.status(500).json({ error: "missing_api_key", message: "Define HEYGEN_API_KEY en .env" });
-
-    const r = await fetch("https://api.heygen.com/v1/user.get_remaining_quota", {
-      method: "GET",
-      headers: { "X-Api-Key": API_KEY }
+    const upstream = await fetch("https://api.heygen.com/v1/streaming.token", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+      },
+      body: JSON.stringify({}),
     });
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok) return res.status(r.status).json(j || { error: "heygen_quota_failed" });
-    res.json(j);
+
+    const text = await upstream.text();
+    if (!upstream.ok) {
+      console.error("[HEYGEN] upstream error", upstream.status, text);
+      return res.status(502).json({ error: "heygen upstream", status: upstream.status, body: text });
+    }
+
+    let data = {};
+    try { data = JSON.parse(text); } catch {
+      console.error("[HEYGEN] upstream no JSON:", text.slice(0, 200));
+      return res.status(502).json({ error: "invalid upstream json" });
+    }
+
+    const token = data?.data?.token || data?.token || null;
+    if (!token) {
+      console.error("[HEYGEN] upstream sin token:", data);
+      return res.status(502).json({ error: "upstream without token" });
+    }
+
+    res.setHeader("Cache-Control", "no-store");
+    return res.json({ token });
   } catch (e) {
-    console.error("HEYGEN QUOTA ERROR:", e);
-    res.status(500).json({ error: "heygen_quota_exception", detail: String(e) });
+    console.error("[HEYGEN] token fatal:", e);
+    return res.status(500).json({ error: "internal error" });
   }
 });
+
+// (opcional) health para debug rápido
+app.get("/api/health", (_req, res) => res.json({ ok: true, ts: Date.now() }));
 
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 8080;
