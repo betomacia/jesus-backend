@@ -1,458 +1,209 @@
-// index.js — backend estable, sin bancos locales; ACK/GOODBYE rápidos vía OpenAI
-// + HeyGen: /api/heygen/token
-
+// index.js
 const express = require("express");
 const cors = require("cors");
-const bodyParser = require("body-parser");
-const OpenAI = require("openai");
+const nodeFetch = require("node-fetch"); // Usamos SIEMPRE node-fetch v2 (Readable de Node)
 require("dotenv").config();
+const multer = require("multer");
+const { Readable } = require("stream");
+const { OpenAI } = require("openai");
 
-// ---------- App ----------
+/* ============ RUTAS D-ID (WebRTC) ============ */
+const didRouter = require("./routes/did");
+
 const app = express();
-app.use(cors());
-app.use(bodyParser.json());
 
-// ---------- OpenAI ----------
+/* ============ LOG SENCILLO ============ */
+app.use((req, _res, next) => {
+  const t = new Date().toISOString();
+  console.log(`[${t}] ${req.method} ${req.originalUrl}`);
+  next();
+});
+
+/* ============ CORS ============ */
+const allowedOrigin = process.env.CORS_ORIGIN || "*";
+app.use(
+  cors({
+    origin: allowedOrigin === "*" ? true : allowedOrigin,
+  })
+);
+
+// Body parsers
+app.use(express.json({ limit: "2mb" }));
+app.use(express.urlencoded({ extended: true, limit: "2mb" }));
+
+/* ============ MONTA /api/did/* (streams, sdp, ice, talk TEXT/AUDIO) ============ */
+app.use("/api/did", didRouter);
+
+/* ============ ENV & HELPERS ============ */
+const fetch = (...args) => nodeFetch(...args); // fuerza node-fetch v2
+
+const PUBLIC_BASE_URL =
+  process.env.PUBLIC_BASE_URL ||
+  "https://jesus-backend-production-1cf4.up.railway.app";
+
+/* ====== OpenAI Whisper (Transcripción) ====== */
+const upload = multer({ limits: { fileSize: 25 * 1024 * 1024 } });
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-/**
- * Respuesta del BACKEND:
- * {
- *   "message": "consejo breve, SIN preguntas",
- *   "bible": { "text": "cita literal RVR1909", "ref": "Libro 0:0" },
- *   "question": "pregunta breve (opcional, UNA sola)"
- * }
- */
-const SYSTEM_PROMPT = `
-Eres Jesús: voz serena, compasiva y clara. Responde SIEMPRE en español.
+app.post("/api/transcribe", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: "No se recibió ningún archivo" });
+    }
 
-OBJETIVO
-- Devuelve SOLO JSON con: { "message", "bible": { "text", "ref" }, "question"? }.
-- "message": consejo breve (<=120 palabras), AFIRMATIVO y SIN signos de pregunta.
-- JAMÁS incluyas preguntas en "message". Si corresponde, haz UNA pregunta breve en "question".
-- No menciones el nombre civil del usuario. Usa "hijo mío", "hija mía" o "alma amada" con moderación.
-- No hables de técnica/IA ni del propio modelo.
+    // OpenAI SDK acepta Buffer directamente mediante File en Node >=18, pero
+    // en CJS sencillo creamos un objeto parecido a File usando form-data internamente.
+    // Para evitar líos, usamos el método base: pasamos el Buffer dentro de un Blob-like.
+    const fileName = req.file.originalname || "audio.webm";
 
-CONDUCE LA CONVERSACIÓN (ENTREVISTA GUIADA)
-- Mantén un TEMA PRINCIPAL explícito (p. ej., "hablar con mi hijo por consumo de drogas") y NO pivotes salvo que el usuario lo pida.
-- Piensa en "campos" internos: qué pasó, con quién, riesgo/urgencia, objetivo inmediato, obstáculos, recursos/apoyo, cuándo/dónde, primer micro-paso.
-- En cada turno, identifica QUÉ DATO CLAVE FALTA y usa "question" SOLO para pedir UN dato que desbloquee el siguiente paso (o para confirmar un compromiso breve).
-- Si el usuario responde con acuso ("sí/vale/ok"), NO repitas lo ya dicho: pasa de plan a PRÁCTICA/COMPROMISO (p. ej., guion de 1–2 frases, fijar hora/límite).
+    // La lib openai@4 acepta Buffer:
+    const resp = await openai.audio.transcriptions.create({
+      file: { name: fileName, data: req.file.buffer },
+      model: "whisper-1",
+    });
 
-NO REDUNDANCIA
-- Evita repetir viñetas/acciones del turno anterior. Cada "message" debe aportar novedad útil (ejemplo concreto, mini-guion, decisión binaria, recurso puntual).
+    res.json({ text: (resp.text || "").trim() });
+  } catch (err) {
+    console.error("Error en transcripción:", err);
+    res.status(500).json({ error: "Error transcribiendo audio" });
+  }
+});
 
-BIBLIA (TEMÁTICA Y SIN REPETIR)
-- Elige la cita por el TEMA y por el contenido de "message" (los micro-pasos), NO por respuestas cortas tipo “sí”.
-- Evita repetir la MISMA referencia usada inmediatamente antes (si recibes "last_bible_ref", NO la repitas).
-- Usa RVR1909 literal y "Libro 0:0" en "ref".
-- Si dudas, usa pasajes breves pertinentes:
-  • Libertad/adicción: Juan 8:36; 1 Corintios 10:13
-  • Sabiduría/decisiones/límites: Santiago 1:5; Proverbios 22:3; Proverbios 27:6
-  • Amor/temor: 1 Juan 4:18; Colosenses 3:12-14
-  • Consuelo/esperanza: Salmos 34:18; Salmos 147:3
+/* ====== ElevenLabs TTS (stream) ======
+   - GET /api/tts?text=Hola
+   - POST /api/tts { "text": "Hola" }
+====================================== */
+app.all("/api/tts", async (req, res) => {
+  try {
+    const text =
+      req.method === "GET" ? req.query.text ?? "" : (req.body && req.body.text) ?? "";
+    if (!text || !String(text).trim()) {
+      return res.status(400).json({ error: "no_text" });
+    }
 
-CASOS
-- AMBIGUO (“tengo un problema”): en "message" contención clara (2–3 frases), sin preguntas; en "question" UNA puerta que pida el dato clave inicial.
-- CONCRETO: en "message" 2–3 micro-pasos para HOY (• …), adaptados al tema/momento; en "question" UNA pregunta que obtenga el siguiente dato o confirme un compromiso.
+    const VOICE_ID = process.env.ELEVENLABS_VOICE_ID;
+    const API_KEY = process.env.ELEVENLABS_API_KEY;
 
-FORMATO (OBLIGATORIO)
-{
-  "message": "… (sin signos de pregunta)",
-  "bible": { "text": "…", "ref": "Libro 0:0" },
-  "question": "… (opcional, una sola pregunta)"
-}
-`;
+    if (!VOICE_ID || !API_KEY) {
+      return res.status(500).json({ error: "missing_elevenlabs_env" });
+    }
 
-// Respuesta tipada por esquema
-const responseFormat = {
-  type: "json_schema",
-  json_schema: {
-    name: "SpiritualGuidance",
-    schema: {
-      type: "object",
-      properties: {
-        message: { type: "string" },
-        bible: {
-          type: "object",
-          properties: { text: { type: "string" }, ref: { type: "string" } },
-          required: ["text", "ref"]
+    // Timeout opcional para evitar cuelgues
+    const controller = new AbortController();
+    const timeoutMs = Number(process.env.TTS_TIMEOUT_MS || 30000);
+    const to = setTimeout(() => controller.abort(), timeoutMs);
+
+    const url =
+      `https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}/stream` +
+      `?optimize_streaming_latency=4&output_format=mp3_22050_32`;
+
+    const r = await fetch(url, {
+      method: "POST",
+      headers: {
+        "xi-api-key": API_KEY,
+        "Content-Type": "application/json",
+        Accept: "audio/mpeg",
+      },
+      body: JSON.stringify({
+        text: String(text).slice(0, 5000),
+        model_id: "eleven_multilingual_v2",
+        voice_settings: {
+          stability: 0.3,
+          similarity_boost: 0.7,
+          style: 0,
+          use_speaker_boost: false,
         },
-        question: { type: "string" }
-      },
-      required: ["message", "bible"],
-      additionalProperties: false
-    }
-  }
-};
-
-// -------- Utilidades --------
-function cleanRef(ref = "") {
-  return String(ref).replace(/\s*\([^)]*\)\s*/g, " ").replace(/\s+/g, " ").trim();
-}
-function stripQuestions(s = "") {
-  const noLeadingQs = (s || "")
-    .split(/\n+/).map((l) => l.trim()).filter((l) => !/\?\s*$/.test(l))
-    .join("\n").trim();
-  return noLeadingQs.replace(/[¿?]+/g, "").trim();
-}
-
-// -------- Llamada LLM --------
-// ACK = respuestas tipo "sí/ok/vale"; GOODBYE = despedidas ("me voy", "debo irme", etc.)
-const ACK_TIMEOUT_MS = 6000;     // respuesta ágil en acks
-const RETRY_TIMEOUT_MS = 3000;   // reintento corto si la primera se demora
-
-function isAck(msg = "") {
-  return /^\s*(si|sí|ok|okay|vale|dale|de acuerdo|perfecto|genial|bien)\s*\.?$/i.test((msg || "").trim());
-}
-function isGoodbye(msg = "") {
-  const s = (msg || "").toLowerCase();
-  return /(debo irme|tengo que irme|me voy|me retiro|hasta luego|nos vemos|hasta mañana|buenas noches|adiós|adios|chao|bye)\b/.test(s)
-      || (/gracias/.test(s) && /(irme|retir)/.test(s));
-}
-function extractLastBibleRef(history = []) {
-  const rev = [...(history || [])].reverse();
-  for (const h of rev) {
-    const s = String(h);
-    const m =
-      s.match(/—\s*([A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+\s+\d+:\d+)/) ||
-      s.match(/-\s*([A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+\s+\d+:\d+)/) ||
-      s.match(/\(\s*([A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+\s+\d+:\d+)\s*\)/);
-    if (m && m[1]) return m[1].trim();
-  }
-  return "";
-}
-function lastSubstantiveUser(history = []) {
-  const rev = [...(history || [])].reverse();
-  for (const h of rev) {
-    if (!/^Usuario:/i.test(h)) continue;
-    const text = h.replace(/^Usuario:\s*/i, "").trim();
-    if (text && !isAck(text) && text.length >= 6) return text;
-  }
-  return "";
-}
-function compactHistory(history = [], keep = 8, maxLen = 260) {
-  const arr = Array.isArray(history) ? history : [];
-  return arr.slice(-keep).map(x => String(x).slice(0, maxLen));
-}
-
-async function completionWithTimeout({ messages, temperature = 0.6, max_tokens = 200, timeoutMs = 8000 }) {
-  const call = openai.chat.completions.create({
-    model: "gpt-4o",
-    temperature,
-    max_tokens,
-    messages,
-    response_format: responseFormat
-  });
-  return await Promise.race([
-    call,
-    new Promise((_, reject) => setTimeout(() => reject(new Error("TIMEOUT")), timeoutMs))
-  ]);
-}
-
-async function askLLM({ persona, message, history = [] }) {
-  const ack = isAck(message);
-  const bye = isGoodbye(message);
-  const lastRef = extractLastBibleRef(history);
-  const focusHint = lastSubstantiveUser(history);
-  const shortHistory = compactHistory(history, (ack || bye) ? 4 : 10, 240);
-
-  // --- DESPEDIDA ---
-  if (bye) {
-    const userContent =
-      `MODE: GOODBYE\n` +
-      `Persona: ${persona}\n` +
-      `Mensaje_actual: ${message}\n` +
-      `Tema_prev_sustantivo: ${focusHint || "(sin pista)"}\n` +
-      `last_bible_ref: ${lastRef || "(n/a)"}\n` +
-      (shortHistory.length ? `Historial: ${shortHistory.join(" | ")}` : "Historial: (sin antecedentes)") + "\n" +
-      `INSTRUCCIONES:\n` +
-      `- Despedida breve y benigna.\n` +
-      `- "message": afirmativo, sin signos de pregunta.\n` +
-      `- "bible": versículo de bendición/consuelo en RVR1909, NO repitas last_bible_ref.\n` +
-      `- No incluyas "question".\n`;
-
-    let resp;
-    try {
-      resp = await completionWithTimeout({
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: userContent }
-        ],
-        temperature: 0.5,
-        max_tokens: 160,
-        timeoutMs: ACK_TIMEOUT_MS
-      });
-    } catch {
-      resp = await completionWithTimeout({
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: userContent + "\nPor favor responde ahora mismo.\n" }
-        ],
-        temperature: 0.4,
-        max_tokens: 140,
-        timeoutMs: RETRY_TIMEOUT_MS
-      });
-    }
-
-    const content = resp?.choices?.[0]?.message?.content || "{}";
-    let data = {};
-    try { data = JSON.parse(content); } catch { data = { message: content }; }
-
-    let msg = stripQuestions((data?.message || "").toString());
-    let ref = cleanRef((data?.bible?.ref || "").toString());
-    const text = (data?.bible?.text || "").toString().trim();
-
-    return {
-      message: msg || "Que la paz y el amor te acompañen.",
-      bible: { text: text || "Y la paz de Dios, que sobrepuja todo entendimiento, guardará vuestros corazones.", ref: ref || "Filipenses 4:7" }
-    };
-  }
-
-  // --- ACK ---
-  if (ack) {
-    const userContent =
-      `MODE: ACK\n` +
-      `Persona: ${persona}\n` +
-      `Mensaje_actual: ${message}\n` +
-      `Tema_prev_sustantivo: ${focusHint || "(sin pista)"}\n` +
-      `last_bible_ref: ${lastRef || "(n/a)"}\n` +
-      (shortHistory.length ? `Historial: ${shortHistory.join(" | ")}` : "Historial: (sin antecedentes)") + "\n" +
-      `INSTRUCCIONES:\n` +
-      `- Mantén el MISMO tema y pasa de plan a práctica/compromiso con NOVEDAD (guion breve, confirmar hora/límite), sin repetir lo anterior.\n` +
-      `- "message": afirmativo, sin signos de pregunta.\n` +
-      `- "bible": coherente con message; RVR1909; NO repitas last_bible_ref.\n` +
-      `- "question": UNA sola, para ensayar/confirmar el micro-paso.\n`;
-
-    let resp;
-    try {
-      resp = await completionWithTimeout({
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: userContent }
-        ],
-        temperature: 0.5,
-        max_tokens: 160,
-        timeoutMs: ACK_TIMEOUT_MS
-      });
-    } catch {
-      resp = await completionWithTimeout({
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: userContent + "\nResponde de manera directa y breve ahora.\n" }
-        ],
-        temperature: 0.4,
-        max_tokens: 140,
-        timeoutMs: RETRY_TIMEOUT_MS
-      });
-    }
-
-    const content = resp?.choices?.[0]?.message?.content || "{}";
-    let data = {};
-    try { data = JSON.parse(content); } catch { data = { message: content }; }
-
-    let msg = stripQuestions((data?.message || "").toString());
-    let ref = cleanRef((data?.bible?.ref || "").toString());
-    const text = (data?.bible?.text || "").toString().trim();
-    const question = (data?.question || "").toString().trim();
-
-    return {
-      message: msg || "Estoy contigo. Demos un paso práctico ahora.",
-      bible: { text: text || "Y si alguno de vosotros tiene falta de sabiduría, pídala a Dios.", ref: ref || "Santiago 1:5" },
-      ...(question ? { question } : {})
-    };
-  }
-
-  // --- NORMAL ---
-  const userContent =
-    `MODE: NORMAL\n` +
-    `Persona: ${persona}\n` +
-    `Mensaje_actual: ${message}\n` +
-    `Tema_prev_sustantivo: ${focusHint || "(sin pista)"}\n` +
-    `last_bible_ref: ${lastRef || "(n/a)"}\n` +
-    (shortHistory.length ? `Historial: ${shortHistory.join(" | ")}` : "Historial: (sin antecedentes)") + "\n" +
-    `INSTRUCCIONES:\n` +
-    `- Mantén el tema y progresa con 2–3 micro-pasos para HOY.\n` +
-    `- "message": afirmativo, sin signos de pregunta; no repitas viñetas recientes.\n` +
-    `- "bible": RVR1909; NO repitas last_bible_ref; temática acorde al message.\n` +
-    `- "question": UNA sola, pidiendo el siguiente dato clave o confirmando un compromiso.\n`;
-
-  const resp = await completionWithTimeout({
-    messages: [
-      { role: "system", content: SYSTEM_PROMPT },
-      { role: "user", content: userContent }
-    ],
-    temperature: 0.6,
-    max_tokens: 220,
-    timeoutMs: 12000
-  });
-
-  const content = resp?.choices?.[0]?.message?.content || "{}";
-  let data = {};
-  try { data = JSON.parse(content); } catch { data = { message: content }; }
-
-  let msg = stripQuestions((data?.message || "").toString());
-  let ref = cleanRef((data?.bible?.ref || "").toString());
-  const text = (data?.bible?.text || "").toString().trim();
-  const question = (data?.question || "").toString().trim();
-
-  return {
-    message: msg || "Estoy contigo. Demos un paso pequeño y realista hoy.",
-    bible: {
-      text: text || "Dios es nuestro amparo y fortaleza; nuestro pronto auxilio en las tribulaciones.",
-      ref: ref || "Salmos 46:1"
-    },
-    ...(question ? { question } : {})
-  };
-}
-
-// -------- Rutas principales --------
-app.post("/api/ask", async (req, res) => {
-  try {
-    const { persona = "jesus", message = "", history = [] } = req.body || {};
-    const data = await askLLM({ persona, message, history });
-
-    const out = {
-      message: (data?.message || "La paz de Dios guarde tu corazón y tus pensamientos. Paso a paso encontraremos claridad.").toString().trim(),
-      bible: {
-        text: (data?.bible?.text || "Dios es nuestro amparo y fortaleza; nuestro pronto auxilio en las tribulaciones.").toString().trim(),
-        ref: (data?.bible?.ref || "Salmos 46:1").toString().trim()
-      },
-      ...(data?.question ? { question: data.question } : {})
-    };
-
-    res.setHeader("Content-Type", "application/json; charset=utf-8");
-    res.status(200).json(out);
-  } catch (err) {
-    console.error("ASK ERROR:", err);
-    res.status(200).json({
-      message: "La paz sea contigo. Permite que tu corazón descanse y comparte lo necesario con calma.",
-      bible: {
-        text: "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu.",
-        ref: "Salmos 34:18"
-      }
+      }),
+      signal: controller.signal,
     });
+
+    clearTimeout(to);
+
+    if (!r.ok) {
+      const body = await r.text().catch(() => "");
+      console.error("elevenlabs stream error", r.status, body);
+      return res.status(502).json({ error: "elevenlabs_failed", detail: body });
+    }
+
+    // Cabeceras para entregar MP3 por streaming
+    res.setHeader("Content-Type", "audio/mpeg");
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("Accept-Ranges", "bytes");
+
+    // node-fetch v2 -> r.body es Node Readable
+    // Si en algún futuro llegara a ser WebStream, lo convertimos.
+    const body = r.body;
+    if (body && typeof body.pipe === "function") {
+      body.pipe(res);
+      body.on("error", (e) => {
+        console.error("tts pipe error", e);
+        if (!res.headersSent) res.status(500).json({ error: "tts_pipe_failed" });
+        else res.end();
+      });
+    } else if (body && typeof body.getReader === "function") {
+      // Web Stream -> convertir a Node Readable
+      const nodeReadable = Readable.fromWeb(body);
+      nodeReadable.pipe(res);
+      nodeReadable.on("error", (e) => {
+        console.error("tts pipe (fromWeb) error", e);
+        if (!res.headersSent) res.status(500).json({ error: "tts_pipe_failed" });
+        else res.end();
+      });
+    } else {
+      // Fallback: buffer completo (menos eficiente, pero seguro)
+      const buf = await r.buffer();
+      res.end(buf);
+    }
+  } catch (err) {
+    console.error("tts stream error", err);
+    const msg = (err && err.message) || "";
+    const code = msg.includes("The operation was aborted") ? 504 : 500;
+    return res.status(code).json({ error: "tts_failed", detail: msg });
   }
 });
 
+/* ====== Endpoint de prueba para escuchar fácilmente ====== */
+app.get("/api/tts-test", (req, res) => {
+  const q = String(req.query.text || "Hola, la paz sea contigo.");
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.end(`<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>TTS ElevenLabs Test</title></head>
+<body style="font-family:sans-serif;padding:24px">
+  <h1>TTS ElevenLabs Test</h1>
+  <form method="GET" action="/api/tts-test">
+    <label>Texto:</label>
+    <input type="text" name="text" value="${q.replace(/"/g, "&quot;")}" style="width: 420px" />
+    <button type="submit">Reproducir</button>
+  </form>
+  <p>Endpoint: <code>/api/tts?text=...</code></p>
+  <audio id="player" controls autoplay src="/api/tts?text=${encodeURIComponent(q)}"></audio>
+</body>
+</html>`);
+});
+
+/* ====== Endpoint: Bienvenida dinámica ====== */
 app.get("/api/welcome", (_req, res) => {
-  res.json({
-    message: "La paz esté contigo. Estoy aquí para escucharte y acompañarte con calma.",
-    bible: {
-      text: "El Señor es mi luz y mi salvación; ¿de quién temeré?",
-      ref: "Salmos 27:1"
-    }
-  });
-});
-
-// -------- HeyGen: token para Streaming Avatar --------
-
-const fetch = globalThis.fetch
-  || ((...args) => import("node-fetch").then(({ default: f }) => f(...args)));
-
-async function fetchJson(url, init) {
-  const r = await fetch(url, init);
-  const text = await r.text();
-  let json;
-  try { json = JSON.parse(text); } catch { json = null; }
-  return { ok: r.ok, status: r.status, text, json };
-}
-
-/**
- * Intenta crear un token temporal para el SDK web.
- * Probamos varias rutas conocidas de HeyGen, devolviendo { token } si alguna responde.
- */
-async function createHeygenSessionToken() {
-  const API_KEY = process.env.HEYGEN_API_KEY || "";
-  if (!API_KEY) {
-    const e = new Error("Falta HEYGEN_API_KEY en variables de entorno");
-    e.code = "NO_KEY";
-    throw e;
-  }
-
-  const headers = {
-    "Authorization": `Bearer ${API_KEY}`,
-    "Content-Type": "application/json",
-    "Accept": "application/json"
-  };
-
-  const candidates = [
-    { url: "https://api.heygen.com/v1/streaming.create_token", method: "POST", body: {} },
-    { url: "https://api.heygen.com/v1/server_assistant/token", method: "POST", body: {} },
-    { url: "https://api.heygen.com/v1/streaming/token", method: "POST", body: {} }
+  const greetings = [
+    "Buenos días, que la paz de Dios te acompañe hoy.",
+    "Buenas tardes, recuerda que Jesús siempre camina a tu lado.",
+    "Buenas noches, que el amor del Padre te envuelva en descanso.",
+    "La paz sea contigo, ¿cómo te encuentras en este momento?",
+    "Que la esperanza y la fe iluminen tu día, ¿qué quisieras compartir hoy?",
+    "Jesús está contigo en cada paso, ¿quieres contarme lo que vives ahora?",
+    "Eres escuchado y amado, ¿qué tienes en tu corazón hoy?",
   ];
-
-  let lastErr = { status: 0, body: "" };
-
-  for (const c of candidates) {
-    const { ok, status, json, text } = await fetchJson(c.url, {
-      method: c.method,
-      headers,
-      body: JSON.stringify(c.body)
-    });
-
-    if (ok && json) {
-      const token = json.token || json?.data?.token;
-      if (typeof token === "string" && token.length > 0) {
-        return { token };
-      }
-    }
-
-    lastErr = { status, body: text || "" };
-    // Si es 404 puede ser endpoint no habilitado; probamos el siguiente
-    // Si es 400 con "quota not enough", devolvemos ese error
-    if (status === 400 && /quota not enough/i.test(text)) {
-      const e = new Error("HeyGen: cuota insuficiente");
-      e.code = "QUOTA";
-      throw e;
-    }
-  }
-
-  const e = new Error(`No se pudo crear token HeyGen (último status ${lastErr.status})`);
-  e.code = "UPSTREAM";
-  e.detail = lastErr;
-  throw e;
-}
-
-// GET y POST — ambos devuelven { token }
-app.get("/api/heygen/token", async (_req, res) => {
-  try {
-    const { token } = await createHeygenSessionToken();
-    res.json({ token });
-  } catch (err) {
-    console.error("HEYGEN TOKEN ERROR:", err);
-    const code = err?.code || "";
-    if (code === "NO_KEY") return res.status(500).json({ error: "Falta HEYGEN_API_KEY en el backend." });
-    if (code === "QUOTA") return res.status(402).json({ error: "quota not enough" });
-    return res.status(502).json({ error: "No se pudo obtener token de HeyGen." });
-  }
+  const randomGreeting = greetings[Math.floor(Math.random() * greetings.length)];
+  res.json({ text: randomGreeting });
 });
 
-// Alias por compatibilidad con el frontend previo
-app.get("/api/heygen/session-token", async (req, res) => {
-  req.url = "/api/heygen/token";
-  app._router.handle(req, res, () => {});
+/* ====== Raíz ====== */
+app.get("/", (_req, res) => {
+  res.send("jesus-backend up ✅");
 });
 
-app.post("/api/heygen/token", async (_req, res) => {
-  try {
-    const { token } = await createHeygenSessionToken();
-    res.json({ token });
-  } catch (err) {
-    console.error("HEYGEN TOKEN ERROR:", err);
-    const code = err?.code || "";
-    if (code === "NO_KEY") return res.status(500).json({ error: "Falta HEYGEN_API_KEY en el backend." });
-    if (code === "QUOTA") return res.status(402).json({ error: "quota not enough" });
-    return res.status(502).json({ error: "No se pudo obtener token de HeyGen." });
-  }
-});
-
-// -------- Arranque --------
+/* ====== Inicio servidor ====== */
 const PORT = process.env.PORT || 3000;
-const HOST = process.env.HOST || "0.0.0.0";
-
-app.listen(PORT, HOST, () => {
-  const hasHeygenKey = !!process.env.HEYGEN_API_KEY;
-  console.log(`Servidor listo en puerto ${PORT} (host ${HOST})`);
-  console.log(`HeyGen KEY: ${hasHeygenKey ? "OK (definida)" : "NO DEFINIDA"}`);
+app.listen(PORT, () => {
+  console.log(`Servidor escuchando en http://localhost:${PORT}`);
 });
