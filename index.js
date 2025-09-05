@@ -162,7 +162,7 @@ function detectMainSubject(s = "") {
   if (/(mi\s+amig[oa])/.test(t)) return "friend";
   return "self";
 }
-// Persona de apoyo tipo “mi hija”, “mi primo”, etc.
+// Persona de apoyo tipo “mi hija”, “mi primo”, etc. (para informar al modelo)
 const SUPPORT_WORDS = [
   "hijo","hija","madre","padre","mamá","mama","papá","papa","abuelo","abuela","nieto","nieta",
   "tío","tio","tía","tia","sobrino","sobrina","primo","prima","cuñado","cuñada","suegro","suegra","yerno","nuera",
@@ -306,7 +306,7 @@ async function askLLM({ persona, message, history = [], userId = "anon" }) {
     `last_bible_ref: ${lastRef || "(n/a)"}\n` +
     `banned_refs:\n- ${bannedRefs.join("\n- ") || "(none)"}\n` +
     (recentQs.length ? `ultimas_preguntas: ${recentQs.join(" | ")}` : "ultimas_preguntas: (ninguna)") + "\n" +
-    (shortHistory.length ? `Historial: ${shortHistory.join(" | ")}` : "Historial: (sin antecedentes)") + "\n";
+    (shortHistory.length ? `Historial: ${shortHistory.join(" | ")}` : "Historial: (sin antecedentes)") + "\n`;
 
   const resp = await completionWithTimeout({
     messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: header }],
@@ -401,56 +401,47 @@ app.get("/api/welcome", (_req, res) => {
   });
 });
 
-// === HeyGen: token efímero para Streaming Avatar ===
-// Requiere en .env del backend: HEYGEN_API_KEY=sk-xxxxx (tu clave real de HeyGen)
-app.get("/api/heygen/token", async (req, res) => {
+// === HeyGen: token efímero para Streaming (POST upstream) ===
+// Requiere process.env.HEYGEN_API_KEY
+app.get("/api/heygen/token", async (_req, res) => {
   try {
-    console.log(`[HEYGEN] /api/heygen/token from ${req.ip || "unknown"}`);
-
-    const apiKey = process.env.HEYGEN_API_KEY;
-    if (!apiKey) {
-      console.error("[HEYGEN] Falta HEYGEN_API_KEY en el backend");
+    const API_KEY = process.env.HEYGEN_API_KEY || "";
+    if (!API_KEY) {
       return res.status(500).json({ error: "HEYGEN_API_KEY missing" });
     }
 
-    const upstream = await fetch("https://api.heygen.com/v1/streaming.token", {
-      method: "POST",
+    const url = "https://api.heygen.com/v1/streaming.token";
+    const r = await fetch(url, {
+      method: "POST", // <-- IMPORTANTE: HeyGen requiere POST
       headers: {
-        "Authorization": `Bearer ${apiKey}`,
+        Authorization: `Bearer ${API_KEY}`,
         "Content-Type": "application/json",
-        "Accept": "application/json",
+        Accept: "application/json",
       },
-      body: JSON.stringify({}),
+      body: JSON.stringify({}), // body vacío está bien
     });
 
-    const text = await upstream.text();
-    if (!upstream.ok) {
-      console.error("[HEYGEN] upstream error", upstream.status, text);
-      return res.status(502).json({ error: "heygen upstream", status: upstream.status, body: text });
+    const text = await r.text();
+    if (!r.ok) {
+      console.error("HEYGEN TOKEN UPSTREAM ERROR:", r.status, text);
+      return res
+        .status(502)
+        .json({ error: "heygen upstream", status: r.status, body: text });
     }
 
     let data = {};
-    try { data = JSON.parse(text); } catch {
-      console.error("[HEYGEN] upstream no JSON:", text.slice(0, 200));
-      return res.status(502).json({ error: "invalid upstream json" });
-    }
-
-    const token = data?.data?.token || data?.token || null;
+    try { data = JSON.parse(text); } catch {}
+    const token = data?.token || data?.data?.token;
     if (!token) {
-      console.error("[HEYGEN] upstream sin token:", data);
-      return res.status(502).json({ error: "upstream without token" });
+      return res.status(500).json({ error: "no token in heygen response", raw: data });
     }
 
-    res.setHeader("Cache-Control", "no-store");
     return res.json({ token });
-  } catch (e) {
-    console.error("[HEYGEN] token fatal:", e);
-    return res.status(500).json({ error: "internal error" });
+  } catch (err) {
+    console.error("HEYGEN TOKEN ROUTE ERROR:", err);
+    return res.status(500).json({ error: "server error", detail: String(err) });
   }
 });
-
-// (opcional) health para debug rápido
-app.get("/api/health", (_req, res) => res.json({ ok: true, ts: Date.now() }));
 
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 8080;
