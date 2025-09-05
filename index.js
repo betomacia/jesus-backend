@@ -1,21 +1,17 @@
-// index.js — backend estable con OpenAI + HeyGen token + D-ID proxy
+// index.js — backend estable; OpenAI + HeyGen session-token; D-ID opcional (si tienes routes/did.js)
 
 const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
 const OpenAI = require("openai");
+const fetch = require("node-fetch");
 require("dotenv").config();
 
-// =======================================
-// App base
-// =======================================
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-// =======================================
-// OpenAI
-// =======================================
+// ---- OpenAI ----
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 /**
@@ -100,9 +96,8 @@ function stripQuestions(s = "") {
   return noLeadingQs.replace(/[¿?]+/g, "").trim();
 }
 
-// -------- Llamada LLM --------
-const ACK_TIMEOUT_MS = 6000;     // respuesta ágil en acks
-const RETRY_TIMEOUT_MS = 3000;   // reintento corto si la primera se demora
+const ACK_TIMEOUT_MS = 6000;
+const RETRY_TIMEOUT_MS = 3000;
 
 function isAck(msg = "") {
   return /^\s*(si|sí|ok|okay|vale|dale|de acuerdo|perfecto|genial|bien)\s*\.?$/i.test((msg || "").trim());
@@ -159,7 +154,6 @@ async function askLLM({ persona, message, history = [] }) {
   const focusHint = lastSubstantiveUser(history);
   const shortHistory = compactHistory(history, (ack || bye) ? 4 : 10, 240);
 
-  // --- DESPEDIDA ---
   if (bye) {
     const userContent =
       `MODE: GOODBYE\n` +
@@ -211,7 +205,6 @@ async function askLLM({ persona, message, history = [] }) {
     };
   }
 
-  // --- ACK ---
   if (ack) {
     const userContent =
       `MODE: ACK\n` +
@@ -265,7 +258,6 @@ async function askLLM({ persona, message, history = [] }) {
     };
   }
 
-  // --- NORMAL ---
   const userContent =
     `MODE: NORMAL\n` +
     `Persona: ${persona}\n` +
@@ -308,11 +300,7 @@ async function askLLM({ persona, message, history = [] }) {
   };
 }
 
-// =======================================
-// Rutas API
-// =======================================
-
-// Conversación principal
+// -------- Rutas --------
 app.post("/api/ask", async (req, res) => {
   try {
     const { persona = "jesus", message = "", history = [] } = req.body || {};
@@ -341,7 +329,6 @@ app.post("/api/ask", async (req, res) => {
   }
 });
 
-// Mensaje de bienvenida simple
 app.get("/api/welcome", (_req, res) => {
   res.json({
     message: "La paz esté contigo. Estoy aquí para escucharte y acompañarte con calma.",
@@ -352,58 +339,43 @@ app.get("/api/welcome", (_req, res) => {
   });
 });
 
-// =======================================
-// HeyGen: crear token de streaming
-// =======================================
-// Requiere variable de entorno: HEYGEN_API_KEY
-app.get("/api/heygen/token", async (_req, res) => {
+// ---- HeyGen: Session Token para Streaming API ----
+if (!process.env.HEYGEN_API_KEY) {
+  console.warn("[HEYGEN] Falta HEYGEN_API_KEY en el backend (.env)");
+}
+app.get("/api/heygen/session-token", async (_req, res) => {
   try {
-    const API_KEY = process.env.HEYGEN_API_KEY || "";
-    if (!API_KEY) {
-      return res.status(500).json({ error: "missing_HEYGEN_API_KEY" });
-    }
-
     const r = await fetch("https://api.heygen.com/v1/streaming.create_token", {
       method: "POST",
       headers: {
-        "x-api-key": API_KEY,
-        "Content-Type": "application/json"
+        "X-Api-Key": process.env.HEYGEN_API_KEY,
+        "Accept": "application/json",
+        "Content-Type": "application/json",
       },
-      body: JSON.stringify({}) // algunos entornos requieren cuerpo JSON
+      body: JSON.stringify({})
     });
-
-    const json = await r.json().catch(() => ({}));
-    const token = json?.data?.token;
-    if (!r.ok || !token) {
-      return res.status(r.status || 500).json({ error: "create_token_failed", detail: json });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j?.data?.token) {
+      return res.status(r.status || 500).json({ error: "create_token_failed", detail: j });
     }
-    res.json({ token });
+    res.json({ token: j.data.token });
   } catch (e) {
-    console.error("HEYGEN token error:", e);
-    res.status(500).json({ error: "token_server_error" });
+    res.status(500).json({ error: "create_token_error", detail: String(e) });
   }
 });
 
-// =======================================
-// D-ID proxy (Streams + ElevenLabs)
-// =======================================
+// (Opcional) Montar rutas D-ID si tienes el archivo routes/did.js
 try {
   const didRoutes = require("./routes/did");
   app.use("/api/did", didRoutes);
   console.log("D-ID routes mounted at /api/did");
-} catch (e) {
-  console.warn("D-ID routes not mounted:", e && e.message ? e.message : e);
+} catch {
+  // si no existe, no pasa nada
 }
 
-// Salud
-app.get("/health", (_req, res) => res.json({ ok: true }));
-
-// =======================================
-// Arranque
-// =======================================
+// -------- Arranque --------
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || "0.0.0.0";
-
 app.listen(PORT, HOST, () => {
   console.log(`Servidor listo en puerto ${PORT} (host ${HOST})`);
 });
