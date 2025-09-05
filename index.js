@@ -1,17 +1,18 @@
-// index.js — backend estable; OpenAI + HeyGen session-token; D-ID opcional (si tienes routes/did.js)
+// index.js — backend estable, sin bancos locales; ACK/GOODBYE rápidos vía OpenAI
+// + HeyGen: /api/heygen/token
 
 const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
 const OpenAI = require("openai");
-const fetch = require("node-fetch");
 require("dotenv").config();
 
+// ---------- App ----------
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-// ---- OpenAI ----
+// ---------- OpenAI ----------
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 /**
@@ -96,8 +97,10 @@ function stripQuestions(s = "") {
   return noLeadingQs.replace(/[¿?]+/g, "").trim();
 }
 
-const ACK_TIMEOUT_MS = 6000;
-const RETRY_TIMEOUT_MS = 3000;
+// -------- Llamada LLM --------
+// ACK = respuestas tipo "sí/ok/vale"; GOODBYE = despedidas ("me voy", "debo irme", etc.)
+const ACK_TIMEOUT_MS = 6000;     // respuesta ágil en acks
+const RETRY_TIMEOUT_MS = 3000;   // reintento corto si la primera se demora
 
 function isAck(msg = "") {
   return /^\s*(si|sí|ok|okay|vale|dale|de acuerdo|perfecto|genial|bien)\s*\.?$/i.test((msg || "").trim());
@@ -154,6 +157,7 @@ async function askLLM({ persona, message, history = [] }) {
   const focusHint = lastSubstantiveUser(history);
   const shortHistory = compactHistory(history, (ack || bye) ? 4 : 10, 240);
 
+  // --- DESPEDIDA ---
   if (bye) {
     const userContent =
       `MODE: GOODBYE\n` +
@@ -205,6 +209,7 @@ async function askLLM({ persona, message, history = [] }) {
     };
   }
 
+  // --- ACK ---
   if (ack) {
     const userContent =
       `MODE: ACK\n` +
@@ -258,6 +263,7 @@ async function askLLM({ persona, message, history = [] }) {
     };
   }
 
+  // --- NORMAL ---
   const userContent =
     `MODE: NORMAL\n` +
     `Persona: ${persona}\n` +
@@ -300,7 +306,7 @@ async function askLLM({ persona, message, history = [] }) {
   };
 }
 
-// -------- Rutas --------
+// -------- Rutas principales --------
 app.post("/api/ask", async (req, res) => {
   try {
     const { persona = "jesus", message = "", history = [] } = req.body || {};
@@ -339,43 +345,114 @@ app.get("/api/welcome", (_req, res) => {
   });
 });
 
-// ---- HeyGen: Session Token para Streaming API ----
-if (!process.env.HEYGEN_API_KEY) {
-  console.warn("[HEYGEN] Falta HEYGEN_API_KEY en el backend (.env)");
+// -------- HeyGen: token para Streaming Avatar --------
+
+const fetch = globalThis.fetch
+  || ((...args) => import("node-fetch").then(({ default: f }) => f(...args)));
+
+async function fetchJson(url, init) {
+  const r = await fetch(url, init);
+  const text = await r.text();
+  let json;
+  try { json = JSON.parse(text); } catch { json = null; }
+  return { ok: r.ok, status: r.status, text, json };
 }
-app.get("/api/heygen/session-token", async (_req, res) => {
-  try {
-    const r = await fetch("https://api.heygen.com/v1/streaming.create_token", {
-      method: "POST",
-      headers: {
-        "X-Api-Key": process.env.HEYGEN_API_KEY,
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({})
+
+/**
+ * Intenta crear un token temporal para el SDK web.
+ * Probamos varias rutas conocidas de HeyGen, devolviendo { token } si alguna responde.
+ */
+async function createHeygenSessionToken() {
+  const API_KEY = process.env.HEYGEN_API_KEY || "";
+  if (!API_KEY) {
+    const e = new Error("Falta HEYGEN_API_KEY en variables de entorno");
+    e.code = "NO_KEY";
+    throw e;
+  }
+
+  const headers = {
+    "Authorization": `Bearer ${API_KEY}`,
+    "Content-Type": "application/json",
+    "Accept": "application/json"
+  };
+
+  const candidates = [
+    { url: "https://api.heygen.com/v1/streaming.create_token", method: "POST", body: {} },
+    { url: "https://api.heygen.com/v1/server_assistant/token", method: "POST", body: {} },
+    { url: "https://api.heygen.com/v1/streaming/token", method: "POST", body: {} }
+  ];
+
+  let lastErr = { status: 0, body: "" };
+
+  for (const c of candidates) {
+    const { ok, status, json, text } = await fetchJson(c.url, {
+      method: c.method,
+      headers,
+      body: JSON.stringify(c.body)
     });
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok || !j?.data?.token) {
-      return res.status(r.status || 500).json({ error: "create_token_failed", detail: j });
+
+    if (ok && json) {
+      const token = json.token || json?.data?.token;
+      if (typeof token === "string" && token.length > 0) {
+        return { token };
+      }
     }
-    res.json({ token: j.data.token });
-  } catch (e) {
-    res.status(500).json({ error: "create_token_error", detail: String(e) });
+
+    lastErr = { status, body: text || "" };
+    // Si es 404 puede ser endpoint no habilitado; probamos el siguiente
+    // Si es 400 con "quota not enough", devolvemos ese error
+    if (status === 400 && /quota not enough/i.test(text)) {
+      const e = new Error("HeyGen: cuota insuficiente");
+      e.code = "QUOTA";
+      throw e;
+    }
+  }
+
+  const e = new Error(`No se pudo crear token HeyGen (último status ${lastErr.status})`);
+  e.code = "UPSTREAM";
+  e.detail = lastErr;
+  throw e;
+}
+
+// GET y POST — ambos devuelven { token }
+app.get("/api/heygen/token", async (_req, res) => {
+  try {
+    const { token } = await createHeygenSessionToken();
+    res.json({ token });
+  } catch (err) {
+    console.error("HEYGEN TOKEN ERROR:", err);
+    const code = err?.code || "";
+    if (code === "NO_KEY") return res.status(500).json({ error: "Falta HEYGEN_API_KEY en el backend." });
+    if (code === "QUOTA") return res.status(402).json({ error: "quota not enough" });
+    return res.status(502).json({ error: "No se pudo obtener token de HeyGen." });
   }
 });
 
-// (Opcional) Montar rutas D-ID si tienes el archivo routes/did.js
-try {
-  const didRoutes = require("./routes/did");
-  app.use("/api/did", didRoutes);
-  console.log("D-ID routes mounted at /api/did");
-} catch {
-  // si no existe, no pasa nada
-}
+// Alias por compatibilidad con el frontend previo
+app.get("/api/heygen/session-token", async (req, res) => {
+  req.url = "/api/heygen/token";
+  app._router.handle(req, res, () => {});
+});
+
+app.post("/api/heygen/token", async (_req, res) => {
+  try {
+    const { token } = await createHeygenSessionToken();
+    res.json({ token });
+  } catch (err) {
+    console.error("HEYGEN TOKEN ERROR:", err);
+    const code = err?.code || "";
+    if (code === "NO_KEY") return res.status(500).json({ error: "Falta HEYGEN_API_KEY en el backend." });
+    if (code === "QUOTA") return res.status(402).json({ error: "quota not enough" });
+    return res.status(502).json({ error: "No se pudo obtener token de HeyGen." });
+  }
+});
 
 // -------- Arranque --------
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || "0.0.0.0";
+
 app.listen(PORT, HOST, () => {
+  const hasHeygenKey = !!process.env.HEYGEN_API_KEY;
   console.log(`Servidor listo en puerto ${PORT} (host ${HOST})`);
+  console.log(`HeyGen KEY: ${hasHeygenKey ? "OK (definida)" : "NO DEFINIDA"}`);
 });
