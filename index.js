@@ -355,7 +355,7 @@ async function askLLM({ persona, message, history = [], userId = "anon" }) {
   };
 }
 
-// ---------- Rutas ----------
+// ---------- Rutas JSON ----------
 app.post("/api/ask", async (req, res) => {
   try {
     const {
