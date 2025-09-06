@@ -401,33 +401,34 @@ app.get("/api/welcome", (_req, res) => {
   });
 });
 
-// === HeyGen: emitir token de sesión (NO toca OpenAI) ===
-app.get("/api/heygen/token", async (_req, res) => {
+// === HeyGen: config por idioma ===
+// Entrega al frontend los IDs configurados en Railway.
+app.get("/api/heygen/config", (_req, res) => {
   try {
-    const API_KEY = process.env.HEYGEN_API_KEY || process.env.HEYGEN_TOKEN || "";
-    if (!API_KEY) {
-      return res.status(500).json({ error: "missing_HEYGEN_API_KEY" });
-    }
-
-    const r = await fetch("https://api.heygen.com/v1/streaming.create_token", {
-      method: "POST",
-      headers: { "x-api-key": API_KEY },
-    });
-
-    const json = await r.json().catch(() => ({}));
-    const token = json?.data?.token || json?.token || json?.access_token || "";
-    if (!r.ok || !token) {
-      return res.status(r.status || 500).json({ error: "heygen_token_failed", detail: json });
-    }
-    res.json({ token });
+    const cfg = {
+      voiceId: process.env.HEYGEN_VOICE_ID || process.env.HEYGEN_VOICE || "",
+      defaultAvatar: process.env.HEYGEN_AVATAR_DEFAULT || "",
+      avatars: {
+        es: process.env.HEYGEN_AVATAR_ES || "",
+        en: process.env.HEYGEN_AVATAR_EN || "",
+        pt: process.env.HEYGEN_AVATAR_PT || "",
+        it: process.env.HEYGEN_AVATAR_IT || "",
+        de: process.env.HEYGEN_AVATAR_DE || "",
+        ca: process.env.HEYGEN_AVATAR_CA || "",
+      },
+      version: Number(process.env.HEYGEN_CFG_VERSION || 1),
+    };
+    res.json(cfg);
   } catch (e) {
-    console.error("heygen token exception:", e);
-    res.status(500).json({ error: "heygen_token_error" });
+    console.error("heygen config exception:", e);
+    res.status(500).json({ error: "heygen_config_error" });
   }
 });
+
 
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`Servidor listo en puerto ${PORT}`);
 });
+
