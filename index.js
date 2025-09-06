@@ -302,13 +302,17 @@ async function askLLM({ persona, message, history = [], userId = "anon" }) {
 
   const shortHistory = compactHistory(history, 10, 240);
   const header =
-    `Persona: ${persona}\n` +
-    `Mensaje_actual: ${message}\n` +
-    `FRAME: ${JSON.stringify(frame)}\n` +
-    `last_bible_ref: ${lastRef || "(n/a)"}\n` +
-    `banned_refs:\n- ${bannedRefs.join("\n- ") || "(none)"}\n` +
-    (recentQs.length ? `ultimas_preguntas: ${recentQs.join(" | ")}` : "ultimas_preguntas: (ninguna)") + "\n" +
-    (shortHistory.length ? `Historial: ${shortHistory.join(" | ")}` : "Historial: (sin antecedentes)") + "\n`;
+  `Persona: ${persona}\n` +
+  `Mensaje_actual: ${message}\n` +
+  `FRAME: ${JSON.stringify(frame)}\n` +
+  `last_bible_ref: ${lastRef || "(n/a)"}\n` +
+  `banned_refs:\n- ${bannedRefs.join("\n- ") || "(none)"}\n` +
+  (recentQs.length
+    ? `ultimas_preguntas: ${recentQs.join(" | ")}`
+    : "ultimas_preguntas: (ninguna)") + "\n" +
+  (shortHistory.length
+    ? `Historial: ${shortHistory.join(" | ")}`
+    : "Historial: (sin antecedentes)") + "\n";
 
   const resp = await completionWithTimeout({
     messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: header }],
@@ -465,3 +469,4 @@ const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`Servidor listo en puerto ${PORT}`);
 });
+
