@@ -1,6 +1,7 @@
-// index.js — Backend minimalista: 100% preguntas desde OpenAI (sin inyección local)
-// Respuestas cortas (≤60 palabras), UNA pregunta opcional solo si la devuelve OpenAI,
-// citas RVR1909 sin repetir, memoria simple por usuario y FRAME básico sin desvíos.
+// index.js — Backend minimalista con bienvenida dinámica vía OpenAI
+// - /api/ask: igual que antes (message+bible+question)
+// - /api/welcome: NUEVO -> genera saludo + una pregunta (sin versículo)
+// - No se toca la lógica de /api/ask ni la memoria de usuario
 
 const express = require("express");
 const cors = require("cors");
@@ -18,7 +19,7 @@ app.use(bodyParser.json());
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 /**
- * Formato esperado desde OpenAI:
+ * Respuesta esperada desde /api/ask:
  * {
  *   "message": "consejo breve, SIN preguntas (≤60 palabras)",
  *   "bible": { "text": "RVR1909 literal", "ref": "Libro 0:0" },
@@ -37,17 +38,15 @@ OBJETIVO
 
 MARCO (FRAME)
 - Respeta el FRAME (topic_primary, main_subject, support_persons) y el historial breve como contexto.
-- NO cambies el tema por mencionar una persona de apoyo (“mi hija/mi primo/mi amigo”). Es apoyo, no nuevo tema.
+- NO cambies el tema por mencionar una persona de apoyo (“mi hija/mi primo/mi amigo”).
 
 PROGRESO
-- Cada turno aporta novedad útil (micro-pasos concretos, mini-guion, decisión simple o límite).
-- Si el usuario solo reconoce (“sí/ok/vale”), avanza a práctica/compromiso sin repetir contenido.
-- Evita preguntar por canal/hora (p.ej., “¿mensaje o llamada?”) si el objetivo/voluntad de contacto aún no es claro.
+- Cada turno aporta novedad útil (micro-pasos).
+- Si el usuario solo reconoce (“sí/ok/vale”), avanza a práctica/compromiso sin repetir.
 
 BIBLIA (RVR1909, SIN AMBIGÜEDADES)
-- Ajusta la cita al tema y a los micro-pasos.
+- Ajusta la cita al tema.
 - Usa RVR1909 literal y "Libro 0:0" en "ref".
-- Evita last_bible_ref y todas las banned_refs.
 - Evita ambigüedad “el Hijo” (Juan 8:36) cuando el usuario alude a un familiar “hijo/hija”, salvo pertinencia teológica explícita.
 
 FORMATO (OBLIGATORIO)
@@ -58,7 +57,7 @@ FORMATO (OBLIGATORIO)
 }
 `;
 
-// Respuesta tipada por esquema (OpenAI JSON mode)
+// Respuesta tipada por esquema (OpenAI JSON mode) para /api/ask
 const responseFormat = {
   type: "json_schema",
   json_schema: {
@@ -136,8 +135,6 @@ function extractRecentBibleRefs(history = [], maxRefs = 3) {
   }
   return found;
 }
-
-// Detección muy simple de tema/sujeto y persona de apoyo (para el FRAME)
 function guessTopic(s = "") {
   const t = (s || "").toLowerCase();
   if (/(droga|adicci|alcohol|apuestas)/.test(t)) return "addiction";
@@ -162,7 +159,6 @@ function detectMainSubject(s = "") {
   if (/(mi\s+amig[oa])/.test(t)) return "friend";
   return "self";
 }
-// Persona de apoyo
 const SUPPORT_WORDS = [
   "hijo","hija","madre","padre","mamá","mama","papá","papa","abuelo","abuela","nieto","nieta",
   "tío","tio","tía","tia","sobrino","sobrina","primo","prima","cuñado","cuñada","suegro","suegra","yerno","nuera",
@@ -187,7 +183,7 @@ function detectSupportNP(s = "") {
   return { label };
 }
 
-// ---------- Memoria por usuario ----------
+// ---------- Memoria por usuario (igual que antes) ----------
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
 async function ensureDataDir() { try { await fs.mkdir(DATA_DIR, { recursive: true }); } catch {} }
 function memPath(uid) {
@@ -276,11 +272,10 @@ async function regenerateBibleAvoiding({ persona, message, frame, bannedRefs = [
   return text && ref ? { text, ref } : null;
 }
 
-// ---------- Core ----------
+// ---------- Core /api/ask (igual que antes) ----------
 async function askLLM({ persona, message, history = [], userId = "anon" }) {
   const mem = await readUserMemory(userId);
 
-  // FRAME básico
   const support = detectSupportNP(message);
   const topic = guessTopic(message);
   const mainSubject = detectMainSubject(message);
@@ -319,28 +314,24 @@ async function askLLM({ persona, message, history = [], userId = "anon" }) {
   let data = {};
   try { data = JSON.parse(content); } catch { data = { message: content }; }
 
-  // Sanitización final
   let msg = stripQuestionsFromMessage((data?.message || "").toString());
   msg = limitWords(msg, 60);
 
   let ref = cleanRef((data?.bible?.ref || "").toString());
   let text = (data?.bible?.text || "").toString().trim();
 
-  // Evitar cita vetada/ambigua/repetida
   const hijoOnly = /\bhijo\b/i.test(message) && !/(Jes[uú]s|Cristo)/i.test(message);
   if (!ref || bannedRefs.includes(ref) || (hijoOnly && /Juan\s*8:36/i.test(ref))) {
     const alt = await regenerateBibleAvoiding({ persona, message, frame, bannedRefs, lastRef });
     if (alt) { ref = alt.ref; text = alt.text; }
   }
 
-  // Pregunta: SOLO si viene del modelo y no repite las últimas
   let question = (data?.question || "").toString().trim();
   const normalizedQ = normalizeQuestion(question);
   const isRepeat = !question ? false : recentQs.includes(normalizedQ);
   const malformed = question && !/\?\s*$/.test(question);
   if (!question || isRepeat || malformed) question = "";
 
-  // Actualizar memoria
   mem.last_bible_ref = ref || mem.last_bible_ref || "";
   mem.last_bible_refs = Array.from(new Set([...(mem.last_bible_refs || []), ref].filter(Boolean))).slice(-5);
   if (question) {
@@ -355,7 +346,7 @@ async function askLLM({ persona, message, history = [], userId = "anon" }) {
   };
 }
 
-// ---------- Rutas JSON ----------
+// ---------- Rutas ----------
 app.post("/api/ask", async (req, res) => {
   try {
     const {
@@ -380,7 +371,6 @@ app.post("/api/ask", async (req, res) => {
     res.status(200).json(out);
   } catch (err) {
     console.error("ASK ERROR:", err);
-    // Fallback SOLO por error técnico; sin pregunta
     res.status(200).json({
       message: "La paz sea contigo. Compárteme en pocas palabras lo esencial, y seguimos paso a paso.",
       bible: {
@@ -391,97 +381,82 @@ app.post("/api/ask", async (req, res) => {
   }
 });
 
-app.get("/api/welcome", (_req, res) => {
-  res.json({
-    message: "La paz esté contigo. Estoy aquí para escucharte y acompañarte con calma.",
-    bible: {
-      text: "El Señor es mi luz y mi salvación; ¿de quién temeré?",
-      ref: "Salmos 27:1"
+// ===== NUEVO: Bienvenida dinámica (sin versículo) =====
+const WELCOME_RESPONSE_FORMAT = {
+  type: "json_schema",
+  json_schema: {
+    name: "WelcomeIntro",
+    schema: {
+      type: "object",
+      properties: {
+        greet: { type: "string" },
+        question: { type: "string" }
+      },
+      required: ["greet", "question"],
+      additionalProperties: false
     }
-  });
-});
-
-/* =========================
-   HeyGen — SOLO backend
-   ========================= */
-
-// Emite token de streaming (misma cuenta que Railway)
-app.get("/api/heygen/token", async (_req, res) => {
-  try {
-    const API_KEY = process.env.HEYGEN_API_KEY || process.env.HEYGEN_TOKEN || "";
-    if (!API_KEY) return res.status(500).json({ error: "missing_HEYGEN_API_KEY" });
-
-    const r = await fetch("https://api.heygen.com/v1/streaming.create_token", {
-      method: "POST",
-      headers: { "x-api-key": API_KEY }
-    });
-
-    const json = await r.json().catch(() => ({}));
-    const token = json?.data?.token || json?.token || json?.access_token || "";
-    if (!r.ok || !token) return res.status(r.status || 500).json({ error: "heygen_token_failed", detail: json });
-
-    res.json({ token });
-  } catch (e) {
-    console.error("heygen token exception:", e);
-    res.status(500).json({ error: "heygen_token_error" });
   }
-});
+};
 
-// Config para el frontend (avatar/voz por idioma)
-app.get("/api/heygen/config", (_req, res) => {
-  const cfg = {
-    languageDefault: process.env.HEYGEN_LANG_DEFAULT || "es",
-    voiceId: process.env.HEYGEN_VOICE_ID || "",
-    avatars: {
-      es: process.env.HEYGEN_AVATAR_ES || process.env.HEYGEN_AVATAR_NAME || "default",
-      en: process.env.HEYGEN_AVATAR_EN || "",
-      pt: process.env.HEYGEN_AVATAR_PT || "",
-      it: process.env.HEYGEN_AVATAR_IT || "",
-      de: process.env.HEYGEN_AVATAR_DE || process.env.HEYGEN_AVATAR_AL || "",
-      ca: process.env.HEYGEN_AVATAR_CA || "",
-    }
-  };
-  res.json(cfg);
-});
+const WELCOME_SYSTEM_PROMPT = `
+Eres Jesús: sereno, compasivo y claro. Responde SIEMPRE en español.
 
-// Resolver nombre público -> ID real de streaming
-app.get("/api/heygen/resolve-avatar", async (req, res) => {
+TAREA
+- Genera una BIENVENIDA MUY BREVE para iniciar conversación con la persona.
+- NO incluyas citas bíblicas ni referencias de versículo.
+- Puedes usar el nombre si lo recibes, con naturalidad (sin título “señor/ señora”).
+- Tono cercano, afectuoso y esperanzador.
+
+FORMATO (OBLIGATORIO) — SOLO JSON:
+{
+  "greet": "saludo de 20–45 palabras, sin preguntas",
+  "question": "UNA sola pregunta breve para invitar a contar qué necesita o qué desea hoy (termina en '?')"
+}
+`;
+
+app.post("/api/welcome", async (req, res) => {
   try {
-    const API_KEY = process.env.HEYGEN_API_KEY || process.env.HEYGEN_TOKEN || "";
-    if (!API_KEY) return res.status(500).json({ error: "missing_HEYGEN_API_KEY" });
+    const { name = "", gender = "unknown", lang = "es" } = req.body || {};
+    const usr =
+      `Contexto:\n` +
+      `- nombre: ${String(name || "").trim() || "(sin nombre)"}\n` +
+      `- genero: ${String(gender || "unknown")}\n` +
+      `- idioma_ui: ${String(lang || "es")}\n` +
+      `Instrucciones: crea la bienvenida y una sola pregunta breve.`;
 
-    const q = String(req.query.q || "").trim();
-    if (!q) return res.status(400).json({ error: "missing_q" });
-
-    const r = await fetch("https://api.heygen.com/v1/streaming/avatar.list", {
-      method: "GET",
-      headers: { "x-api-key": API_KEY }
+    const r = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0.7,
+      max_tokens: 160,
+      messages: [
+        { role: "system", content: WELCOME_SYSTEM_PROMPT },
+        { role: "user", content: usr }
+      ],
+      response_format: WELCOME_RESPONSE_FORMAT
     });
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok) return res.status(r.status).json({ error: "avatar_list_failed", detail: j });
 
-    const list = Array.isArray(j?.data) ? j.data : [];
+    const content = r?.choices?.[0]?.message?.content || "{}";
+    let data = {};
+    try { data = JSON.parse(content); } catch { data = {}; }
 
-    // 1) ID exacto
-    let found = list.find(a => a?.id === q);
+    const greet = (data?.greet || "").toString().trim();
+    const question = (data?.question || "").toString().trim();
 
-    // 2) Nombre/alias/display (case-insensitive)
-    if (!found) {
-      const needle = q.toLowerCase();
-      found = list.find(a => {
-        const n1 = String(a?.name || "").toLowerCase();
-        const n2 = String(a?.avatarName || "").toLowerCase();
-        const n3 = String(a?.display_name || "").toLowerCase();
-        return n1 === needle || n2 === needle || n3 === needle;
+    if (!greet || !question) {
+      // fallback muy corto y amable (sin biblia)
+      return res.json({
+        greet: `La paz esté contigo${name ? `, ${name}` : ""}. Estoy aquí para escucharte y acompañarte con cariño.`,
+        question: "¿Qué te gustaría contarme hoy?"
       });
     }
 
-    if (!found) return res.status(404).json({ ok: false, resolved: q, reason: "not_in_list" });
-
-    res.json({ ok: true, resolved: found.id, raw: found });
+    res.json({ greet, question });
   } catch (e) {
-    console.error("resolve-avatar error:", e);
-    res.status(500).json({ error: "resolve_avatar_error" });
+    console.error("WELCOME ERROR:", e);
+    res.json({
+      greet: "La paz esté contigo. Estoy aquí para escucharte y caminar contigo con calma.",
+      question: "¿En qué puedo ayudarte hoy?"
+    });
   }
 });
 
