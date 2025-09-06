@@ -2,7 +2,6 @@
 // Respuestas cortas (≤60 palabras), UNA pregunta opcional solo si la devuelve OpenAI,
 // citas RVR1909 sin repetir, memoria simple por usuario y FRAME básico sin desvíos.
 // + Ruta HeyGen /api/heygen/token (NO toca nada de OpenAI)
-// + Ruta HeyGen /api/heygen/config (lee avatar/voz desde Railway)
 
 const express = require("express");
 const cors = require("cors");
@@ -302,17 +301,13 @@ async function askLLM({ persona, message, history = [], userId = "anon" }) {
 
   const shortHistory = compactHistory(history, 10, 240);
   const header =
-  `Persona: ${persona}\n` +
-  `Mensaje_actual: ${message}\n` +
-  `FRAME: ${JSON.stringify(frame)}\n` +
-  `last_bible_ref: ${lastRef || "(n/a)"}\n` +
-  `banned_refs:\n- ${bannedRefs.join("\n- ") || "(none)"}\n` +
-  (recentQs.length
-    ? `ultimas_preguntas: ${recentQs.join(" | ")}`
-    : "ultimas_preguntas: (ninguna)") + "\n" +
-  (shortHistory.length
-    ? `Historial: ${shortHistory.join(" | ")}`
-    : "Historial: (sin antecedentes)") + "\n";
+    `Persona: ${persona}\n` +
+    `Mensaje_actual: ${message}\n` +
+    `FRAME: ${JSON.stringify(frame)}\n` +
+    `last_bible_ref: ${lastRef || "(n/a)"}\n` +
+    `banned_refs:\n- ${bannedRefs.join("\n- ") || "(none)"}\n` +
+    (recentQs.length ? `ultimas_preguntas: ${recentQs.join(" | ")}` : "ultimas_preguntas: (ninguna)") + "\n" +
+    (shortHistory.length ? `Historial: ${shortHistory.join(" | ")}` : "Historial: (sin antecedentes)") + "\n";
 
   const resp = await completionWithTimeout({
     messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: header }],
@@ -433,40 +428,8 @@ app.get("/api/heygen/token", async (_req, res) => {
   }
 });
 
-// === HeyGen: CONFIG desde Railway (NO toca OpenAI) ===
-app.get("/api/heygen/config", async (_req, res) => {
-  try {
-    const read = (k) => (process.env[k] || "").trim();
-
-    const voiceId = read("HEYGEN_VOICE_ID"); // opcional
-    // defaultAvatar opcional (si no usas por idioma)
-    const defaultAvatar = read("HEYGEN_DEFAULT_AVATAR") || read("HEYGEN_AVATAR");
-
-    // por idioma (define en Railway solo los que uses)
-    const avatars = {
-      es: read("HEYGEN_AVATAR_ES"),
-      en: read("HEYGEN_AVATAR_EN"),
-      pt: read("HEYGEN_AVATAR_PT"),
-      it: read("HEYGEN_AVATAR_IT"),
-      de: read("HEYGEN_AVATAR_DE") || read("HEYGEN_AVATAR_AL"),
-      ca: read("HEYGEN_AVATAR_CA"),
-    };
-
-    res.status(200).json({
-      voiceId,
-      defaultAvatar,
-      avatars,
-      version: Date.now(),
-    });
-  } catch (e) {
-    console.error("heygen config error:", e);
-    res.status(500).json({ error: "heygen_config_error" });
-  }
-});
-
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`Servidor listo en puerto ${PORT}`);
 });
-
