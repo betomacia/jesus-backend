@@ -1,7 +1,7 @@
 // index.js — Backend minimalista: 100% preguntas desde OpenAI (sin inyección local)
 // Respuestas cortas (≤60 palabras), UNA pregunta opcional solo si la devuelve OpenAI,
 // citas RVR1909 sin repetir, memoria simple por usuario y FRAME básico sin desvíos.
-// + Ruta HeyGen /api/heygen/token (NO toca nada de OpenAI)
+// + Rutas HeyGen /api/heygen/token y /api/heygen/config (NO toca nada de OpenAI)
 
 const express = require("express");
 const cors = require("cors");
@@ -86,6 +86,7 @@ function cleanRef(ref = "") {
   return String(ref).replace(/\s*\([^)]*\)\s*/g, " ").replace(/\s+/g, " ").trim();
 }
 function stripQuestionsFromMessage(s = "") {
+  // El "message" NUNCA debe tener signos de pregunta
   const noTrailingQLines = (s || "")
     .split(/\n+/)
     .map((l) => l.trim())
@@ -162,7 +163,6 @@ function detectMainSubject(s = "") {
   if (/(mi\s+amig[oa])/.test(t)) return "friend";
   return "self";
 }
-// Persona de apoyo tipo “mi hija”, “mi primo”, etc. (para informar al modelo)
 const SUPPORT_WORDS = [
   "hijo","hija","madre","padre","mamá","mama","papá","papa","abuelo","abuela","nieto","nieta",
   "tío","tio","tía","tia","sobrino","sobrina","primo","prima","cuñado","cuñada","suegro","suegra","yerno","nuera",
@@ -188,7 +188,7 @@ function detectSupportNP(s = "") {
 }
 
 // ---------- Memoria por usuario ----------
-const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data"));
 async function ensureDataDir() { try { await fs.mkdir(DATA_DIR, { recursive: true }); } catch {} }
 function memPath(uid) {
   const safe = String(uid || "anon").replace(/[^a-z0-9_-]/gi, "_");
@@ -282,12 +282,12 @@ async function askLLM({ persona, message, history = [], userId = "anon" }) {
 
   // FRAME básico
   const support = detectSupportNP(message);
-  theTopic = guessTopic(message);
+  const topic = guessTopic(message);
   const mainSubject = detectMainSubject(message);
   const frame = {
-    topic_primary: theTopic,
-    main_subject: mem.frame?.topic_primary === theTopic ? (mem.frame?.main_subject || mainSubject) : mainSubject,
-    support_persons: support ? [{ label: support.label }] : (mem.frame?.topic_primary === theTopic ? (mem.frame?.support_persons || []) : []),
+    topic_primary: topic,
+    main_subject: mem.frame?.topic_primary === topic ? (mem.frame?.main_subject || mainSubject) : mainSubject,
+    support_persons: support ? [{ label: support.label }] : (mem.frame?.topic_primary === topic ? (mem.frame?.support_persons || []) : []),
   };
   mem.frame = frame;
 
@@ -415,7 +415,7 @@ app.get("/api/heygen/token", async (_req, res) => {
         "x-api-key": API_KEY,
         "Content-Type": "application/json",
       },
-      body: "{}",
+      body: "{}", // algunos proxys esperan body JSON
     });
 
     const json = await r.json().catch(() => ({}));
@@ -431,12 +431,23 @@ app.get("/api/heygen/token", async (_req, res) => {
   }
 });
 
-
+// === HeyGen: configuración para el frontend (Railway) ===
+app.get("/api/heygen/config", (_req, res) => {
+  const AV_LANGS = ["es", "en", "pt", "it", "de", "ca"];
+  const avatars = {};
+  for (const l of AV_LANGS) {
+    const key = `HEYGEN_AVATAR_${l.toUpperCase()}`;
+    const val = (process.env[key] || "").trim();
+    if (val) avatars[l] = val;
+  }
+  const voiceId = (process.env.HEYGEN_VOICE_ID || "").trim();
+  const defaultAvatar = (process.env.HEYGEN_DEFAULT_AVATAR || "").trim();
+  const version = process.env.HEYGEN_CFG_VERSION || Date.now();
+  res.json({ voiceId, defaultAvatar, avatars, version });
+});
 
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`Servidor listo en puerto ${PORT}`);
 });
-
-
