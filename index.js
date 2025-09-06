@@ -1,7 +1,7 @@
 // index.js — Backend minimalista: 100% preguntas desde OpenAI (sin inyección local)
 // Respuestas cortas (≤60 palabras), UNA pregunta opcional solo si la devuelve OpenAI,
 // citas RVR1909 sin repetir, memoria simple por usuario y FRAME básico sin desvíos.
-// + Rutas HeyGen /api/heygen/token y /api/heygen/config (NO toca nada de OpenAI)
+// + Ruta HeyGen /api/heygen/token (NO toca nada de OpenAI)
 
 const express = require("express");
 const cors = require("cors");
@@ -86,7 +86,6 @@ function cleanRef(ref = "") {
   return String(ref).replace(/\s*\([^)]*\)\s*/g, " ").replace(/\s+/g, " ").trim();
 }
 function stripQuestionsFromMessage(s = "") {
-  // El "message" NUNCA debe tener signos de pregunta
   const noTrailingQLines = (s || "")
     .split(/\n+/)
     .map((l) => l.trim())
@@ -283,12 +282,12 @@ async function askLLM({ persona, message, history = [], userId = "anon" }) {
 
   // FRAME básico
   const support = detectSupportNP(message);
-  const topic = guessTopic(message);
+  theTopic = guessTopic(message);
   const mainSubject = detectMainSubject(message);
   const frame = {
-    topic_primary: topic,
-    main_subject: mem.frame?.topic_primary === topic ? (mem.frame?.main_subject || mainSubject) : mainSubject,
-    support_persons: support ? [{ label: support.label }] : (mem.frame?.topic_primary === topic ? (mem.frame?.support_persons || []) : []),
+    topic_primary: theTopic,
+    main_subject: mem.frame?.topic_primary === theTopic ? (mem.frame?.main_subject || mainSubject) : mainSubject,
+    support_persons: support ? [{ label: support.label }] : (mem.frame?.topic_primary === theTopic ? (mem.frame?.support_persons || []) : []),
   };
   mem.frame = frame;
 
@@ -403,7 +402,6 @@ app.get("/api/welcome", (_req, res) => {
 });
 
 // === HeyGen: emitir token de sesión (NO toca OpenAI) ===
-// Node 18+ ya trae fetch global.
 app.get("/api/heygen/token", async (_req, res) => {
   try {
     const API_KEY = process.env.HEYGEN_API_KEY || process.env.HEYGEN_TOKEN || "";
@@ -428,38 +426,8 @@ app.get("/api/heygen/token", async (_req, res) => {
   }
 });
 
-// === HeyGen: CONFIG desde Railway ===
-app.get("/api/heygen/config", (_req, res) => {
-  try {
-    // soporta varios nombres de env por si cambian
-    const voiceId =
-      (process.env.HEYGEN_VOICE_ID || process.env.HEYGEN_VOICE || "").toString().trim();
-
-    const defaultAvatar =
-      (process.env.HEYGEN_AVATAR_DEFAULT || "").toString().trim();
-
-    const avatars = {
-      es: (process.env.HEYGEN_AVATAR_ES || "").toString().trim(),
-      en: (process.env.HEYGEN_AVATAR_EN || "").toString().trim(),
-      pt: (process.env.HEYGEN_AVATAR_PT || "").toString().trim(),
-      it: (process.env.HEYGEN_AVATAR_IT || "").toString().trim(),
-      de: (process.env.HEYGEN_AVATAR_DE || "").toString().trim(),
-      ca: (process.env.HEYGEN_AVATAR_CA || "").toString().trim(),
-    };
-
-    const version =
-      Number(process.env.HEYGEN_CFG_VERSION || Date.now());
-
-    res.json({ voiceId, defaultAvatar, avatars, version });
-  } catch (e) {
-    console.error("heygen config exception:", e);
-    res.status(500).json({ error: "heygen_config_error" });
-  }
-});
-
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`Servidor listo en puerto ${PORT}`);
 });
-
