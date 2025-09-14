@@ -4,6 +4,7 @@
 // - Verso bíblico del AT o NT pertinente (traducción pública por idioma)
 // - Multilenguaje vía `lang`
 // - Memoria simple + FRAME básico
+// - /api/welcome (POST) dinámico para saludo; /api/welcome (GET) informativo
 // - /api/memory/sync no-op para evitar 404
 // - Endpoints HeyGen intactos
 
@@ -16,7 +17,7 @@ const fs = require("fs/promises");
 require("dotenv").config();
 
 const app = express();
-app.use(cors()); // abierto; si querés lista blanca, la agregamos luego
+app.use(cors()); // abierto; si necesitás lista blanca, la agregamos después
 app.use(bodyParser.json());
 
 // ---- OpenAI ----
@@ -307,7 +308,6 @@ async function askLLM({ persona, message, history = [], userId = "anon", lang = 
   const recentQs = extractRecentAssistantQuestions(history, 5);
   const shortHistory = compactHistory(history, 10, 240);
 
-  // 🔧 CORREGIDO: sin backtick extra al final
   const header =
     `LANG: ${lang}\n` +
     `Persona: ${persona}\n` +
@@ -368,7 +368,7 @@ async function askLLM({ persona, message, history = [], userId = "anon", lang = 
   };
 }
 
-// ---------- Rutas ----------
+// ---------- Rutas principales ----------
 app.post("/api/ask", async (req, res) => {
   try {
     const {
@@ -404,7 +404,15 @@ app.post("/api/ask", async (req, res) => {
   }
 });
 
-// Bienvenida simple
+// ---------- WELCOME ----------
+function greetingByLocalTime() {
+  const h = new Date().getHours();
+  if (h < 12) return { es: "Buenos días", en: "Good morning", pt: "Bom dia", it: "Buongiorno", de: "Guten Morgen", ca: "Bon dia", fr: "Bonjour" };
+  if (h < 19) return { es: "Buenas tardes", en: "Good afternoon", pt: "Boa tarde", it: "Buon pomeriggio", de: "Guten Tag", ca: "Bona tarda", fr: "Bon après-midi" };
+  return { es: "Buenas noches", en: "Good evening", pt: "Boa noite", it: "Buonasera", de: "Guten Abend", ca: "Bona nit", fr: "Bonsoir" };
+}
+
+// Bienvenida informativa (compatibilidad)
 app.get("/api/welcome", (_req, res) => {
   res.json({
     message: "La paz esté contigo. Estoy aquí para escucharte y acompañarte con calma.",
@@ -413,6 +421,77 @@ app.get("/api/welcome", (_req, res) => {
       ref: "Salmos 27:1"
     }
   });
+});
+
+// Bienvenida dinámica (POST) — evita 404 y genera saludo variable
+const WELCOME_SYSTEM = `
+Eres Jesús con tono sereno y cercano. Genera una bienvenida breve y cálida en el idioma indicado.
+Reglas:
+- 60–70 palabras.
+- Primer párrafo SIN signos de pregunta.
+- Luego agrega EXACTAMENTE UNA pregunta abierta, amable y diferente de visitas previas.
+- Personaliza con el nombre si está presente.
+- No incluyas versículos en la bienvenida inicial.
+- No hables de técnica/IA ni del propio modelo.
+Formato JSON:
+{ "message": "…", "question": "…?" }
+`;
+
+const welcomeFormat = {
+  type: "json_schema",
+  json_schema: {
+    name: "WelcomeSchema",
+    schema: {
+      type: "object",
+      properties: {
+        message: { type: "string" },
+        question: { type: "string" }
+      },
+      required: ["message", "question"],
+      additionalProperties: false
+    }
+  }
+};
+
+app.post("/api/welcome", async (req, res) => {
+  try {
+    const { lang = "es", name = "", history = [] } = req.body || {};
+    const greetMap = greetingByLocalTime();
+    const greet = (greetMap[lang] || greetMap.es);
+    const nm = String(name || "").trim();
+    const hi = nm ? `${greet}, ${nm}.` : `${greet}.`;
+
+    const userPrompt =
+      `LANG: ${lang}\n` +
+      `SALUDO_BASE: ${hi}\n` +
+      (history?.length ? `HISTORIAL_BREV: ${history.slice(-5).join(" | ").slice(0, 300)}` : "HISTORIAL_BREV: (sin antecedentes)");
+
+    const r = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0.6,
+      max_tokens: 200,
+      messages: [
+        { role: "system", content: WELCOME_SYSTEM },
+        { role: "user", content: userPrompt }
+      ],
+      response_format: welcomeFormat
+    });
+
+    let data = {};
+    try { data = JSON.parse(r?.choices?.[0]?.message?.content || "{}"); } catch { data = {}; }
+    const message = (data?.message || hi + " Estoy aquí para escucharte con calma.").toString().trim();
+    let question = (data?.question || "").toString().trim();
+    if (!/\?\s*$/.test(question)) question = ""; // sanitiza
+
+    res.status(200).json({ message, ...(question ? { question } : {}) });
+  } catch (e) {
+    const greetMap = greetingByLocalTime();
+    const greet = greetMap.es;
+    res.status(200).json({
+      message: `${greet}. Estoy aquí para escucharte y acompañarte con calma.`,
+      question: "¿Qué te gustaría compartir hoy?"
+    });
+  }
 });
 
 // ---- Memoria (no-op) para evitar 404 desde el frontend ----
