@@ -1,9 +1,11 @@
-// index.js — Backend minimalista con lógica de autoayuda + capa espiritual
-// - Respuestas ≤90 palabras (antes 60)
-// - 1 pregunta breve y específica (si corresponde)
-// - Citas RVR1909 evitando repeticiones/ambigüedades
-// - Memoria simple por usuario + FRAME básico
-// - Endpoints HeyGen intactos y /api/memory/sync no-op para evitar 404
+// index.js — Backend con Autoayuda (bibliografía mundial) + capa cristiana (AT/NT)
+// - message ≤ 90 palabras
+// - 1 pregunta breve y específica (opcional)
+// - Verso bíblico del AT o NT pertinente (traducción pública por idioma)
+// - Multilenguaje vía `lang`
+// - Memoria simple + FRAME básico
+// - /api/memory/sync no-op para evitar 404
+// - Endpoints HeyGen intactos
 
 const express = require("express");
 const cors = require("cors");
@@ -14,7 +16,7 @@ const fs = require("fs/promises");
 require("dotenv").config();
 
 const app = express();
-app.use(cors());
+app.use(cors()); // abierto; si querés lista blanca, la agregamos luego
 app.use(bodyParser.json());
 
 // ---- OpenAI ----
@@ -24,43 +26,44 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
  * Formato esperado desde OpenAI:
  * {
  *   "message": "consejo breve, SIN signos de pregunta (≤90 palabras)",
- *   "bible": { "text": "RVR1909 literal", "ref": "Libro 0:0" },
+ *   "bible": { "text": "traducción pública en el idioma del usuario", "ref": "Libro 0:0" },
  *   "question": "pregunta breve (opcional, UNA sola)"
  * }
  */
 
-// === NUEVO: prompt con foco en autoayuda + capa espiritual + multilenguaje ===
+// === Prompt: Autoayuda (evidencia global) + capa cristiana + multilenguaje ===
 const SYSTEM_PROMPT = `
-Eres Jesús con enfoque terapéutico breve: primero ayudas con herramientas de autoayuda (indagación clara,
-pasos concretos, límites sanos, respiración/grounding/plan sencillo, reencuadre cognitivo si aplica) y luego añades
-una nota breve de consuelo/esperanza desde la fe cristiana y una cita bíblica (RVR1909) pertinente.
+Eres Jesús con enfoque terapéutico breve. Primero ayudas con herramientas de autoayuda validadas por la
+bibliografía mundial (sin diagnósticos): entrevista motivacional (MI), terapia cognitivo-conductual (CBT),
+activación conductual (BA), terapia de aceptación y compromiso (ACT), resolución de problemas (PST), habilidades DBT,
+psicoeducación, hábitos y límites, respiración/grounding. Luego añades una nota de consuelo/esperanza desde la fe
+cristiana y un versículo del Antiguo o Nuevo Testamento pertinente.
 
 IDIOMA
-- Responde en el idioma indicado por el usuario (campo LANG). Si no se indica, usa español.
+- Responde en el idioma indicado por el usuario (campo LANG). Si falta, usa español.
 - No hables de técnica/IA ni del propio modelo.
 
 OBJETIVO
 - Devuelve SOLO JSON: { "message", "bible": { "text", "ref" }, "question"? }.
 - "message": ≤90 palabras, tono sereno y concreto, SIN signos de pregunta.
 - "question": opcional y ÚNICA; breve, específica, termina en “?” y NO repite preguntas recientes.
-- Prioriza comprender el problema: si faltan detalles clave (qué pasó, cuándo, quiénes, intensidad/frecuencia, intentos previos), la pregunta debe indagar 1 dato clave a la vez.
-- Propón 1–2 micro-pasos realistas (p. ej., escribir 3 ideas, enviar 1 mensaje, pautar una charla breve, respiración 4-4-4 dos veces al día, etc.).
+- Prioriza comprender el problema: si faltan detalles clave (qué pasó, desde cuándo, frecuencia/intensidad,
+  personas implicadas, intentos previos), formula 1 sola pregunta que indague un dato clave.
+- Propón 1–2 micro-pasos realistas (p. ej., respiración 4-4-4, escribir 3 ideas, enviar 1 mensaje pautado,
+  acordar una charla de 10 min, plan A/B simple, etc.).
 - Cierra el "message" con un toque espiritual breve (1 frase) SIN versículos (el versículo va aparte).
 
-MARCO (FRAME)
-- Usa el FRAME (topic_primary, main_subject, support_persons) y el historial breve como contexto.
-- No cambies de tema por menciones accesorias (familiares/amigos de apoyo).
-
-BIBLIA (RVR1909)
-- Ajusta la cita al tema y a los micro-pasos.
-- Usa RVR1909 literal; "ref" con formato "Libro 0:0".
-- Evita "last_bible_ref" y "banned_refs".
-- Evita ambigüedad “el Hijo” (Juan 8:36) cuando el usuario habla de un hijo/hija salvo pertinencia teológica explícita.
+BIBLIA (AT/NT)
+- Elige un versículo del Antiguo o del Nuevo Testamento acorde al tema y los micro-pasos.
+- Usa una traducción pública en el idioma del usuario:
+  ES: RVR1909 | EN: KJV | PT: Almeida RC | IT: Diodati | DE: Luther 1912 | CA: traducción fiel sin marca si no hay opción pública clara.
+- Formato "ref": "Libro 0:0". No repitas "last_bible_ref" ni ninguna en "banned_refs".
+- Evita la ambigüedad “el Hijo” (Juan 8:36) cuando el usuario habla de un hijo/hija salvo pertinencia teológica explícita.
 
 FORMATO (OBLIGATORIO)
 {
   "message": "… (≤90 palabras, sin signos de pregunta)",
-  "bible": { "text": "… (RVR1909 literal)", "ref": "Libro 0:0" },
+  "bible": { "text": "… (traducción pública en el idioma del usuario)", "ref": "Libro 0:0" },
   "question": "…? (opcional, una sola)"
 }
 `;
@@ -100,7 +103,7 @@ function stripQuestionsFromMessage(s = "") {
     .trim();
   return noTrailingQLines.replace(/[¿?]+/g, "").trim();
 }
-function limitWords(s = "", max = 90) { // <= 90 palabras
+function limitWords(s = "", max = 90) {
   const words = String(s || "").trim().split(/\s+/);
   return words.length <= max ? String(s || "").trim() : words.slice(0, max).join(" ").trim();
 }
@@ -253,12 +256,13 @@ const bibleOnlyFormat = {
 };
 
 async function regenerateBibleAvoiding({ persona, message, frame, bannedRefs = [], lastRef = "", lang = "es" }) {
-  const sys = `Devuelve SOLO JSON {"bible":{"text":"…","ref":"Libro 0:0"}} en RVR1909. Idioma: ${lang}.
+  const sys = `Devuelve SOLO JSON {"bible":{"text":"…","ref":"Libro 0:0"}} en una traducción pública del idioma (${lang}).
 - Ajusta la cita al tema y micro-pasos.
 - Evita ambigüedad “hijo” (familiar) vs “el Hijo” (Cristo) salvo pertinencia teológica explícita.
 - No uses ninguna referencia de "banned_refs" ni "last_bible_ref".`;
 
   const usr =
+    `LANG: ${lang}\n` +
     `Persona: ${persona}\n` +
     `Mensaje_actual: ${message}\n` +
     `FRAME: ${JSON.stringify(frame)}\n` +
@@ -268,7 +272,7 @@ async function regenerateBibleAvoiding({ persona, message, frame, bannedRefs = [
   const r = await openai.chat.completions.create({
     model: "gpt-4o-mini",
     temperature: 0.4,
-    max_tokens: 120,
+    max_tokens: 140,
     messages: [{ role: "system", content: sys }, { role: "user", content: usr }],
     response_format: bibleOnlyFormat
   });
@@ -303,7 +307,7 @@ async function askLLM({ persona, message, history = [], userId = "anon", lang = 
   const recentQs = extractRecentAssistantQuestions(history, 5);
   const shortHistory = compactHistory(history, 10, 240);
 
-  // Usuario prompt con control de idioma y contexto
+  // 🔧 CORREGIDO: sin backtick extra al final
   const header =
     `LANG: ${lang}\n` +
     `Persona: ${persona}\n` +
@@ -312,12 +316,12 @@ async function askLLM({ persona, message, history = [], userId = "anon", lang = 
     `last_bible_ref: ${lastRef || "(n/a)"}\n` +
     `banned_refs:\n- ${bannedRefs.join("\n- ") || "(none)"}\n` +
     (recentQs.length ? `ultimas_preguntas: ${recentQs.join(" | ")}` : "ultimas_preguntas: (ninguna)") + "\n" +
-    (shortHistory.length ? `Historial: ${shortHistory.join(" | ")}` : "Historial: (sin antecedentes)") + "\n`;
+    (shortHistory.length ? `Historial: ${shortHistory.join(" | ")}` : "Historial: (sin antecedentes)") + "\n";
 
   const resp = await completionWithTimeout({
     messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: header }],
     temperature: 0.6,
-    max_tokens: 320, // más margen para 90 palabras + verso
+    max_tokens: 320,
     timeoutMs: 12000
   });
 
@@ -357,9 +361,7 @@ async function askLLM({ persona, message, history = [], userId = "anon", lang = 
   return {
     message: msg || (lang === "en" ? "I am with you. Let’s take one small, realistic step today." : "Estoy contigo. Demos un paso pequeño y realista hoy."),
     bible: {
-      text: text || (lang === "en"
-        ? "The Lord is close to the brokenhearted; and saves those of a contrite spirit."
-        : "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu."),
+      text: text || "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu.",
       ref: ref || "Salmos 34:18"
     },
     ...(question ? { question } : {})
@@ -402,7 +404,7 @@ app.post("/api/ask", async (req, res) => {
   }
 });
 
-// Bienvenida simple (tu front ya usa POST /api/welcome dinámico; si no lo usás, esta GET sigue ok)
+// Bienvenida simple
 app.get("/api/welcome", (_req, res) => {
   res.json({
     message: "La paz esté contigo. Estoy aquí para escucharte y acompañarte con calma.",
