@@ -1,7 +1,9 @@
-// index.js — Backend completo (CommonJS) con healthroutes + welcome/ask multilenguaje (≤90 palabras), 
-// memoria simple, Heygen, y CORS abierto. PÉGALO TAL CUAL en Railway.
-// Requisitos env (Railway Variables): OPENAI_API_KEY, HEYGEN_API_KEY (opcional), 
-// HEYGEN_DEFAULT_AVATAR (opcional), HEYGEN_VOICE_ID (opcional), HEYGEN_AVATAR_ES/EN/PT/IT/DE/CA/FR (opc.)
+// index.js — Backend completo (CommonJS) con welcome/ask multilenguaje (≤90 palabras),
+// memoria simple, Heygen, CORS abierto y sanitización anti-duplicado de cita en message.
+//
+// Requisitos env: OPENAI_API_KEY, HEYGEN_API_KEY (opcional),
+// HEYGEN_DEFAULT_AVATAR (opcional), HEYGEN_VOICE_ID (opcional),
+// HEYGEN_AVATAR_ES/EN/PT/IT/DE/CA/FR (opc.)
 
 const express = require("express");
 const cors = require("cors");
@@ -14,8 +16,8 @@ require("dotenv").config();
 const app = express();
 
 // ===== Middlewares =====
-app.use(cors());               // CORS abierto (si querés, luego limitamos)
-app.use(bodyParser.json());    // JSON bodies
+app.use(cors());
+app.use(bodyParser.json());
 
 // ===== OpenAI client =====
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -37,6 +39,7 @@ function limitWords(s = "", max = 90) {
   const words = String(s || "").trim().split(/\s+/);
   return words.length <= max ? String(s || "").trim() : words.slice(0, max).join(" ").trim();
 }
+// Q normalizada (para evitar repetir)
 function normalizeQuestion(q = "") {
   return String(q).toLowerCase().replace(/\s+/g, " ").trim();
 }
@@ -60,6 +63,25 @@ function greetingByHour(lang = "es") {
     case "fr": return g("Bonjour","Bon après-midi","Bonsoir");
     default:   return g("Buenos días","Buenas tardes","Buenas noches");
   }
+}
+
+// === Sanitizador: si el modelo colara la cita dentro de message, la quitamos ===
+function removeBibleLike(text = "") {
+  let s = String(text || "");
+
+  // Líneas tipo: — “...” (Libro 0:0) o - “...” (Libro 0:0)
+  s = s.replace(/^[\s]*[—-]\s*.*?\([^)]+?\d+\s*:\s*\d+\)[\s]*$/gim, "").trim();
+
+  // Paréntesis con patrón de referencia (Libro 0:0)
+  s = s.replace(/\(([^)]+?\d+\s*:\s*\d+)\)/g, (m) => {
+    return ""; // removemos el paréntesis completo
+  });
+
+  // Quitar duplicación final estilo " — ... (Libro 0:0)"
+  s = s.replace(/\s*[—-]\s*[^()]*\(\s*[^)]+?\d+\s*:\s*\d+\s*\)\s*$/g, "").trim();
+
+  // Compactar espacios.
+  return s.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 // ===== Memoria simple por usuario (FS) =====
@@ -138,16 +160,16 @@ function detectSupportNP(s = "") {
 }
 
 // ===== Prompt base (autoayuda + toque espiritual) =====
+// *** IMPORTANTE: el message NO lleva cita bíblica, va SOLO en "bible" ***
 const SYSTEM_PROMPT_BASE = `
 Hablas con serenidad, claridad y compasión. Estructura cada respuesta con dos capas:
 1) Autoayuda: psicoeducación breve y práctica (marcos cognitivo-conductuales, ACT, compasión, límites, hábitos), basada en bibliografía general de autoayuda. Ofrece 1–2 micro-pasos concretos.
 2) Toque espiritual cristiano: aplica una cita bíblica pertinente (RVR1909 en español; equivalente en otros idiomas) y un cierre de esperanza humilde.
 
-Reglas:
+Reglas IMPORTANTES:
 - Devuelve SOLO JSON.
-- Máximo 90 palabras en "message". Sin signos de pregunta allí.
-- UNA sola pregunta abierta en "question" (opcional), termina en "?".
-- Evita tecnicismos; tono cálido y concreto.
+- "message": máximo 90 palabras, sin signos de pregunta, **NO incluyas citas bíblicas ni referencias** (la Escritura va SOLO en "bible").
+- "question": UNA sola pregunta abierta (opcional), breve, termina en "?" y variada (no repitas fórmulas).
 - Mantén coherencia con FRAME (tema/sujeto/apoyos) y con el historial breve.
 `;
 
@@ -189,22 +211,20 @@ async function completionJson({ messages, temperature = 0.6, max_tokens = 240, t
 }
 
 // ===================================================================
-// HEALTH & DEBUG — NO ROMPEN NADA DE TU LÓGICA EXISTENTE
+// HEALTH & DEBUG
 // ===================================================================
 app.get("/", (_req, res) => {
   res.json({ ok: true, service: "backend", ts: Date.now() });
 });
-
-// GET informativo para comprobar que el contenedor responde (no usa OpenAI)
 app.get("/api/welcome", (_req, res) => {
   res.json({ ok: true, hint: "Usa POST /api/welcome con { lang, name, history }" });
 });
-
-// Silencia el 404 del front si intenta sync de memoria
+// Evita 404 del front
 app.post("/api/memory/sync", (_req, res) => res.json({ ok: true }));
 
 // ===================================================================
-// WELCOME (POST) — 100% OpenAI, multilenguaje, saludo por hora + variación
+// WELCOME (POST) — saludo por hora + bendición breve + pregunta (varia wording)
+// SIN citas bíblicas dentro de "message" (solo en "bible").
 // ===================================================================
 app.post("/api/welcome", async (req, res) => {
   try {
@@ -214,10 +234,9 @@ app.post("/api/welcome", async (req, res) => {
 
     const SYSTEM_PROMPT = `${SYSTEM_PROMPT_BASE}
 Responde SIEMPRE en ${langLabel(lang)}.
-"message": saludo cálido personalizado que comience con "${hi}${nm ? ", " + nm : ""}." y continúe con 2–3 frases (autoayuda + toque espiritual). No pongas signos de pregunta en "message".
-"question": UNA pregunta abierta breve y distinta cada vez (varía wording), para invitar a compartir el tema.
-La cita bíblica debe ser pertinente y clara en este primer turno.
-`;
+"message": inicia con "${hi}${nm ? ", " + nm : ""}." + **UNA bendición breve** y **UNA frase de orientación**. Mantén 2–3 frases máximo. **No pongas citas bíblicas ni referencias en "message"**.
+"question": UNA pregunta abierta breve y distinta en cada bienvenida, para invitar a compartir el tema.
+La cita bíblica va SOLO en "bible" y debe ser pertinente.`;
 
     const shortHistory = compactHistory(history, 6, 200);
     const header =
@@ -238,14 +257,14 @@ La cita bíblica debe ser pertinente y clara en este primer turno.
     let data = {};
     try { data = JSON.parse(content); } catch { data = {}; }
 
-    let msg = limitWords(stripQuestionsFromMessage((data?.message || "").toString()), 90);
+    let msg = limitWords(stripQuestionsFromMessage(removeBibleLike((data?.message || "").toString())), 90);
     let ref = cleanRef((data?.bible?.ref || "").toString());
     let text = (data?.bible?.text || "").toString().trim();
     let question = (data?.question || "").toString().trim();
     if (question && !/\?\s*$/.test(question)) question = question + "?";
 
     res.status(200).json({
-      message: msg || `${hi}${nm ? ", " + nm : ""}. Estoy contigo. Comparte lo esencial y avanzamos con calma.`,
+      message: msg || `${hi}${nm ? ", " + nm : ""}. Que la paz de Dios te sostenga. Comparte en pocas palabras y damos un paso sencillo.`,
       bible: {
         text: text || (lang === "en" ? "The Lord is near to the brokenhearted." : "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu."),
         ref: ref || (lang === "en" ? "Psalm 34:18" : "Salmos 34:18")
@@ -264,6 +283,7 @@ La cita bíblica debe ser pertinente y clara en este primer turno.
 
 // ===================================================================
 // ASK (POST) — Autoayuda + toque espiritual; FRAME; ≤90 palabras
+// **Sin citas bíblicas dentro de "message"** para evitar duplicado.
 // ===================================================================
 app.post("/api/ask", async (req, res) => {
   try {
@@ -291,9 +311,9 @@ app.post("/api/ask", async (req, res) => {
 
     const SYSTEM_PROMPT = `${SYSTEM_PROMPT_BASE}
 Responde SIEMPRE en ${langLabel(lang)}.
-"message": máximo 90 palabras, sin signos de pregunta. Primero autoayuda breve (2–3 frases) con 1–2 micro-pasos; luego un toque espiritual cristiano.
-"question": UNA abierta breve, concreta, avanza el caso.
-La cita bíblica debe apoyar el micro-paso sugerido.`;
+"message": máximo 90 palabras, sin signos de pregunta. Primero autoayuda breve (2–3 frases) con 1–2 micro-pasos; luego un toque espiritual cristiano. **No incluyas citas bíblicas ni referencias en "message"**.
+"question": UNA abierta breve, concreta, que avance el caso (termina en "?").
+La cita bíblica va SOLO en "bible" y debe apoyar el micro-paso sugerido.`;
 
     const header =
       `Persona: ${persona}\n` +
@@ -315,7 +335,7 @@ La cita bíblica debe apoyar el micro-paso sugerido.`;
     let data = {};
     try { data = JSON.parse(content); } catch { data = {}; }
 
-    let msg = limitWords(stripQuestionsFromMessage((data?.message || "").toString()), 90);
+    let msg = limitWords(stripQuestionsFromMessage(removeBibleLike((data?.message || "").toString())), 90);
     let ref = cleanRef((data?.bible?.ref || "").toString());
     let text = (data?.bible?.text || "").toString().trim();
     let question = (data?.question || "").toString().trim();
@@ -341,7 +361,7 @@ La cita bíblica debe apoyar el micro-paso sugerido.`;
 });
 
 // ===================================================================
-// HEYGEN (token y config). Si no tenés credenciales, igual responden con error controlado.
+// HEYGEN
 // ===================================================================
 app.get("/api/heygen/token", async (_req, res) => {
   try {
