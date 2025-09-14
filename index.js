@@ -1,4 +1,4 @@
-// index.js — Backend multilingüe centralizado (ES/EN/PT/IT/DE/CA/FR) sin URL fija
+// index.js — Backend multilingüe con CORS configurable por ENV (ES/EN/PT/IT/DE/CA/FR)
 const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
@@ -9,25 +9,50 @@ require("dotenv").config();
 
 const app = express();
 
-/* ===================== CORS con ENV ===================== */
-// Permite definir uno o varios orígenes en PUBLIC_BASE_URL o FRONTEND_ORIGINS (CSV)
-const ORIGINS = [];
-if (process.env.PUBLIC_BASE_URL) ORIGINS.push(process.env.PUBLIC_BASE_URL.trim());
+/* ===================== CORS CONFIG ===================== */
+/**
+ * Control por variables:
+ * - ALLOW_ALL_ORIGINS=1           → permite cualquier origen (dev).
+ * - PUBLIC_BASE_URL               → origen permitido (uno).
+ * - FRONTEND_ORIGINS              → CSV de orígenes exactos (https://foo,https://bar).
+ * - FRONTEND_ORIGINS_REGEX        → CSV de regex para dominios (p.ej. \.webcontainer-api\.io$, (^https:\/\/localhost:\d+$) ).
+ */
+const allowAll = String(process.env.ALLOW_ALL_ORIGINS || "").trim() === "1";
+
+const EXACT = [];
+if (process.env.PUBLIC_BASE_URL) EXACT.push(process.env.PUBLIC_BASE_URL.trim());
 if (process.env.FRONTEND_ORIGINS) {
-  ORIGINS.push(
-    ...process.env.FRONTEND_ORIGINS.split(",").map(s => s.trim()).filter(Boolean)
-  );
+  EXACT.push(...process.env.FRONTEND_ORIGINS.split(",").map(s => s.trim()).filter(Boolean));
 }
+const REGEX = [];
+if (process.env.FRONTEND_ORIGINS_REGEX) {
+  for (const pat of process.env.FRONTEND_ORIGINS_REGEX.split(",").map(s => s.trim()).filter(Boolean)) {
+    try { REGEX.push(new RegExp(pat)); } catch {}
+  }
+}
+
 const corsOptions = {
   origin: (origin, cb) => {
-    if (!origin) return cb(null, true); // Postman/cURL
-    if (ORIGINS.length === 0) return cb(null, true); // permitir todo si no hay lista
-    const ok = ORIGINS.some(o => origin === o);
-    return ok ? cb(null, true) : cb(new Error(`Origin not allowed: ${origin}`));
+    // Sin origin = herramientas como curl/Postman/SSR → permitir
+    if (!origin) return cb(null, true);
+    if (allowAll) return cb(null, true);
+
+    // match exacto
+    if (EXACT.some(o => o === origin)) return cb(null, true);
+    // match por regex
+    if (REGEX.some(rx => rx.test(origin))) return cb(null, true);
+
+    return cb(new Error(`Origin not allowed: ${origin}`));
   },
   credentials: true,
+  // Permitir cabeceras y métodos comunes
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "Accept"],
 };
+
 app.use(cors(corsOptions));
+// Preflight global
+app.options("*", cors(corsOptions));
 app.use(bodyParser.json());
 
 /* ===================== Health/root ===================== */
@@ -463,9 +488,10 @@ app.use("/api", (_req, res) => {
 });
 
 /* =========================== Arranque =========================== */
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Servidor listo en puerto ${PORT}`);
-  if (ORIGINS.length) console.log("CORS ORIGINS:", ORIGINS.join(", "));
-  if (process.env.PUBLIC_BASE_URL) console.log("PUBLIC_BASE_URL:", process.env.PUBLIC_BASE_URL);
+  console.log("ALLOW_ALL_ORIGINS:", allowAll ? "ON" : "OFF");
+  if (EXACT.length) console.log("CORS EXACT ORIGINS:", EXACT.join(", "));
+  if (REGEX.length) console.log("CORS REGEX ORIGINS:", REGEX.map(r => r.toString()).join(", "));
 });
