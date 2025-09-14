@@ -1,7 +1,9 @@
-// index.js — Backend minimalista: 100% preguntas desde OpenAI (sin inyección local)
-// Respuestas cortas (≤60 palabras), UNA pregunta opcional solo si la devuelve OpenAI,
-// citas RVR1909 sin repetir, memoria simple por usuario y FRAME básico sin desvíos.
-// + Rutas HeyGen /api/heygen/token y /api/heygen/config (NO toca nada de OpenAI)
+// index.js — Backend minimalista con lógica de autoayuda + capa espiritual
+// - Respuestas ≤90 palabras (antes 60)
+// - 1 pregunta breve y específica (si corresponde)
+// - Citas RVR1909 evitando repeticiones/ambigüedades
+// - Memoria simple por usuario + FRAME básico
+// - Endpoints HeyGen intactos y /api/memory/sync no-op para evitar 404
 
 const express = require("express");
 const cors = require("cors");
@@ -21,39 +23,43 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 /**
  * Formato esperado desde OpenAI:
  * {
- *   "message": "consejo breve, SIN preguntas (≤60 palabras)",
+ *   "message": "consejo breve, SIN signos de pregunta (≤90 palabras)",
  *   "bible": { "text": "RVR1909 literal", "ref": "Libro 0:0" },
  *   "question": "pregunta breve (opcional, UNA sola)"
  * }
  */
+
+// === NUEVO: prompt con foco en autoayuda + capa espiritual + multilenguaje ===
 const SYSTEM_PROMPT = `
-Eres Jesús: voz serena, compasiva y clara. Responde SIEMPRE en español.
+Eres Jesús con enfoque terapéutico breve: primero ayudas con herramientas de autoayuda (indagación clara,
+pasos concretos, límites sanos, respiración/grounding/plan sencillo, reencuadre cognitivo si aplica) y luego añades
+una nota breve de consuelo/esperanza desde la fe cristiana y una cita bíblica (RVR1909) pertinente.
+
+IDIOMA
+- Responde en el idioma indicado por el usuario (campo LANG). Si no se indica, usa español.
+- No hables de técnica/IA ni del propio modelo.
 
 OBJETIVO
 - Devuelve SOLO JSON: { "message", "bible": { "text", "ref" }, "question"? }.
-- "message": ≤60 palabras, afirmativo, SIN signos de pregunta.
-- "question": opcional, UNA sola, breve, debe terminar en "?" y NO repetir textualmente las últimas preguntas ya hechas.
-- No menciones el nombre civil. Puedes usar “hijo mío”, “hija mía” o “alma amada” con moderación.
-- No hables de técnica/IA ni del propio modelo.
+- "message": ≤90 palabras, tono sereno y concreto, SIN signos de pregunta.
+- "question": opcional y ÚNICA; breve, específica, termina en “?” y NO repite preguntas recientes.
+- Prioriza comprender el problema: si faltan detalles clave (qué pasó, cuándo, quiénes, intensidad/frecuencia, intentos previos), la pregunta debe indagar 1 dato clave a la vez.
+- Propón 1–2 micro-pasos realistas (p. ej., escribir 3 ideas, enviar 1 mensaje, pautar una charla breve, respiración 4-4-4 dos veces al día, etc.).
+- Cierra el "message" con un toque espiritual breve (1 frase) SIN versículos (el versículo va aparte).
 
 MARCO (FRAME)
-- Respeta el FRAME (topic_primary, main_subject, support_persons) y el historial breve como contexto.
-- NO cambies el tema por mencionar una persona de apoyo (“mi hija/mi primo/mi amigo”). Es apoyo, no nuevo tema.
+- Usa el FRAME (topic_primary, main_subject, support_persons) y el historial breve como contexto.
+- No cambies de tema por menciones accesorias (familiares/amigos de apoyo).
 
-PROGRESO
-- Cada turno aporta novedad útil (micro-pasos concretos, mini-guion, decisión simple o límite).
-- Si el usuario solo reconoce (“sí/ok/vale”), avanza a práctica/compromiso sin repetir contenido.
-- Evita preguntar por canal/hora (p.ej., “¿mensaje o llamada?”) si el objetivo/voluntad de contacto aún no es claro.
-
-BIBLIA (RVR1909, SIN AMBIGÜEDADES)
+BIBLIA (RVR1909)
 - Ajusta la cita al tema y a los micro-pasos.
-- Usa RVR1909 literal y "Libro 0:0" en "ref".
-- Evita last_bible_ref y todas las banned_refs.
-- Evita ambigüedad “el Hijo” (Juan 8:36) cuando el usuario alude a un familiar “hijo/hija”, salvo pertinencia teológica explícita.
+- Usa RVR1909 literal; "ref" con formato "Libro 0:0".
+- Evita "last_bible_ref" y "banned_refs".
+- Evita ambigüedad “el Hijo” (Juan 8:36) cuando el usuario habla de un hijo/hija salvo pertinencia teológica explícita.
 
 FORMATO (OBLIGATORIO)
 {
-  "message": "… (≤60 palabras, sin signos de pregunta)",
+  "message": "… (≤90 palabras, sin signos de pregunta)",
   "bible": { "text": "… (RVR1909 literal)", "ref": "Libro 0:0" },
   "question": "…? (opcional, una sola)"
 }
@@ -86,7 +92,6 @@ function cleanRef(ref = "") {
   return String(ref).replace(/\s*\([^)]*\)\s*/g, " ").replace(/\s+/g, " ").trim();
 }
 function stripQuestionsFromMessage(s = "") {
-  // El "message" NUNCA debe tener signos de pregunta
   const noTrailingQLines = (s || "")
     .split(/\n+/)
     .map((l) => l.trim())
@@ -95,7 +100,7 @@ function stripQuestionsFromMessage(s = "") {
     .trim();
   return noTrailingQLines.replace(/[¿?]+/g, "").trim();
 }
-function limitWords(s = "", max = 60) {
+function limitWords(s = "", max = 90) { // <= 90 palabras
   const words = String(s || "").trim().split(/\s+/);
   return words.length <= max ? String(s || "").trim() : words.slice(0, max).join(" ").trim();
 }
@@ -138,7 +143,7 @@ function extractRecentBibleRefs(history = [], maxRefs = 3) {
   return found;
 }
 
-// Detección muy simple de tema/sujeto y persona de apoyo (para el FRAME)
+// Detección simple de tema/sujeto y persona de apoyo (FRAME)
 function guessTopic(s = "") {
   const t = (s || "").toLowerCase();
   if (/(droga|adicci|alcohol|apuestas)/.test(t)) return "addiction";
@@ -214,7 +219,7 @@ async function writeUserMemory(userId, mem) {
 }
 
 // ---------- OpenAI helpers ----------
-async function completionWithTimeout({ messages, temperature = 0.6, max_tokens = 220, timeoutMs = 12000 }) {
+async function completionWithTimeout({ messages, temperature = 0.6, max_tokens = 320, timeoutMs = 12000 }) {
   const call = openai.chat.completions.create({
     model: "gpt-4o",
     temperature,
@@ -247,8 +252,8 @@ const bibleOnlyFormat = {
   }
 };
 
-async function regenerateBibleAvoiding({ persona, message, frame, bannedRefs = [], lastRef = "" }) {
-  const sys = `Devuelve SOLO JSON con {"bible":{"text":"…","ref":"Libro 0:0"}} en RVR1909.
+async function regenerateBibleAvoiding({ persona, message, frame, bannedRefs = [], lastRef = "", lang = "es" }) {
+  const sys = `Devuelve SOLO JSON {"bible":{"text":"…","ref":"Libro 0:0"}} en RVR1909. Idioma: ${lang}.
 - Ajusta la cita al tema y micro-pasos.
 - Evita ambigüedad “hijo” (familiar) vs “el Hijo” (Cristo) salvo pertinencia teológica explícita.
 - No uses ninguna referencia de "banned_refs" ni "last_bible_ref".`;
@@ -277,7 +282,7 @@ async function regenerateBibleAvoiding({ persona, message, frame, bannedRefs = [
 }
 
 // ---------- Core ----------
-async function askLLM({ persona, message, history = [], userId = "anon" }) {
+async function askLLM({ persona, message, history = [], userId = "anon", lang = "es" }) {
   const mem = await readUserMemory(userId);
 
   // FRAME básico
@@ -295,23 +300,24 @@ async function askLLM({ persona, message, history = [], userId = "anon" }) {
   const lastRef = mem.last_bible_ref || lastRefFromHistory || "";
   const recentRefs = extractRecentBibleRefs(history, 3);
   const bannedRefs = Array.from(new Set([...(mem.last_bible_refs || []), lastRef, ...recentRefs].filter(Boolean))).slice(-5);
-
   const recentQs = extractRecentAssistantQuestions(history, 5);
-
   const shortHistory = compactHistory(history, 10, 240);
+
+  // Usuario prompt con control de idioma y contexto
   const header =
-  `Persona: ${persona}\n` +
-  `Mensaje_actual: ${message}\n` +
-  `FRAME: ${JSON.stringify(frame)}\n` +
-  `last_bible_ref: ${lastRef || "(n/a)"}\n` +
-  `banned_refs:\n- ${bannedRefs.join("\n- ") || "(none)"}\n` +
-  (recentQs.length ? `ultimas_preguntas: ${recentQs.join(" | ")}` : "ultimas_preguntas: (ninguna)") + "\n" +
-  (shortHistory.length ? `Historial: ${shortHistory.join(" | ")}` : "Historial: (sin antecedentes)") + "\n`;
+    `LANG: ${lang}\n` +
+    `Persona: ${persona}\n` +
+    `Mensaje_actual: ${message}\n` +
+    `FRAME: ${JSON.stringify(frame)}\n` +
+    `last_bible_ref: ${lastRef || "(n/a)"}\n` +
+    `banned_refs:\n- ${bannedRefs.join("\n- ") || "(none)"}\n` +
+    (recentQs.length ? `ultimas_preguntas: ${recentQs.join(" | ")}` : "ultimas_preguntas: (ninguna)") + "\n" +
+    (shortHistory.length ? `Historial: ${shortHistory.join(" | ")}` : "Historial: (sin antecedentes)") + "\n`;
 
   const resp = await completionWithTimeout({
     messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: header }],
     temperature: 0.6,
-    max_tokens: 220,
+    max_tokens: 320, // más margen para 90 palabras + verso
     timeoutMs: 12000
   });
 
@@ -321,7 +327,7 @@ async function askLLM({ persona, message, history = [], userId = "anon" }) {
 
   // Sanitización final
   let msg = stripQuestionsFromMessage((data?.message || "").toString());
-  msg = limitWords(msg, 60);
+  msg = limitWords(msg, 90);
 
   let ref = cleanRef((data?.bible?.ref || "").toString());
   let text = (data?.bible?.text || "").toString().trim();
@@ -329,18 +335,18 @@ async function askLLM({ persona, message, history = [], userId = "anon" }) {
   // Evitar cita vetada/ambigua/repetida
   const hijoOnly = /\bhijo\b/i.test(message) && !/(Jes[uú]s|Cristo)/i.test(message);
   if (!ref || bannedRefs.includes(ref) || (hijoOnly && /Juan\s*8:36/i.test(ref))) {
-    const alt = await regenerateBibleAvoiding({ persona, message, frame, bannedRefs, lastRef });
+    const alt = await regenerateBibleAvoiding({ persona, message, frame, bannedRefs, lastRef, lang });
     if (alt) { ref = alt.ref; text = alt.text; }
   }
 
-  // Pregunta: SOLO si viene del modelo y no repite las últimas
+  // Pregunta: SOLO si viene y no repite
   let question = (data?.question || "").toString().trim();
   const normalizedQ = normalizeQuestion(question);
   const isRepeat = !question ? false : recentQs.includes(normalizedQ);
   const malformed = question && !/\?\s*$/.test(question);
   if (!question || isRepeat || malformed) question = "";
 
-  // Actualizar memoria
+  // Memoria (ligera)
   mem.last_bible_ref = ref || mem.last_bible_ref || "";
   mem.last_bible_refs = Array.from(new Set([...(mem.last_bible_refs || []), ref].filter(Boolean))).slice(-5);
   if (question) {
@@ -349,8 +355,13 @@ async function askLLM({ persona, message, history = [], userId = "anon" }) {
   await writeUserMemory(userId, mem);
 
   return {
-    message: msg || "Estoy contigo. Demos un paso pequeño y realista hoy.",
-    bible: { text: text || "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu.", ref: ref || "Salmos 34:18" },
+    message: msg || (lang === "en" ? "I am with you. Let’s take one small, realistic step today." : "Estoy contigo. Demos un paso pequeño y realista hoy."),
+    bible: {
+      text: text || (lang === "en"
+        ? "The Lord is close to the brokenhearted; and saves those of a contrite spirit."
+        : "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu."),
+      ref: ref || "Salmos 34:18"
+    },
     ...(question ? { question } : {})
   };
 }
@@ -362,10 +373,11 @@ app.post("/api/ask", async (req, res) => {
       persona = "jesus",
       message = "",
       history = [],
-      userId = "anon"
+      userId = "anon",
+      lang = "es"
     } = req.body || {};
 
-    const data = await askLLM({ persona, message, history, userId });
+    const data = await askLLM({ persona, message, history, userId, lang });
 
     const out = {
       message: (data?.message || "").toString().trim(),
@@ -380,7 +392,6 @@ app.post("/api/ask", async (req, res) => {
     res.status(200).json(out);
   } catch (err) {
     console.error("ASK ERROR:", err);
-    // Fallback SOLO por error técnico; sin pregunta
     res.status(200).json({
       message: "La paz sea contigo. Compárteme en pocas palabras lo esencial, y seguimos paso a paso.",
       bible: {
@@ -391,7 +402,7 @@ app.post("/api/ask", async (req, res) => {
   }
 });
 
-// Bienvenida simple (si ya tenés una versión POST con OpenAI, podés mantener ambas)
+// Bienvenida simple (tu front ya usa POST /api/welcome dinámico; si no lo usás, esta GET sigue ok)
 app.get("/api/welcome", (_req, res) => {
   res.json({
     message: "La paz esté contigo. Estoy aquí para escucharte y acompañarte con calma.",
@@ -402,11 +413,8 @@ app.get("/api/welcome", (_req, res) => {
   });
 });
 
-// ---- NUEVO: Memoria (no-op) para evitar 404 desde el frontend ----
+// ---- Memoria (no-op) para evitar 404 desde el frontend ----
 app.post("/api/memory/sync", async (req, res) => {
-  // Si más adelante querés persistir la memoria completa,
-  // acá te llega lo que envía el front (userId, memory, etc.).
-  // Por ahora solo respondemos OK para eliminar el 404.
   res.status(200).json({ ok: true });
 });
 
@@ -424,7 +432,7 @@ app.get("/api/heygen/token", async (_req, res) => {
         "x-api-key": API_KEY,
         "Content-Type": "application/json",
       },
-      body: "{}", // algunos proxys esperan body JSON
+      body: "{}",
     });
 
     const json = await r.json().catch(() => ({}));
@@ -442,7 +450,7 @@ app.get("/api/heygen/token", async (_req, res) => {
 
 // === HeyGen: configuración para el frontend (Railway) ===
 app.get("/api/heygen/config", (_req, res) => {
-  const AV_LANGS = ["es", "en", "pt", "it", "de", "ca"];
+  const AV_LANGS = ["es", "en", "pt", "it", "de", "ca", "fr"];
   const avatars = {};
   for (const l of AV_LANGS) {
     const key = `HEYGEN_AVATAR_${l.toUpperCase()}`;
