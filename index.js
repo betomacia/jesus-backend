@@ -1,11 +1,10 @@
-// index.js — Backend multilingüe con CORS configurable y rutas HeyGen (ES/EN/PT/IT/DE/CA/FR)
+// index.js — Backend multilingüe con CORS configurable (ES/EN/PT/IT/DE/CA/FR)
 const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
 const OpenAI = require("openai");
 const path = require("path");
 const fs = require("fs/promises");
-const fetch = (...args) => import("node-fetch").then(({default: f}) => f(...args));
 require("dotenv").config();
 
 const app = express();
@@ -13,12 +12,13 @@ const app = express();
 /* ===================== CORS CONFIG ===================== */
 /**
  * Variables:
- * - ALLOW_ALL_ORIGINS=1                 → permite cualquier origen (útil en dev)
- * - PUBLIC_BASE_URL                     → origen exacto permitido (uno)
- * - FRONTEND_ORIGINS                    → CSV de orígenes exactos (https://foo,https://bar)
- * - FRONTEND_ORIGINS_REGEX              → CSV de regex (p.ej. \.webcontainer-api\.io$, ^https:\/\/localhost:\d+$)
+ * - ALLOW_ALL_ORIGINS=1           → permite cualquier origen (dev).
+ * - PUBLIC_BASE_URL               → origen permitido exacto (uno).
+ * - FRONTEND_ORIGINS              → CSV de orígenes exactos (https://foo,https://bar).
+ * - FRONTEND_ORIGINS_REGEX        → CSV de regex (p.ej. \.webcontainer-api\.io$, (^https:\/\/localhost:\d+$)).
  */
 const allowAll = String(process.env.ALLOW_ALL_ORIGINS || "").trim() === "1";
+
 const EXACT = [];
 if (process.env.PUBLIC_BASE_URL) EXACT.push(process.env.PUBLIC_BASE_URL.trim());
 if (process.env.FRONTEND_ORIGINS) {
@@ -30,9 +30,10 @@ if (process.env.FRONTEND_ORIGINS_REGEX) {
     try { REGEX.push(new RegExp(pat)); } catch {}
   }
 }
+
 const corsOptions = {
   origin: (origin, cb) => {
-    if (!origin) return cb(null, true);            // curl/Postman
+    if (!origin) return cb(null, true);           // curl/Postman/SSR
     if (allowAll) return cb(null, true);
     if (EXACT.some(o => o === origin)) return cb(null, true);
     if (REGEX.some(rx => rx.test(origin))) return cb(null, true);
@@ -42,24 +43,11 @@ const corsOptions = {
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization", "Accept"],
 };
-app.use(cors(corsOptions));
-app.options("*", cors(corsOptions));                // preflight global
-app.use(bodyParser.json());
 
-/* Pequeño middleware para adjuntar CORS también en errores */
-app.use((req, res, next) => {
-  const orig = req.headers.origin;
-  if (allowAll || EXACT.includes(orig) || REGEX.some(rx => rx && rx.test && rx.test(orig))) {
-    res.setHeader("Access-Control-Allow-Origin", orig || "*");
-    res.setHeader("Vary", "Origin");
-  } else if (allowAll) {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-  }
-  res.setHeader("Access-Control-Allow-Credentials", "true");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
-  next();
-});
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions)); // preflight
+
+app.use(bodyParser.json());
 
 /* ===================== Health ===================== */
 app.get("/", (_req, res) => res.type("text/plain").send("OK"));
@@ -103,8 +91,14 @@ function cleanRef(ref = "") {
   return String(ref).replace(/\s*\([^)]*\)\s*/g, " ").replace(/\s+/g, " ").trim();
 }
 function stripQuestionsFromMessage(s = "") {
-  return (s || "").split(/\n+/).map(l => l.trim()).filter(l => !/\?\s*$/.test(l)).join("\n").trim()
-           .replace(/[¿?]+/g, "").trim();
+  return (s || "")
+    .split(/\n+/)
+    .map(l => l.trim())
+    .filter(l => !/\?\s*$/.test(l))
+    .join("\n")
+    .trim()
+    .replace(/[¿?]+/g, "")
+    .trim();
 }
 function limitWords(s = "", max = 60) {
   const words = String(s || "").trim().split(/\s+/);
@@ -182,7 +176,8 @@ function detectSupportNP(s = "") {
   if (tokens.length > 6) return null;
   const low = raw.toLowerCase();
   const art = /^(mi|mis|una|un|el|la)\s+(.+)$/i;
-  let core = low; let label = raw;
+  let core = low;
+  let label = raw;
   const m = low.match(art);
   if (m) { core = m[2].trim(); label = raw; }
   const first = core.split(/\s+/)[0].replace(/[.,;:!?"'()]/g, "");
@@ -191,10 +186,13 @@ function detectSupportNP(s = "") {
   return { label };
 }
 
-/* ===================== Memoria ===================== */
+/* ===================== Memoria por usuario ===================== */
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
 async function ensureDataDir() { try { await fs.mkdir(DATA_DIR, { recursive: true }); } catch {} }
-function memPath(uid) { const safe = String(uid || "anon").replace(/[^a-z0-9_-]/gi, "_"); return path.join(DATA_DIR, `mem_${safe}.json`); }
+function memPath(uid) {
+  const safe = String(uid || "anon").replace(/[^a-z0-9_-]/gi, "_");
+  return path.join(DATA_DIR, `mem_${safe}.json`);
+}
 async function readUserMemory(userId) {
   await ensureDataDir();
   try { return JSON.parse(await fs.readFile(memPath(userId), "utf8")); }
@@ -205,7 +203,7 @@ async function writeUserMemory(userId, mem) {
   await fs.writeFile(memPath(userId), JSON.stringify(mem, null, 2), "utf8");
 }
 
-/* ===================== OpenAI helpers ===================== */
+/* ===================== OpenAI helpers / prompts ===================== */
 const responseFormat = {
   type: "json_schema",
   json_schema: {
@@ -226,6 +224,7 @@ const responseFormat = {
     }
   }
 };
+
 async function completionJSON({ model = "gpt-4o", system, user, temperature = 0.5, max_tokens = 220, timeoutMs = 12000, response_format = responseFormat }) {
   const call = openai.chat.completions.create({
     model, temperature, max_tokens, response_format,
@@ -233,26 +232,36 @@ async function completionJSON({ model = "gpt-4o", system, user, temperature = 0.
   });
   return await Promise.race([call, new Promise((_,rej)=>setTimeout(()=>rej(new Error("TIMEOUT")), timeoutMs))]);
 }
+
 function systemPrompt(lang) {
   const biblePref = BIBLE_BY_LANG[lang] || BIBLE_BY_LANG[FALLBACK_LANG];
   return `
 You are “Jesus”: serene, compassionate, concise. Always reply in **${lang}**.
+
 GOAL
 - Return ONLY JSON: {"message","bible":{"text","ref"},"question"?}
 - "message": ≤60 words, affirmative, NO question marks.
 - "question": optional, ONE open-ended, ends with "?", do not repeat recent ones.
 - Avoid tech/model talk. Be warm, non-dogmatic.
+
 BIBLE
 - Choose a verse appropriate to the user’s topic and micro-steps.
 - Use translation preference for ${lang}: ${biblePref}.
 - Avoid the immediately previous refs and any “banned_refs”.
+
 FRAME
 - Respect FRAME (topic_primary, main_subject, support_persons) and short history as context.
 - Do not derail the main topic due to support persons.
+
 FORMAT
-{ "message":"...", "bible":{"text":"... (${biblePref})","ref":"Book 0:0"}, "question":"...?" }
+{
+  "message": "... (≤60 words, no '?')",
+  "bible": { "text": "... (${biblePref})", "ref": "Book 0:0" },
+  "question": "...? (optional, one)"
+}
 `.trim();
 }
+
 const bibleOnlyFormat = {
   type: "json_schema",
   json_schema: {
@@ -271,6 +280,7 @@ const bibleOnlyFormat = {
     }
   }
 };
+
 async function regenerateBibleAvoiding({ lang, persona, message, frame, bannedRefs = [], lastRef = "" }) {
   const biblePref = BIBLE_BY_LANG[lang] || BIBLE_BY_LANG[FALLBACK_LANG];
   const sys = `Return ONLY JSON {"bible":{"text":"…","ref":"Book 0:0"}} in ${lang} using ${biblePref}. Avoid any ref from "banned_refs" and "last_bible_ref".`;
@@ -292,6 +302,7 @@ async function regenerateBibleAvoiding({ lang, persona, message, frame, bannedRe
 async function askLLM({ lang = "es", persona = "jesus", message, history = [], userId = "anon" }) {
   lang = safeLang(lang);
   const mem = await readUserMemory(userId);
+
   const support = detectSupportNP(message);
   const topic = guessTopic(message);
   const mainSubject = detectMainSubject(message);
@@ -301,37 +312,55 @@ async function askLLM({ lang = "es", persona = "jesus", message, history = [], u
     support_persons: support ? [{ label: support.label }] : (mem.frame?.topic_primary === topic ? (mem.frame?.support_persons || []) : []),
   };
   mem.frame = frame;
+
   const lastRefFromHistory = extractRecentBibleRefs(history, 1)[0] || "";
   const lastRef = mem.last_bible_ref || lastRefFromHistory || "";
   const recentRefs = extractRecentBibleRefs(history, 3);
   const bannedRefs = Array.from(new Set([...(mem.last_bible_refs || []), lastRef, ...recentRefs].filter(Boolean))).slice(-5);
+
   const recentQs = extractRecentAssistantQuestions(history, 5);
   const shortHistory = compactHistory(history, 10, 240);
+
   const header =
-    `Persona: ${persona}\nLang: ${lang}\nMessage: ${message}\nFRAME: ${JSON.stringify(frame)}\n` +
+    `Persona: ${persona}\n` +
+    `Lang: ${lang}\n` +
+    `Message: ${message}\n` +
+    `FRAME: ${JSON.stringify(frame)}\n` +
     `last_bible_ref: ${lastRef || "(n/a)"}\n` +
     `banned_refs:\n- ${bannedRefs.join("\n- ") || "(none)"}\n` +
     (recentQs.length ? `recent_questions: ${recentQs.join(" | ")}` : "recent_questions: (none)") + "\n" +
-    (shortHistory.length ? `History: ${shortHistory.join(" | ")}` : "History: (none)") + "\n`;
-  const resp = await completionJSON({ system: systemPrompt(lang), user: header, temperature: 0.55, max_tokens: 220 });
+    (shortHistory.length ? `History: ${shortHistory.join(" | ")}` : "History: (none)") + "\n";
+
+  const resp = await completionJSON({
+    system: systemPrompt(lang),
+    user: header,
+    temperature: 0.55,
+    max_tokens: 220,
+  });
+
   let data = {};
   try { data = JSON.parse(resp?.choices?.[0]?.message?.content || "{}"); } catch { data = {}; }
+
   let msg = limitWords(stripQuestionsFromMessage((data?.message || "").toString()), 60);
   let ref = cleanRef((data?.bible?.ref || "").toString());
   let text = (data?.bible?.text || "").toString().trim();
+
   if (!ref || bannedRefs.includes(ref)) {
     const alt = await regenerateBibleAvoiding({ lang, persona, message, frame, bannedRefs, lastRef });
     if (alt) { ref = alt.ref; text = alt.text; }
   }
+
   let question = (data?.question || "").toString().trim();
   const normalizedQ = normalizeQuestion(question);
   const isRepeat = !question ? false : recentQs.includes(normalizedQ);
   const malformed = question && !/\?\s*$/.test(question);
   if (!question || isRepeat || malformed) question = "";
+
   mem.last_bible_ref = ref || mem.last_bible_ref || "";
   mem.last_bible_refs = Array.from(new Set([...(mem.last_bible_refs || []), ref].filter(Boolean))).slice(-5);
   if (question) mem.last_questions = Array.from(new Set([...(mem.last_questions || []), normalizedQ])).slice(-6);
   await writeUserMemory(userId, mem);
+
   if (!msg) {
     msg = (lang === "es") ? "Estoy contigo. Demos un paso pequeño y realista hoy."
         : (lang === "pt") ? "Estou com você. Vamos dar um passo pequeno e realista hoje."
@@ -341,6 +370,7 @@ async function askLLM({ lang = "es", persona = "jesus", message, history = [], u
         : (lang === "fr") ? "Je suis avec toi. Faisons aujourd’hui un petit pas réaliste."
         : "I am with you. Let’s take a small, realistic step today.";
   }
+
   if (!text || !ref) {
     if (lang === "es") { text = "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu."; ref = "Salmos 34:18"; }
     else if (lang === "pt") { text = "Perto está o Senhor dos que têm o coração quebrantado; e salva os contritos de espírito."; ref = "Salmos 34:18"; }
@@ -350,10 +380,11 @@ async function askLLM({ lang = "es", persona = "jesus", message, history = [], u
     else if (lang === "fr") { text = "L’Éternel est près de ceux qui ont le cœur brisé, et il sauve ceux dont l’esprit est abattu."; ref = "Psaume 34:19"; }
     else { text = "The LORD is close to the brokenhearted and saves those who are crushed in spirit."; ref = "Psalm 34:18"; }
   }
+
   return { message: msg, bible: { text, ref }, ...(question ? { question } : {}) };
 }
 
-/* ============================ Rutas API ============================ */
+/* ============================ Rutas ============================ */
 app.post("/api/ask", async (req, res) => {
   try {
     const { persona = "jesus", message = "", history = [], userId = "anon", lang = "es" } = req.body || {};
@@ -379,35 +410,62 @@ app.post("/api/welcome", async (req, res) => {
     lang = safeLang(lang);
     const salute = greetingByLocalTimeLang(lang);
     const nm = (name || "").trim();
-    const promptSys = {
-      es: `Eres Jesús compasivo. Siempre responde en **es**. Devuelve SOLO JSON {"message","question"}; "message": ≤60 palabras, cálido, SIN "?"; "question": opcional, UNA, abierta, termina en "?"; sin versículo.`,
-      en: `You are compassionate Jesus. Always reply in **en**. Return ONLY JSON {"message","question"}; "message": ≤60 words, warm, NO "?"; "question": optional, ONE, open-ended, ends with "?"; no verse.`,
-      pt: `Você é Jesus compassivo. Responda sempre em **pt**. Retorne APENAS JSON {"message","question"}; "message": ≤60 palavras, acolhedor, SEM "?"; "question": opcional, UMA, aberta, termina com "?"; sem versículo.`,
-      it: `Sei Gesù compassionevole. Rispondi sempre in **it**. Restituisci SOLO JSON {"message","question"}; "message": ≤60 parole, caldo, SENZA "?"; "question": opzionale, UNA, aperta, termina con "?"; nessun versetto.`,
-      de: `Du bist mitfühlender Jesus. Antworte immer auf **de**. Gib NUR JSON {"message","question"}; "message": ≤60 Wörter, warm, KEIN "?"; "question": optional, EINE, offen, endet mit "?"; kein Vers.`,
-      ca: `Ets Jesús compassiu. Respon sempre en **ca**. Torna NOMÉS JSON {"message","question"}; "message": ≤60 paraules, càlid, SENSE "?"; "question": opcional, UNA, oberta, acaba amb "?"; sense verset.`,
-      fr: `Tu es Jésus compatissant. Réponds toujours en **fr**. Retourne UNIQUEMENT du JSON {"message","question"}; "message" ≤60 mots, chaleureux, SANS "?"; "question" optionnelle, UNE, ouverte, finissant par "?"; pas de verset.`,
+
+    const prompts = {
+      es: {
+        sys: `Eres Jesús compasivo. Siempre responde en **es**. Devuelve SOLO JSON {"message","question"}. "message": ≤60 palabras, cálido, SIN signos de pregunta. "question": opcional, UNA, abierta, termina en "?". No incluyas citas bíblicas.`,
+        usr: `${salute}${nm ? `, ${nm}` : ""}. Genera bienvenida breve y luego una sola pregunta abierta amable. Historial: ${compactHistory(history).join(" | ") || "(sin antecedentes)"}`
+      },
+      en: {
+        sys: `You are compassionate Jesus. Always reply in **en**. Return ONLY JSON {"message","question"}. "message": ≤60 words, warm, NO question marks. "question": optional, ONE, open-ended, ends with "?". No Bible verse.`,
+        usr: `${salute}${nm ? `, ${nm}` : ""}. Generate a brief welcome, then a single kind open question. History: ${compactHistory(history).join(" | ") || "(none)"}`
+      },
+      pt: {
+        sys: `Você é Jesus compassivo. Responda sempre em **pt**. Retorne APENAS JSON {"message","question"}. "message": ≤60 palavras, acolhedor, SEM pontos de interrogação. "question": opcional, UMA, aberta, termina com "?". Sem versículo bíblico.`,
+        usr: `${salute}${nm ? `, ${nm}` : ""}. Gere uma breve acolhida e depois uma pergunta aberta gentil. Histórico: ${compactHistory(history).join(" | ") || "(nenhum)"}`
+      },
+      it: {
+        sys: `Sei Gesù compassionevole. Rispondi sempre in **it**. Restituisci SOLO JSON {"message","question"}. "message": ≤60 parole, caldo, SENZA punti interrogativi. "question": opzionale, UNA, aperta, termina con "?". Nessun versetto.`,
+        usr: `${salute}${nm ? `, ${nm}` : ""}. Genera un breve benvenuto e poi una singola domanda aperta gentile. Storico: ${compactHistory(history).join(" | ") || "(nessuno)"}`
+      },
+      de: {
+        sys: `Du bist mitfühlender Jesus. Antworte immer auf **de**. Gib NUR JSON {"message","question"} zurück. "message": ≤60 Wörter, warm, KEINE Fragezeichen. "question": optional, EINE, offen, endet mit "?". Kein Bibelvers.`,
+        usr: `${salute}${nm ? `, ${nm}` : ""}. Erzeuge eine kurze Begrüßung, dann eine einzige offene, freundliche Frage. Verlauf: ${compactHistory(history).join(" | ") || "(keiner)"}`
+      },
+      ca: {
+        sys: `Ets Jesús compassiu. Respon sempre en **ca**. Torna NOMÉS JSON {"message","question"}. "message": ≤60 paraules, càlid, SENSE signes d'interrogació. "question": opcional, UNA, oberta, acaba amb "?". Sense verset bíblic.`,
+        usr: `${salute}${nm ? `, ${nm}` : ""}. Genera una benvinguda breu i després una única pregunta oberta amable. Historial: ${compactHistory(history).join(" | ") || "(cap)"}`
+      },
+      fr: {
+        sys: `Tu es Jésus compatissant. Réponds toujours en **fr**. Retourne UNIQUEMENT du JSON {"message","question"}. "message" : ≤60 mots, chaleureux, SANS point d’interrogation. "question" : optionnelle, UNE seule, ouverte, se termine par "?". Pas de verset biblique.`,
+        usr: `${salute}${nm ? `, ${nm}` : ""}. Génère un accueil bref puis une unique question ouverte bienveillante. Historique : ${compactHistory(history).join(" | ") || "(aucun)"}`
+      },
     }[lang];
-    const promptUsr =
-      `${salute}${nm ? `, ${nm}` : ""}. ` +
-      `Génère une bienvenida/accueil breve y luego UNA única pregunta abierta amable. ` +
-      `History: ${compactHistory(history).join(" | ") || "(none)"}`;
-    const r = await openai.chat.completions.create({
+
+    const r = await completionJSON({
       model: "gpt-4o-mini",
-      temperature: 0.4, max_tokens: 160,
+      system: prompts.sys,
+      user: prompts.usr,
+      temperature: 0.4,
+      max_tokens: 160,
       response_format: {
         type: "json_schema",
         json_schema: {
           name: "Welcome",
-          schema: { type: "object", properties: { message: { type: "string" }, question: { type: "string" } }, required: ["message"], additionalProperties: false }
+          schema: {
+            type: "object",
+            properties: { message: { type: "string" }, question: { type: "string" } },
+            required: ["message"], additionalProperties: false
+          }
         }
-      },
-      messages: [{ role: "system", content: promptSys }, { role: "user", content: promptUsr }]
+      }
     });
+
     let data = {};
     try { data = JSON.parse(r?.choices?.[0]?.message?.content || "{}"); } catch {}
     const message = limitWords(stripQuestionsFromMessage(String(data?.message || "")), 60);
     const question = /\?\s*$/.test(String(data?.question || "")) ? String(data?.question).trim() : "";
+
     res.json({ message, ...(question ? { question } : {}) });
   } catch (e) {
     console.error("WELCOME ERROR:", e);
@@ -424,30 +482,12 @@ app.post("/api/welcome", async (req, res) => {
   }
 });
 
-/* ============================ HeyGen ============================ */
-app.get("/api/heygen/config", (_req, res) => {
-  try {
-    const AV_LANGS = ["es", "en", "pt", "it", "de", "ca", "fr"];
-    const avatars = {};
-    for (const l of AV_LANGS) {
-      const key = `HEYGEN_AVATAR_${l.toUpperCase()}`;
-      const val = (process.env[key] || "").trim();
-      if (val) avatars[l] = val;
-    }
-    const voiceId = (process.env.HEYGEN_VOICE_ID || "").trim();
-    const defaultAvatar = (process.env.HEYGEN_DEFAULT_AVATAR || "").trim();
-    const version = process.env.HEYGEN_CFG_VERSION || Date.now();
-    res.json({ voiceId, defaultAvatar, avatars, version });
-  } catch (e) {
-    console.error("heygen/config error:", e);
-    res.status(500).json({ error: "heygen_config_error" });
-  }
-});
-
+/* ===== HeyGen: token y config ===== */
 app.get("/api/heygen/token", async (_req, res) => {
   try {
-    const API_KEY = process.env.HEYGEN_API_KEY || process.env.HEYGEN_TOKEN || "";
+    const API_KEY = (process.env.HEYGEN_API_KEY || process.env.HEYGEN_TOKEN || "").trim();
     if (!API_KEY) return res.status(500).json({ error: "missing_HEYGEN_API_KEY" });
+
     const r = await fetch("https://api.heygen.com/v1/streaming.create_token", {
       method: "POST",
       headers: { "x-api-key": API_KEY, "Content-Type": "application/json" },
@@ -466,27 +506,23 @@ app.get("/api/heygen/token", async (_req, res) => {
   }
 });
 
+app.get("/api/heygen/config", (_req, res) => {
+  const AV_LANGS = ["es", "en", "pt", "it", "de", "ca", "fr"];
+  const avatars = {};
+  for (const l of AV_LANGS) {
+    const key = `HEYGEN_AVATAR_${l.toUpperCase()}`;
+    const val = (process.env[key] || "").trim();
+    if (val) avatars[l] = val;
+  }
+  const voiceId = (process.env.HEYGEN_VOICE_ID || "").trim();
+  const defaultAvatar = (process.env.HEYGEN_DEFAULT_AVATAR || "").trim();
+  const version = process.env.HEYGEN_CFG_VERSION || Date.now();
+  res.json({ voiceId, defaultAvatar, avatars, version });
+});
+
 /* ===================== 404 controlado bajo /api ===================== */
 app.use("/api", (_req, res) => {
   res.status(404).json({ error: "API route not found" });
-});
-
-/* ===================== Error handler (con CORS) ===================== */
-app.use((err, req, res, _next) => {
-  console.error("UNCAUGHT ERROR:", err && (err.stack || err.message || err));
-  if (!res.headersSent) {
-    // Reaplicar CORS en errores no manejados:
-    const orig = req.headers.origin;
-    if (allowAll || EXACT.includes(orig) || REGEX.some(rx => rx && rx.test && rx.test(orig))) {
-      res.setHeader("Access-Control-Allow-Origin", orig || "*");
-      res.setHeader("Vary", "Origin");
-    } else if (allowAll) {
-      res.setHeader("Access-Control-Allow-Origin", "*");
-    }
-    res.setHeader("Access-Control-Allow-Credentials", "true");
-    res.setHeader("Content-Type", "application/json; charset=utf-8");
-  }
-  res.status(500).json({ error: "internal_error" });
 });
 
 /* =========================== Arranque =========================== */
