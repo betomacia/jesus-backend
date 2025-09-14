@@ -1,4 +1,4 @@
-// index.js — Backend multilingüe y centralizado (ES/EN/PT/IT/DE/CA/FR)
+// index.js — Backend multilingüe centralizado (ES/EN/PT/IT/DE/CA/FR) sin URL fija
 const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
@@ -8,17 +8,37 @@ const fs = require("fs/promises");
 require("dotenv").config();
 
 const app = express();
-app.use(cors());
+
+/* ===================== CORS con ENV ===================== */
+// Permite definir uno o varios orígenes en PUBLIC_BASE_URL o FRONTEND_ORIGINS (CSV)
+const ORIGINS = [];
+if (process.env.PUBLIC_BASE_URL) ORIGINS.push(process.env.PUBLIC_BASE_URL.trim());
+if (process.env.FRONTEND_ORIGINS) {
+  ORIGINS.push(
+    ...process.env.FRONTEND_ORIGINS.split(",").map(s => s.trim()).filter(Boolean)
+  );
+}
+const corsOptions = {
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true); // Postman/cURL
+    if (ORIGINS.length === 0) return cb(null, true); // permitir todo si no hay lista
+    const ok = ORIGINS.some(o => origin === o);
+    return ok ? cb(null, true) : cb(new Error(`Origin not allowed: ${origin}`));
+  },
+  credentials: true,
+};
+app.use(cors(corsOptions));
 app.use(bodyParser.json());
 
+/* ===================== Health/root ===================== */
+app.get("/", (_req, res) => res.type("text/plain").send("OK"));
+
+/* ===================== OpenAI ===================== */
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-/* ===================== Configuración de idiomas ===================== */
-
+/* ===================== Idiomas ===================== */
 const SUPPORTED = ["es", "en", "pt", "it", "de", "ca", "fr"];
 const FALLBACK_LANG = "en";
-
-// Traducción bíblica preferida por idioma
 const BIBLE_BY_LANG = {
   es: "RVR1960",
   en: "NIV",
@@ -28,8 +48,6 @@ const BIBLE_BY_LANG = {
   ca: "Bíblia Catalana Interconfessional",
   fr: "Louis Segond",
 };
-
-// Saludo por hora/idioma
 function greetingByLocalTimeLang(lang = "es", date = new Date()) {
   const h = date.getHours();
   const bucket = h < 12 ? "m1" : h < 19 ? "m2" : "m3";
@@ -46,8 +64,7 @@ function greetingByLocalTimeLang(lang = "es", date = new Date()) {
   return pack[bucket];
 }
 
-/* ====================== Utilidades generales ======================= */
-
+/* ===================== Utils ===================== */
 function safeLang(lang) {
   return SUPPORTED.includes(String(lang || "").toLowerCase()) ? String(lang).toLowerCase() : FALLBACK_LANG;
 }
@@ -98,8 +115,6 @@ function extractRecentBibleRefs(history = [], maxRefs = 3) {
   }
   return found;
 }
-
-// detecciones simples de tema/sujeto
 function guessTopic(s = "") {
   const t = (s || "").toLowerCase();
   if (/(droga|adicci|alcohol|apuestas)/.test(t)) return "addiction";
@@ -146,8 +161,7 @@ function detectSupportNP(s = "") {
   return { label };
 }
 
-/* ====================== Memoria por usuario ======================= */
-
+/* ===================== Memoria por usuario ===================== */
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
 async function ensureDataDir() { try { await fs.mkdir(DATA_DIR, { recursive: true }); } catch {} }
 function memPath(uid) {
@@ -164,8 +178,7 @@ async function writeUserMemory(userId, mem) {
   await fs.writeFile(memPath(userId), JSON.stringify(mem, null, 2), "utf8");
 }
 
-/* ==================== OpenAI helpers / prompts ==================== */
-
+/* ===================== OpenAI helpers / prompts ===================== */
 const responseFormat = {
   type: "json_schema",
   json_schema: {
@@ -261,12 +274,10 @@ async function regenerateBibleAvoiding({ lang, persona, message, frame, bannedRe
 }
 
 /* ============================ Core ============================ */
-
 async function askLLM({ lang = "es", persona = "jesus", message, history = [], userId = "anon" }) {
   lang = safeLang(lang);
   const mem = await readUserMemory(userId);
 
-  // FRAME
   const support = detectSupportNP(message);
   const topic = guessTopic(message);
   const mainSubject = detectMainSubject(message);
@@ -309,7 +320,6 @@ async function askLLM({ lang = "es", persona = "jesus", message, history = [], u
   let ref = cleanRef((data?.bible?.ref || "").toString());
   let text = (data?.bible?.text || "").toString().trim();
 
-  // Evitar ref vetada/repetida
   if (!ref || bannedRefs.includes(ref)) {
     const alt = await regenerateBibleAvoiding({ lang, persona, message, frame, bannedRefs, lastRef });
     if (alt) { ref = alt.ref; text = alt.text; }
@@ -321,7 +331,6 @@ async function askLLM({ lang = "es", persona = "jesus", message, history = [], u
   const malformed = question && !/\?\s*$/.test(question);
   if (!question || isRepeat || malformed) question = "";
 
-  // Memoria
   mem.last_bible_ref = ref || mem.last_bible_ref || "";
   mem.last_bible_refs = Array.from(new Set([...(mem.last_bible_refs || []), ref].filter(Boolean))).slice(-5);
   if (question) mem.last_questions = Array.from(new Set([...(mem.last_questions || []), normalizedQ])).slice(-6);
@@ -351,8 +360,6 @@ async function askLLM({ lang = "es", persona = "jesus", message, history = [], u
 }
 
 /* ============================ Rutas ============================ */
-
-// Conversación normal
 app.post("/api/ask", async (req, res) => {
   try {
     const { persona = "jesus", message = "", history = [], userId = "anon", lang = "es" } = req.body || {};
@@ -372,7 +379,6 @@ app.post("/api/ask", async (req, res) => {
   }
 });
 
-// Bienvenida (mensaje ≤60 palabras SIN ? en el primer párrafo) + UNA pregunta abierta (opcional). Sin versículo en el primer turno.
 app.post("/api/welcome", async (req, res) => {
   try {
     let { lang = "es", name = "", history = [] } = req.body || {};
@@ -451,41 +457,15 @@ app.post("/api/welcome", async (req, res) => {
   }
 });
 
-/* ===== HeyGen (igual que antes; no toca OpenAI) ===== */
-
-app.get("/api/heygen/token", async (_req, res) => {
-  try {
-    const API_KEY = process.env.HEYGEN_API_KEY || process.env.HEYGEN_TOKEN || "";
-    if (!API_KEY) return res.status(500).json({ error: "missing_HEYGEN_API_KEY" });
-    const r = await fetch("https://api.heygen.com/v1/streaming.create_token", {
-      method: "POST",
-      headers: { "x-api-key": API_KEY, "Content-Type": "application/json" },
-      body: "{}",
-    });
-    const json = await r.json().catch(() => ({}));
-    const token = json?.data?.token || json?.token || json?.access_token || "";
-    if (!r.ok || !token) return res.status(r.status || 500).json({ error: "heygen_token_failed", detail: json });
-    res.json({ token });
-  } catch (e) {
-    console.error("heygen token exception:", e);
-    res.status(500).json({ error: "heygen_token_error" });
-  }
-});
-
-app.get("/api/heygen/config", (_req, res) => {
-  const AV_LANGS = SUPPORTED;
-  const avatars = {};
-  for (const l of AV_LANGS) {
-    const key = `HEYGEN_AVATAR_${l.toUpperCase()}`;
-    const val = (process.env[key] || "").trim();
-    if (val) avatars[l] = val;
-  }
-  const voiceId = (process.env.HEYGEN_VOICE_ID || "").trim();
-  const defaultAvatar = (process.env.HEYGEN_DEFAULT_AVATAR || "").trim();
-  const version = process.env.HEYGEN_CFG_VERSION || Date.now();
-  res.json({ voiceId, defaultAvatar, avatars, version });
+/* ===================== 404 controlado bajo /api ===================== */
+app.use("/api", (_req, res) => {
+  res.status(404).json({ error: "API route not found" });
 });
 
 /* =========================== Arranque =========================== */
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Servidor listo en puerto ${PORT}`);
+  if (ORIGINS.length) console.log("CORS ORIGINS:", ORIGINS.join(", "));
+  if (process.env.PUBLIC_BASE_URL) console.log("PUBLIC_BASE_URL:", process.env.PUBLIC_BASE_URL);
+});
