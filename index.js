@@ -1,11 +1,11 @@
 // index.js — Conversación servicial y profunda (multi-idioma, antirep, 100% OpenAI)
 // - /api/welcome: saludo por hora **del dispositivo** + nombre + frase alentadora + 1 pregunta ABIERTA terapéutica
-//     (sin A/B, sin técnicas, sin hobbies/planes/positivismo forzado; centrada en “lo que trae hoy”)
+//     (sin A/B, sin hobbies/planes; centrada en “lo que trae hoy”)
 // - /api/ask: tres modos conversacionales con foco en AUTOAYUDA real
 //     * explore: validación concreta + **1 micro-acción inmediata** (no “diario” salvo que lo pida) + 1 línea espiritual (sin cita) + 1 pregunta focal
-//     * permiso: 1–2 cursos de acción posibles (sin detalles) + 1 línea espiritual + **pregunta de permiso específica al tema** (“¿Querés que te diga qué decir y cómo?”)
-//     * ejecutar: **guion/plan paso a paso** (p. ej., diálogo sincero con la pareja: lugar, “mensajes en yo”, 2–3 frases ejemplo, límites, cierre) + 1 pregunta de ajuste
-// - Anti-repetición: preguntas, estilos de pregunta (q_style), técnicas (evitar “escritura” consecutiva) y **citas bíblicas** (bloquea Mateo/Matthew 11:28 en todos los idiomas)
+//     * permiso: 1–2 cursos de acción posibles + 1 línea espiritual + **pregunta de permiso** específica al tema
+//     * ejecutar: **guion/plan paso a paso** (p. ej., diálogo con la pareja: contexto, “mensajes en yo”, 2–3 frases modelo, límite y cierre) + 1 pregunta de ajuste
+// - Anti-repetición: preguntas, estilos de pregunta (q_style), técnicas (cooldown de respiración/escritura) y **citas bíblicas** (bloquea Mateo/Matthew 11:28 en todos los idiomas)
 // - Memoria en /data (DATA_DIR configurable)
 // - HeyGen y CORS abiertos
 //
@@ -82,6 +82,39 @@ function greetingByHour(lang="es", opts={}){
     case "fr": return g("Bonjour","Bon après-midi","Bonsoir");
     default:   return g("Buenos días","Buenas tardes","Buenas noches");
   }
+}
+
+// ---------- Detección de RECENCIA (multi-idioma) ----------
+function detectRecency(s=""){
+  const x=NORM(s);
+  // Hoy / ahora / recién / hace horas
+  const today = /\b(hoy|reci[eé]n|ahora|hace un rato|esta (mañana|tarde|noche))\b/.test(x)
+             || /\b(today|just now|right now|earlier today|this (morning|afternoon|evening))\b/.test(x)
+             || /\b(hoje|agora|agorinha|mais cedo hoje|esta (manhã|tarde|noite))\b/.test(x)
+             || /\b(oggi|adesso|poco fa|questa (mattina|pomeriggio|sera))\b/.test(x)
+             || /\b(heute|gerade eben|soeben|heute (Morgen|Nachmittag|Abend))\b/.test(x)
+             || /\b(avui|ara|fa una estona|aquest (matí|tarda|vespre))\b/.test(x)
+             || /\b(aujourd'hui|à l'instant|tout à l'heure|ce (matin|après-midi|soir))\b/.test(x);
+  if (today) return "today";
+  const yesterday = /\b(ayer)\b/.test(x) || /\b(yesterday)\b/.test(x) || /\b(ontem)\b/.test(x) || /\b(ieri)\b/.test(x) || /\b(gestern)\b/.test(x) || /\b(ahir)\b/.test(x) || /\b(hier)\b/.test(x);
+  if (yesterday) return "yesterday";
+  const hours = /\bhace\s+\d+\s*(h|horas?)\b/.test(x) || /\b\d+\s*(hours?|hrs?)\s*ago\b/.test(x) || /\bh[aá]\s*\d+\s*(h|horas?)\b/.test(x);
+  if (hours) return "hours";
+  // genérico
+  return "generic";
+}
+function fixTemporalQuestion(q="", recency="generic", lang="es"){
+  if (!q) return q;
+  const x = NORM(q);
+  const weeksLike = /(últimas?|ders? derni[eè]res?|letzte[nr]?|ultime|darreres?)\s+(semanas|weeks|semanas|semanes|wochen|semaines|setmanes)/i;
+  const daysLike  = /(últimos?|ders?|derni[eè]rs?|letzten?|ultimi|darrers?)\s+(d[ií]as|days|tage|jours|dias|dies)/i;
+  if (recency==="today" || recency==="hours" || recency==="yesterday"){
+    if (weeksLike.test(q) || daysLike.test(q)){
+      const repl = (lang==="en"?"since today":"desde hoy");
+      return q.replace(weeksLike, repl).replace(daysLike, repl);
+    }
+  }
+  return q;
 }
 
 // ---------- Memoria en FS ----------
@@ -220,16 +253,9 @@ function isRefMat11_28(ref=""){
   const x = NORM(ref);
   if (!x) return false;
   const pats = [
-    /mateo\s*11\s*:\s*28/,
-    /mt\.?\s*11\s*:\s*28/,
-    /mat\.?\s*11\s*:\s*28/,
-    /san\s+mateo\s*11\s*:\s*28/,
-    /matthew?\s*11\s*:\s*28/,
-    /matteo\s*11\s*:\s*28/,
-    /matthäus\s*11\s*:\s*28/,
-    /matthieu\s*11\s*:\s*28/,
-    /mateu\s*11\s*:\s*28/,
-    /mateus\s*11\s*:\s*28/
+    /mateo\s*11\s*:\s*28/, /mt\.?\s*11\s*:\s*28/, /mat\.?\s*11\s*:\s*28/, /san\s+mateo\s*11\s*:\s*28/,
+    /matthew?\s*11\s*:\s*28/, /matteo\s*11\s*:\s*28/, /matthäus\s*11\s*:\s*28/, /matthieu\s*11\s*:\s*28/,
+    /mateu\s*11\s*:\s*28/, /mateus\s*11\s*:\s*28/
   ];
   return pats.some(r=>r.test(x));
 }
@@ -259,7 +285,7 @@ const FORMAT_ASK = {
       type:"object",
       properties:{
         message:{type:"string"},
-        bible:{type:"object",properties:{text:{type:"string"},ref:{type:"string"}},required:["text","ref"]},
+        bible:{type:"object",properties:{text:{type:"string"},ref:{type:{type:"string"}}},required:["text","ref"]},
         question:{type:"string"},
         techniques:{type:"array", items:{type:"string"}},
         q_style:{type:"string"}
@@ -313,7 +339,7 @@ Eres cercano, sereno y compasivo. Varía el lenguaje, evita muletillas, hobbies/
 
 SALIDA SOLO JSON (en ${langLabel(lang)}):
 - "message": ≤75 palabras. Incluye saludo por franja y **nombre si existe** (p.ej. "${hi}${nm?`, ${nm}`:""}"). Da **una** frase alentadora del día y expresa **disponibilidad**. **Sin preguntas** y **sin citas bíblicas** dentro del "message".
-- "question": **UNA** pregunta **abierta terapéutica** para que el usuario cuente **lo que trae hoy** (qué pasó, desde cuándo, o cómo impacta). Debe **terminar en "?"**. 
+- "question": **UNA** pregunta **abierta terapéutica** para que el usuario cuente **lo que trae hoy** (qué pasó, desde cuándo o impacto). Debe **terminar en "?"**.
   - Prohibido: opciones A/B, técnicas, hobbies/planes/tiempo libre, y fórmulas de plenitud/alegrías.
   - Evita repetir recientes: ${avoidQs.map(q=>`"${q}"`).join(", ")||"(ninguna)"}.
 No menciones IA/modelos.
@@ -324,43 +350,29 @@ No menciones IA/modelos.
       `Saludo_sugerido: ${hi}${nm?`, ${nm}`:""}\n`+
       (shortHistory.length?`Historial: ${shortHistory.join(" | ")}`:"Historial: (sin antecedentes)")+"\n";
 
-    let r = await completionJson({
+    const r = await completionJson({
       messages: [{ role:"system", content: SYSTEM_PROMPT }, { role:"user", content: header }],
       temperature: 0.8,
       max_tokens: 260,
       response_format: FORMAT_WELCOME
     });
 
-    const parseWelcome = (raw) => {
-      const content = raw?.choices?.[0]?.message?.content || "{}";
-      let data={}; try{ data=JSON.parse(content);}catch{ data={}; }
-      let msg = limitWords(stripQuestionsFromMessage(removeBibleLike(String(data?.message||""))), 75);
-      let question = String(data?.question||"").trim();
-      if (question && !/\?\s*$/.test(question)) question += "?";
-      return {msg, question};
-    };
-
-    let { msg, question } = parseWelcome(r);
+    const content = r?.choices?.[0]?.message?.content || "{}";
+    let data={}; try{ data=JSON.parse(content);}catch{ data={}; }
+    let msg = limitWords(stripQuestionsFromMessage(removeBibleLike(String(data?.message||""))), 75);
+    let question = String(data?.question||"").trim();
+    if (question && !/\?\s*$/.test(question)) question += "?";
 
     if (!question || isBadWelcomeQuestion(question)){
-      const SYS2 = SYSTEM_PROMPT + `\nReformula la "question" como **pregunta abierta terapéutica** centrada en lo que trae HOY (hecho/desde-cuándo/impacto), sin A/B, sin hobbies/planes, sin “pleno/alegrías”, sin small talk.`;
-      const r2 = await completionJson({
-        messages: [{ role:"system", content: SYS2 }, { role:"user", content: header }],
-        temperature: 0.85,
-        max_tokens: 220,
-        response_format: FORMAT_WELCOME
-      });
-      ({ msg, question } = parseWelcome(r2));
-      if (!question || isBadWelcomeQuestion(question)){
-        question = (lang==="en"
-          ? "What happened recently that you’d like to talk about?"
-          : lang==="pt" ? "O que aconteceu recentemente que você gostaria de conversar?"
-          : lang==="it" ? "Che cosa è successo recentemente di cui vorresti parlare?"
-          : lang==="de" ? "Was ist kürzlich passiert, worüber du sprechen möchtest?"
-          : lang==="ca" ? "Què ha passat recentment que vulguis compartir?"
-          : lang==="fr" ? "Qu’est-il arrivé récemment dont tu aimerais parler ?"
-          : "¿Qué ocurrió recientemente que te gustaría conversar?");
-      }
+      // Fallback seguro
+      question = (lang==="en"
+        ? "What happened recently that you’d like to talk about?"
+        : lang==="pt" ? "O que aconteceu recentemente que você gostaria de conversar?"
+        : lang==="it" ? "Che cosa è successo recentemente di cui vorresti parlare?"
+        : lang==="de" ? "Was ist kürzlich passiert, worüber du sprechen möchtest?"
+        : lang==="ca" ? "Què ha passat recentment que vulguis compartir?"
+        : lang==="fr" ? "Qu’est-il arrivé récemment dont tu aimerais parler ?"
+        : "¿Qué ocurrió recientemente que te gustaría conversar?");
     }
 
     if (question){
@@ -421,10 +433,12 @@ app.post("/api/ask", async (req,res)=>{
 
     const topic = guessTopic(userTxt);
     const mainSubject = detectMainSubject(userTxt);
+    const recency = detectRecency(userTxt);
     const frame = {
       topic_primary: topic,
       main_subject: mem.frame?.topic_primary===topic ? (mem.frame?.main_subject||mainSubject) : mainSubject,
       support_persons: mem.frame?.topic_primary===topic ? (mem.frame?.support_persons||[]) : [],
+      recency_hint: recency
     };
     mem.frame = frame;
     mem.last_topic = topic;
@@ -443,51 +457,52 @@ app.post("/api/ask", async (req,res)=>{
 
     const BAD_GENERIC_Q = /(qué te aliviaría|que te aliviar[ií]a|qué pequeño paso|qué vas a|qué harás|qué plan)/i;
 
-    // Pista de tema para preguntas de permiso (multi-idioma)
+    // pista de destinatario por tema (para preguntas de permiso)
     const TOPIC_HINT = {
       relationship: { es:"tu pareja", en:"your partner", pt:"sua parceria", it:"il tuo partner", de:"deinem Partner", ca:"la teva parella", fr:"ton/ta partenaire" },
+      separation:   { es:"esta separación", en:"this separation", pt:"esta separação", it:"questa separazione", de:"diese Trennung", ca:"aquesta separació", fr:"cette séparation" },
       family_conflict: { es:"tu familia", en:"your family", pt:"sua família", it:"la tua famiglia", de:"deiner Familie", ca:"la teva família", fr:"ta famille" },
       mood: { es:"tus emociones", en:"your emotions", pt:"suas emoções", it:"le tue emozioni", de:"deine Gefühle", ca:"les teves emocions", fr:"tes émotions" },
       grief: { es:"tu duelo", en:"your grief", pt:"seu luto", it:"il tuo lutto", de:"deine Trauer", ca:"el teu dol", fr:"ton deuil" },
-      separation: { es:"esta separación", en:"this separation", pt:"esta separação", it:"questa separazione", de:"diese Trennung", ca:"aquesta separació", fr:"cette séparation" },
       health: { es:"tu salud", en:"your health", pt:"sua saúde", it:"la tua salute", de:"deine Gesundheit", ca:"la teva salut", fr:"ta santé" },
       work_finance: { es:"tu trabajo o finanzas", en:"your work or finances", pt:"seu trabalho ou finanças", it:"il tuo lavoro o finanze", de:"deine Arbeit oder Finanzen", ca:"la teva feina o finances", fr:"ton travail ou tes finances" },
       addiction: { es:"tu proceso de recuperación", en:"your recovery process", pt:"seu processo de recuperação", it:"il tuo percorso di recupero", de:"deinen Genesungsweg", ca:"el teu procés de recuperació", fr:"ton chemin de rétablissement" },
       faith: { es:"tu fe", en:"your faith", pt:"sua fé", it:"la tua fede", de:"deinen Glauben", ca:"la teva fe", fr:"ta foi" }
     }[topic]?.[lang] || null;
 
+    // ---------- PROMPT principal ----------
     const SYSTEM_PROMPT = `
 Hablas con serenidad, claridad y compasión. Evita metáforas largas; sé **concreto y clínico** en lenguaje simple.
 
-MODO ACTUAL: ${MODE}
+MODO ACTUAL: ${MODE}; RECENCY: ${recency}
 
 SALIDA SOLO JSON (en ${langLabel(lang)}):
 - "message": ≤75 palabras, **sin signos de pregunta**.
   * Si MODO=explore: 
       - 1–2 frases de validación **concreta** (no poética).
-      - **1 micro-acción inmediata** orientada a estabilizar o entender (ej.: elegir un lugar tranquilo para hablar, posponer 24h una respuesta, exhalaciones largas 4→6, grounding 3-2-1, beber agua, breve paseo consciente). **No** propongas “escritura/diario” salvo que el usuario lo pida explícitamente.
+      - **1 micro-acción inmediata** orientada a estabilizar o entender (ej.: lugar tranquilo para hablar, **time-out 24h** antes de reaccionar, **no_escalar** en discusiones, **guion_dialogo_pareja** breve, **oars_escucha** con un familiar, **behavioral_activation** leve, **opposite_action** ante rumiación, **cognitive_reframe** 1 pensamiento, **apoyo_red_social** hoy, **walk_10min**, **hydrate**). **Evita “escritura/diario”** salvo que el usuario lo pida.
       - 1 línea espiritual breve (sin cita en "message").
   * Si MODO=permiso: 
-      - 1–2 cursos de acción posibles **sin detallar técnicas** (p. ej., “podemos armar un guion para hablar con ${TOPIC_HINT||"la otra persona"}” o “podemos regular la bronca primero y después definir límites”).
+      - 1–2 rumbos claros (ej.: “armamos un **guion** para hablar con ${TOPIC_HINT||"la otra persona"}” / “regulamos bronca y definimos **límites asertivos**”).
       - 1 línea espiritual; deja claro que podés guiar cuando el usuario quiera.
   * Si MODO=execute:
       - **Guía paso a paso** (1–3 min si aplica). 
-      - Para relación/separación: plan de diálogo sincero: preparar contexto (lugar/tiempo), **mensajes en yo**, 2–3 frases ejemplo adaptables, 1 límite claro, 1 cierre respetuoso. 
-      - Para emoción intensa: protocolo breve (p. ej., exhalación 4–6 + pausa 90s + reencuadre 1 pensamiento).
+      - Relación/separación: plan de conversación sincera: contexto, **mensajes en yo**, 2–3 frases modelo, **límite** y **cierre**.
+      - Emoción intensa: protocolo breve (exhalación 4–6 **solo si no se usó en el turno anterior**, + pausa 90s + **reencuadre cognitivo**).
       - Evita “escritura/diario” si fue usada en el turno previo.
-- "bible": texto + ref, ajustada al contexto/tema. Evita repetir: ${avoidRefs.map(r=>`"${r}"`).join(", ")||"(ninguna)"} **y** evita Mateo/Matthew 11:28 en cualquier idioma o abreviatura.
+- "bible": texto + ref, ajustada al contexto/tema. Evita repetir: ${avoidRefs.map(r=>`"${r}"`).join(", ")||"(ninguna)"} **y** evita Mateo/Matthew 11:28 en cualquier idioma/abreviatura.
 - "question": **UNA sola**.
-  * explore → **pregunta focal** para entender: qué ocurrió, desde cuándo y/o dónde impacta (pareja/familia/trabajo/salud/fe). Evita “¿qué te aliviaría?” y genéricas.
-  * permiso → **pregunta de permiso** natural y específica al tema (p. ej., “¿Querés que te diga qué decir y cómo?” sobre ${TOPIC_HINT||"el tema"}). Sin A/B.
+  * explore → **pregunta focal** para entender: qué ocurrió, **desde cuándo** (respetando RECENCY: si es “today/hours/yesterday”, **prohibido** “últimas semanas/días”), y/o dónde impacta (pareja/familia/trabajo/salud/fe). Sin A/B ni genéricas.
+  * permiso → **pregunta de permiso** específica (“¿Querés que te diga **qué decir y cómo**?” sobre ${TOPIC_HINT||"el tema"}).
   * execute → **pregunta de ajuste/check-in** (¿adaptamos el guion?, ¿otra frase?, ¿siguiente micro-paso?).
   * bye → **omite** pregunta.
-  Debe terminar en "?" y **no** usar opciones A/B; evita preguntas genéricas: (qué te aliviaría / qué pequeño paso / qué vas a / qué harás / qué plan).
-- "techniques": etiquetas si sugieres técnicas (ej.: ["breathing_exhale46","grounding_321","walk_5min","hydrate","time_out_24h","message_en_yo","no_escalar","guion_dialogo_pareja","cognitive_reframe","prayer_short"]).
-- "q_style": etiqueta del estilo de pregunta (ej.: "explore_event","explore_since","explore_impact","permiso_guion","permiso_regulacion","execute_checkin","execute_adjust").
+  Debe terminar en "?" y evitar preguntas genéricas tipo (qué te aliviaría / qué plan).
+- "techniques": etiquetas si sugieres técnicas (ej.: ["time_out_24h","no_escalar","guion_dialogo_pareja","message_en_yo","oars_escucha","behavioral_activation","opposite_action","cognitive_reframe","walk_10min","hydrate","breathing_exhale46","prayer_short","limites_asertivos","apoyo_red_social"]).
+- "q_style": etiqueta del estilo de pregunta (ej.: "explore_event","explore_since_now","explore_impact","permiso_guion","permiso_regulacion","execute_checkin","execute_adjust").
 
 PRIORIDADES:
-- **Autoayuda primero**: acciones concretas útiles al tema.
-- Evita “escritura/diario” si aparece en recientes: ${avoidTech.join(", ")||"(ninguna)"}; nunca dos turnos seguidos.
+- **Autoayuda primero**: acciones concretas útiles al tema (no solo respiración).
+- Si la última técnica fue respiración o escritura (en recientes: ${avoidTech.join(", ")||"(ninguna)"}), **no** las repitas ahora.
 - Varía el estilo de la **pregunta** y evita repetir estilos recientes: ${avoidQStyles.join(", ")||"(ninguno)"}.
 No menciones IA/modelos.
 `;
@@ -507,70 +522,113 @@ No menciones IA/modelos.
     let r = await completionJson({
       messages: [{role:"system",content:SYSTEM_PROMPT},{role:"user",content:header}],
       temperature:0.6,
-      max_tokens:340,
+      max_tokens:360,
       response_format: FORMAT_ASK
     });
 
-    const parseOut = (raw) => {
-      const content = raw?.choices?.[0]?.message?.content || "{}";
-      let data={}; try{ data=JSON.parse(content);}catch{ data={}; }
-      let msg = limitWords(stripQuestionsFromMessage(removeBibleLike(String(data?.message||""))), 75);
-      let ref = cleanRef(String(data?.bible?.ref||""));
-      let text = String(data?.bible?.text||"").trim();
-      let question = String(data?.question||"").trim();
-      let techniques = Array.isArray(data?.techniques)? data.techniques.map(String) : [];
-      let q_style = String(data?.q_style||"").trim();
-      return { msg, ref, text, question, techniques, q_style };
-    };
+    const content = r?.choices?.[0]?.message?.content || "{}";
+    let data={}; try{ data=JSON.parse(content);}catch{ data={}; }
 
-    let { msg, ref, text, question, techniques, q_style } = parseOut(r);
+    let msg = limitWords(stripQuestionsFromMessage(removeBibleLike(String(data?.message||""))), 75);
+    let ref = cleanRef(String(data?.bible?.ref||""));
+    let text = String(data?.bible?.text||"").trim();
+    let question = String(data?.question||"").trim();
+    let techniques = Array.isArray(data?.techniques)? data.techniques.map(String) : [];
+    let q_style = String(data?.q_style||"").trim();
 
-    // 2) Guardas de calidad para pregunta
+    // 2) Ajuste temporal de la pregunta según recencia
+    if (!isBye){
+      if (question && !/\?\s*$/.test(question)) question += "?";
+      question = fixTemporalQuestion(question, recency, lang);
+    }
+
+    // 3) Guardas de calidad para pregunta
     if (isBye){ question=""; }
     else{
-      if (question && !/\?\s*$/.test(question)) question += "?";
       const isGeneric = BAD_GENERIC_Q.test(question||"");
       const looksAB = /\b(o|ou|or|oder|o bien|ou bien)\b/i.test(question||"");
       if (!question || isGeneric || looksAB){
-        const SYS2 = SYSTEM_PROMPT + `\nAjusta la "question": una sola, natural, específica al tema, sin A/B, no genérica.`;
+        const SYS2 = SYSTEM_PROMPT + `\nAjusta la "question": una sola, natural, específica al tema, sin A/B, no genérica ni temporalmente incongruente con RECENCY=${recency}.`;
         const r2 = await completionJson({
           messages: [{role:"system",content:SYS2},{role:"user",content:header}],
           temperature:0.65,
-          max_tokens:320,
+          max_tokens:340,
           response_format: FORMAT_ASK
         });
-        ({ msg, ref, text, question, techniques, q_style } = parseOut(r2));
+        const c2 = r2?.choices?.[0]?.message?.content || "{}";
+        let d2={}; try{ d2=JSON.parse(c2);}catch{ d2={}; }
+        msg = limitWords(stripQuestionsFromMessage(removeBibleLike(String(d2?.message||msg||""))), 75);
+        ref = cleanRef(String(d2?.bible?.ref||ref||""));
+        text = String(d2?.bible?.text||text||"").trim();
+        question = String(d2?.question||question||"").trim();
+        techniques = Array.isArray(d2?.techniques)? d2.techniques.map(String) : techniques;
+        q_style = String(d2?.q_style||q_style||"").trim();
         if (question && !/\?\s*$/.test(question)) question += "?";
+        question = fixTemporalQuestion(question, recency, lang);
       }
     }
 
-    // 3) Anti “escritura” consecutiva
-    const lastWasWriting = (mem.last_techniques || []).slice(-1)[0] === "writing_optional";
-    const thisMentionsWriting = (techniques||[]).includes("writing_optional") || /escrib/i.test(msg);
-    if (!isBye && lastWasWriting && thisMentionsWriting){
-      const SYS3 = SYSTEM_PROMPT + `\nEvita "escritura/diario" porque se usó recién; ofrece otra vía concreta coherente con el tema (respiración exhalación 4–6, grounding 3-2-1, guion de diálogo, time-out 24h, etc.).`;
-      const r3 = await completionJson({
-        messages: [{role:"system",content:SYS3},{role:"user",content:header}],
-        temperature:0.65,
-        max_tokens:320,
-        response_format: FORMAT_ASK
-      });
-      ({ msg, ref, text, question, techniques, q_style } = parseOut(r3));
-      if (question && !/\?\s*$/.test(question)) question += "?";
+    // 4) Anti “escritura” y anti “respiración” consecutivas
+    const lastTech = (mem.last_techniques || []).slice(-1)[0] || "";
+    const usedWriting = (t)=> t==="writing_optional" || /escrit|diario/i.test(t);
+    const usedBreath  = (t)=> t==="breathing_exhale46" || /breath|respir/i.test(t);
+    const thisHasWriting = (techniques||[]).some(usedWriting) || /escrit|diario/i.test(msg);
+    const thisHasBreath  = (techniques||[]).some(usedBreath)  || /respiraci[oó]n|inhala|exhala|breath/i.test(msg);
+
+    if (!isBye && lastTech){
+      if (usedWriting(lastTech) && thisHasWriting){
+        // Re-pide sin escritura
+        const SYS3 = SYSTEM_PROMPT + `\nEvita "escritura/diario" porque se usó recién; ofrece otra vía concreta (oars_escucha, guion_dialogo_pareja, time_out_24h, no_escalar, cognitive_reframe, behavioral_activation, apoyo_red_social, walk_10min, hydrate).`;
+        const r3 = await completionJson({
+          messages: [{role:"system",content:SYS3},{role:"user",content:header}],
+          temperature:0.65,
+          max_tokens:340,
+          response_format: FORMAT_ASK
+        });
+        const c3 = r3?.choices?.[0]?.message?.content || "{}";
+        let d3={}; try{ d3=JSON.parse(c3);}catch{ d3={}; }
+        msg = limitWords(stripQuestionsFromMessage(removeBibleLike(String(d3?.message||msg||""))), 75);
+        ref = cleanRef(String(d3?.bible?.ref||ref||""));
+        text = String(d3?.bible?.text||text||"").trim();
+        question = String(d3?.question||question||"").trim();
+        techniques = Array.isArray(d3?.techniques)? d3.techniques.map(String) : techniques;
+        q_style = String(d3?.q_style||q_style||"").trim();
+        if (question && !/\?\s*$/.test(question)) question += "?";
+        question = fixTemporalQuestion(question, recency, lang);
+      } else if (usedBreath(lastTech) && thisHasBreath){
+        // Re-pide sin respiración repetida
+        const SYS4 = SYSTEM_PROMPT + `\nEvita respiración porque se usó recién; prioriza otras técnicas (no_escalar, time_out_24h, oars_escucha, guion_dialogo_pareja, cognitive_reframe, opposite_action, behavioral_activation, apoyo_red_social, walk_10min, hydrate).`;
+        const r4 = await completionJson({
+          messages: [{role:"system",content:SYS4},{role:"user",content:header}],
+          temperature:0.65,
+          max_tokens:340,
+          response_format: FORMAT_ASK
+        });
+        const c4 = r4?.choices?.[0]?.message?.content || "{}";
+        let d4={}; try{ d4=JSON.parse(c4);}catch{ d4={}; }
+        msg = limitWords(stripQuestionsFromMessage(removeBibleLike(String(d4?.message||msg||""))), 75);
+        ref = cleanRef(String(d4?.bible?.ref||ref||""));
+        text = String(d4?.bible?.text||text||"").trim();
+        question = String(d4?.question||question||"").trim();
+        techniques = Array.isArray(d4?.techniques)? d4.techniques.map(String) : techniques;
+        q_style = String(d4?.q_style||q_style||"").trim();
+        if (question && !/\?\s*$/.test(question)) question += "?";
+        question = fixTemporalQuestion(question, recency, lang);
+      }
     }
 
-    // 4) Evitar cita repetida o vetada
+    // 5) Evitar cita repetida o vetada
     const avoidSet = new Set((mem.last_bible_refs||[]).map(x=>NORM(cleanRef(x))));
     if (!ref || avoidSet.has(NORM(ref)) || isRefMat11_28(ref)){
       const alt = await regenerateBibleAvoiding({ lang, persona, message:userTxt, frame, bannedRefs: [...(mem.last_bible_refs||[]), ...BANNED_REFS], lastRef: mem.last_bible_refs?.slice(-1)[0]||"" });
       if (alt){ ref = alt.ref; text = alt.text; }
     }
-    if (isRefMat11_28(ref)) { // si aún insiste, reemplazar por seguro
+    if (isRefMat11_28(ref)) { // si aún insiste, reemplazo seguro
       ref = (lang==="en"?"Psalm 34:18":"Salmos 34:18");
       text = (lang==="en"?"The Lord is close to the brokenhearted and saves those who are crushed in spirit.":"Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu.");
     }
 
-    // 5) Persistencia
+    // 6) Persistencia
     const cleanedRef = cleanRef(ref);
     if (cleanedRef){
       mem.last_bible_refs = Array.isArray(mem.last_bible_refs)? mem.last_bible_refs : [];
@@ -591,7 +649,6 @@ No menciones IA/modelos.
       mem.last_q_styles.push(q_style);
       while(mem.last_q_styles.length>10) mem.last_q_styles.shift();
     }
-
     await writeUserMemory(userId, mem);
 
     const out = {
