@@ -1,8 +1,6 @@
-// index.js — Bienvenida espiritual breve (≤75 palabras) + pregunta útil y variada,
-// respuestas ASK con pregunta tipo "oferta/ayuda" (no "¿qué harías...?"),
-// antirepetición de preguntas (lista + patrones) y de citas bíblicas por tema/idioma,
-// memoria simple en FS, HeyGen y CORS.
-//
+// index.js — Bienvenida espiritual (≤75 palabras) + IA genera preguntas personales/oferta
+// (sin listas fijas), antirepetición (citas/preguntas), memoria con last_offer/last_topic/checkins,
+// manejo de sí/no por idioma, HeyGen y CORS.
 // Env: OPENAI_API_KEY, HEYGEN_API_KEY (opc), HEYGEN_DEFAULT_AVATAR (opc),
 // HEYGEN_VOICE_ID (opc), HEYGEN_AVATAR_ES/EN/PT/IT/DE/CA/FR (opc)
 
@@ -68,56 +66,53 @@ function greetingByHour(lang = "es") {
   }
 }
 
-// Vocativos y bendiciones (ligeramente aleatorios)
-function pick(arr) {
-  return arr[Math.floor(Math.random() * arr.length)];
-}
+// Vocativos y bendiciones espirituales
 function pickVocative(lang = "es", gender = "unknown") {
-  const ES_neutral = ["alma amada", "alma querida", "corazón buscador", "amado del Señor", "amado por Dios"];
+  const rnd = (arr) => arr[Math.floor(Math.random() * arr.length)];
+  const ES_neutral = ["alma amada", "hija del Altísimo", "alma querida", "amado del Señor", "corazón buscador"];
   const ES_f = ["hija mía", "alma amada", "hija querida", "amiga del Señor", "corazón valiente"];
   const ES_m = ["hijo mío", "alma amada", "hijo querido", "amigo del Señor", "corazón valiente"];
-  if (lang === "en") return pick(["beloved soul", "dear heart", "beloved child", "seeker of light", "dear one"]);
-  if (lang === "pt") return pick(["alma amada", "coração querido", "filho/a amado/a", "querido/a do Senhor"]);
-  if (lang === "it") return pick(["anima amata", "cuore caro", "figlia/figlio amato/a", "cara anima"]);
-  if (lang === "de") return pick(["geliebte Seele", "liebes Herz", "geliebtes Kind", "teure Seele"]);
-  if (lang === "ca") return pick(["ànima estimada", "cor estimat", "fill/a estimat/da", "ànima volguda"]);
-  if (lang === "fr") return pick(["âme bien-aimée", "cher cœur", "enfant bien-aimé", "âme chérie"]);
-  if (gender === "female") return pick(ES_f);
-  if (gender === "male") return pick(ES_m);
-  return pick(ES_neutral);
+  if (lang === "en") return rnd(["beloved soul","dear daughter of the Most High","dear heart","beloved child","seeker of light"]);
+  if (lang === "pt") return rnd(["alma amada","filha/o do Altíssimo","coração querido","alma querida","filho/a amado/a"]);
+  if (lang === "it") return rnd(["anima amata","figlia/figlio dell’Altissimo","cuore caro","anima cara","figlia/figlio amato/a"]);
+  if (lang === "de") return rnd(["geliebte Seele","liebes Herz","Kind des Höchsten","teure Seele","geliebtes Kind"]);
+  if (lang === "ca") return rnd(["ànima estimada","cor estimat","fill/a de l’Altíssim","ànima volguda","fill/a estimat/da"]);
+  if (lang === "fr") return rnd(["âme bien-aimée","cher cœur","enfant du Très-Haut","âme chérie","enfant bien-aimé"]);
+  if (gender === "female") return rnd(ES_f);
+  if (gender === "male") return rnd(ES_m);
+  return rnd(ES_neutral);
 }
 function pickBlessing(lang = "es") {
+  const rnd = (arr) => arr[Math.floor(Math.random() * arr.length)];
   const ES = [
     "que la paz del Señor esté siempre contigo",
     "que el amor de Dios te sostenga",
     "que el Espíritu te fortalezca en lo profundo",
     "que Cristo ilumine tus pasos",
   ];
-  const EN = ["may the peace of the Lord be with you", "may God’s love sustain you", "may the Spirit strengthen you", "may Christ light your steps"];
+  const EN = [
+    "may the peace of the Lord be with you",
+    "may God’s love sustain you",
+    "may the Spirit strengthen you within",
+    "may Christ light your steps",
+  ];
   const PT = ["que a paz do Senhor esteja contigo", "que o amor de Deus te sustente", "que o Espírito te fortaleça", "que Cristo ilumine teus passos"];
   const IT = ["che la pace del Signore sia con te", "che l’amore di Dio ti sorregga", "che lo Spirito ti fortifichi", "che Cristo illumini i tuoi passi"];
   const DE = ["möge der Friede des Herrn mit dir sein", "möge Gottes Liebe dich tragen", "möge der Geist dich stärken", "möge Christus deine Schritte erleuchten"];
   const CA = ["que la pau del Senyor sigui amb tu", "que l’amor de Déu et sostingui", "que l’Esperit t’enforteixi", "que Crist il·lumini els teus passos"];
   const FR = ["que la paix du Seigneur soit avec toi", "que l’amour de Dieu te soutienne", "que l’Esprit te fortifie", "que le Christ éclaire tes pas"];
   switch (lang) {
-    case "en":
-      return pick(EN);
-    case "pt":
-      return pick(PT);
-    case "it":
-      return pick(IT);
-    case "de":
-      return pick(DE);
-    case "ca":
-      return pick(CA);
-    case "fr":
-      return pick(FR);
-    default:
-      return pick(ES);
+    case "en": return rnd(EN);
+    case "pt": return rnd(PT);
+    case "it": return rnd(IT);
+    case "de": return rnd(DE);
+    case "ca": return rnd(CA);
+    case "fr": return rnd(FR);
+    default:   return rnd(ES);
   }
 }
 
-// Limpia cita metida en message
+// Limpia cita metida en "message"
 function removeBibleLike(text = "") {
   let s = String(text || "");
   s = s.replace(/^[\s]*[—-]\s*.*?\([^)]+?\d+\s*:\s*\d+\)[\s]*$/gim, "").trim();
@@ -128,11 +123,7 @@ function removeBibleLike(text = "") {
 
 // ---------- Memoria en FS ----------
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
-async function ensureDataDir() {
-  try {
-    await fs.mkdir(DATA_DIR, { recursive: true });
-  } catch {}
-}
+async function ensureDataDir() { try { await fs.mkdir(DATA_DIR, { recursive: true }); } catch {} }
 function memPath(uid) {
   const safe = String(uid || "anon").replace(/[^a-z0-9_-]/gi, "_");
   return path.join(DATA_DIR, `mem_${safe}.json`);
@@ -143,7 +134,14 @@ async function readUserMemory(userId) {
     const raw = await fs.readFile(memPath(userId), "utf8");
     return JSON.parse(raw);
   } catch {
-    return { last_bible_refs: [], last_questions: [], frame: null };
+    return {
+      last_bible_refs: [],
+      last_questions: [],
+      frame: null,
+      last_offer: null,
+      last_topic: null,
+      checkins: [],
+    };
   }
 }
 async function writeUserMemory(userId, mem) {
@@ -177,7 +175,17 @@ function detectMainSubject(s = "") {
   return "self";
 }
 
-// ---------- Pool de citas por tema ----------
+// ---------- Detección sí/no multilenguaje ----------
+function detectYesNo(lang = "es", text = "") {
+  const s = NORM(text);
+  const YES = ["si","sí","dale","ok","de acuerdo","claro","por favor","hazlo","vale","yes","yep","yeah","sure","please","okey","sim","certo","claro","ok","sì","va bene","ja","gern","klar","oui","d’accord","bien sûr"];
+  const NO  = ["no","no gracias","mejor no","ahora no","no quiero","nope","nah","not now","no thanks","não","agora não","no grazie","nein","lieber nicht","no gràcies","non","pas maintenant"];
+  if (YES.some((w) => s === w || s.startsWith(w + " "))) return "yes";
+  if (NO.some((w) => s === w || s.startsWith(w + " "))) return "no";
+  return null;
+}
+
+// ---------- Pool de citas para fallback ----------
 function versePoolByTopic(lang = "es") {
   const ES = {
     mood: [
@@ -289,167 +297,12 @@ function pickAltVerse(lang = "es", topic = "general", avoid = []) {
   const pool = versePoolByTopic(lang);
   const list = pool[topic] || pool.general || [];
   const avoidSet = new Set(avoid.map((r) => NORM(cleanRef(r))));
-  for (const v of list) {
-    if (!avoidSet.has(NORM(cleanRef(v.ref)))) return v;
-  }
-  if (topic !== "general") {
-    for (const v of pool.general) {
-      if (!avoidSet.has(NORM(cleanRef(v.ref)))) return v;
-    }
-  }
-  return (
-    list[0] ||
-    (pool.general && pool.general[0]) || {
-      ref: lang === "en" ? "Psalm 34:18" : "Salmos 34:18",
-      text: lang === "en" ? "The Lord is close to the brokenhearted." : "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu.",
-    }
-  );
-}
-
-// ---------- Antirepetición de preguntas (listas + patrones) ----------
-const BAN_PATTERNS = {
-  es: [
-    /acciones?\s+concretas?/i,
-    /expresar\s+amor/i,
-    /¿c[oó]mo puedes expresar/i,
-    /¿qu[eé]\s+acto\s+de\s+amor/i,
-    /hoy\??$/i,
-  ],
-  en: [/concrete\s+actions?/i, /express\s+love/i, /today\??$/i],
-  pt: [/ações?\s+concretas?/i, /expressar\s+amor/i, /hoje\??$/i],
-  it: [/azioni?\s+concrete?/i, /esprimere\s+amore/i, /oggi\??$/i],
-  de: [/konkrete\s+aktionen?/i, /liebe\s+ausdr[üu]cken/i, /heute\??$/i],
-  ca: [/accions?\s+concretes?/i, /expressar\s+amor/i, /avui\??$/i],
-  fr: [/actions?\s+concr[eè]tes?/i, /exprimer\s+l[’']amour/i, /aujourd'?hui\??$/i],
-};
-
-const GENERIC_QS = {
-  es: ["¿cómo estás hoy?", "¿en qué quieres profundizar?", "¿qué tienes para contarme?", "¿qué te gustaría compartir?"],
-  en: ["how are you today?", "what would you like to explore?", "what do you have to share?"],
-  pt: ["como você está hoje?", "em que deseja aprofundar?", "o que você tem para me contar?"],
-  it: ["come stai oggi?", "su cosa vuoi approfondire?", "cosa hai da raccontarmi?"],
-  de: ["wie geht es dir heute?", "woran möchtest du vertiefen?", "was möchtest du mir erzählen?"],
-  ca: ["com estàs avui?", "en què vols aprofundir?", "què tens per explicar-me?"],
-  fr: ["comment vas-tu aujourd’hui?", "sur quoi veux-tu approfondir?", "qu’as-tu à me raconter?"],
-};
-
-function isBannedQuestion(q = "", lang = "es", recentNormalizedSet = new Set()) {
-  const qn = NORM(q);
-  if (!qn) return true;
-  if (recentNormalizedSet.has(qn)) return true;
-  const generic = new Set((GENERIC_QS[lang] || GENERIC_QS["es"]).map(NORM));
-  if (generic.has(qn)) return true;
-  const pats = BAN_PATTERNS[lang] || BAN_PATTERNS["es"];
-  if (pats.some((re) => re.test(q))) return true;
-  // Evita “¿qué harías…?”
-  if (/¿\s*qu[eé]\s+har[ií]as?/i.test(q)) return true;
-  return false;
-}
-
-// ---------- Fallbacks de “oferta/ayuda” por tema (multi-idioma) ----------
-function fallbackOfferQuestionByTopic(lang = "es", topic = "general", bannedSet = new Set()) {
-  const pools = {
-    es: {
-      mood: [
-        "¿Quieres que te guíe ahora en una respiración de 3 pasos?",
-        "¿Probamos juntos un ejercicio breve para calmar la ansiedad?",
-        "¿Te paso un plan de 1 paso para hoy y lo revisamos luego?",
-      ],
-      grief: [
-        "¿Te acompaño con una oración breve por tu dolor ahora?",
-        "¿Quieres que pensemos una forma amorosa de honrar su memoria?",
-        "¿Te comparto un ritual sencillo para las noches difíciles?",
-      ],
-      relationship: [
-        "¿Quieres que redactemos un mensaje con límites claros y cariño?",
-        "¿Te paso 3 frases para conversar sin escalar el conflicto?",
-        "¿Prefieres que oremos por sabiduría antes de hablar?",
-      ],
-      work_finance: [
-        "¿Te comparto un mini-plan para una tarea concreta hoy?",
-        "¿Prefieres revisar juntos prioridades para esta semana?",
-        "¿Quieres una oración breve pidiendo provisión y claridad?",
-      ],
-      health: [
-        "¿Te guío en un ejercicio corto de alivio corporal ahora?",
-        "¿Quieres que oremos por fortaleza y descanso esta noche?",
-        "¿Te paso un pequeño registro de síntomas y hábitos?",
-      ],
-      faith: [
-        "¿Oramos 1 minuto pidiendo luz y paz?",
-        "¿Quieres que elijamos un versículo para meditar hoy?",
-        "¿Te comparto un modo sencillo de orar cuando te falten palabras?",
-      ],
-      separation: [
-        "¿Te acompaño con una oración para atravesar este duelo?",
-        "¿Quieres un gesto diario para cuidar tu corazón en esta etapa?",
-        "¿Te paso 2 frases para poner límites sin culpa?",
-      ],
-      addiction: [
-        "¿Te comparto un plan de 24 horas con acciones pequeñas?",
-        "¿Quieres un anclaje de 60 segundos para manejar el impulso?",
-        "¿Oramos pidiendo fuerza para el día de hoy?",
-      ],
-      family_conflict: [
-        "¿Redactamos juntos un mensaje respetuoso y firme?",
-        "¿Te comparto un paso para bajar tensión en casa hoy?",
-        "¿Quieres una oración pidiendo paciencia y mansedumbre?",
-      ],
-      general: [
-        "¿Quieres que oremos 1 minuto ahora mismo?",
-        "¿Te paso un paso sencillo para hoy y lo celebramos luego?",
-        "¿Prefieres un ejercicio breve de gratitud para empezar?",
-      ],
-    },
-    en: {
-      general: [
-        "Would you like a 1-minute prayer right now?",
-        "Shall I send you one small step for today?",
-        "Want a short grounding exercise together?",
-      ],
-    },
-    pt: {
-      general: [
-        "Quer orar 1 minuto agora?",
-        "Posso te enviar um passo simples para hoje?",
-        "Quer um exercício breve de respiração juntos?",
-      ],
-    },
-    it: {
-      general: [
-        "Vuoi pregare un minuto adesso?",
-        "Ti mando un passo semplice per oggi?",
-        "Preferisci un breve esercizio di respiro insieme?",
-      ],
-    },
-    de: {
-      general: [
-        "Möchtest du jetzt eine einminütige Gebetspause?",
-        "Soll ich dir einen kleinen Schritt für heute vorschlagen?",
-        "Magst du eine kurze Atemübung zusammen machen?",
-      ],
-    },
-    ca: {
-      general: [
-        "Vols que resem un minut ara mateix?",
-        "Et proposo un pas senzill per avui?",
-        "Prefereixes un exercici breu de respiració junts?",
-      ],
-    },
-    fr: {
-      general: [
-        "Souhaites-tu prier une minute maintenant?",
-        "Je te propose une petite action pour aujourd’hui?",
-        "On fait ensemble un court exercice de respiration?",
-      ],
-    },
+  for (const v of list) if (!avoidSet.has(NORM(cleanRef(v.ref)))) return v;
+  if (topic !== "general") for (const v of pool.general) if (!avoidSet.has(NORM(cleanRef(v.ref)))) return v;
+  return list[0] || pool.general[0] || {
+    ref: lang === "en" ? "Psalm 34:18" : "Salmos 34:18",
+    text: lang === "en" ? "The Lord is close to the brokenhearted." : "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu.",
   };
-
-  const L = pools[lang] ? lang : "es";
-  const topicPool = pools[L][topic] || pools[L].general;
-  const cand = topicPool.find((q) => !isBannedQuestion(q, L, bannedSet));
-  const chosen = cand || topicPool[0];
-  return /\?\s*$/.test(chosen) ? chosen : chosen + "?";
 }
 
 // ---------- OpenAI helper ----------
@@ -469,7 +322,6 @@ const RESPONSE_FORMAT = {
     },
   },
 };
-
 async function completionJson({ messages, temperature = 0.6, max_tokens = 240, timeoutMs = 12000 }) {
   const call = openai.chat.completions.create({
     model: "gpt-4o",
@@ -486,6 +338,32 @@ app.get("/", (_req, res) => res.json({ ok: true, service: "backend", ts: Date.no
 app.get("/api/welcome", (_req, res) => res.json({ ok: true, hint: "POST /api/welcome { lang, name, userId, gender?, history }" }));
 app.post("/api/memory/sync", (_req, res) => res.json({ ok: true }));
 
+// ---------- Prompt helpers (IA genera preguntas variadas) ----------
+function questionGuidelines(lang = "es", avoidQs = [], mode = "auto") {
+  // mode: "auto" (IA decide personal vs oferta), "personal", "offer"
+  const avoidJoined = avoidQs.map((q) => `"${q}"`).join(", ") || "(none)";
+  const ES = `
+- Genera UNA sola pregunta (termina en "?"), breve (6–16 palabras), cálida.
+- Puede ser PERSONAL (para entender mejor la situación) u OFERTA (proponiendo ayuda concreta).
+- Parafrasea creativamente: evita sinónimos triviales de preguntas recientes y evita estas exactas: ${avoidJoined}.
+- No repitas fórmulas obvias ("¿Cómo estás hoy?", "¿En qué puedo ayudarte?").
+- Ajusta al tema y al tono pastoral (servicial + autoayuda + espiritual).
+${mode !== "auto" ? `- Esta vez prefiere el estilo: ${mode.toUpperCase()}.` : ""}
+`;
+  const EN = `
+- Produce ONE concise question (6–16 words), warm, ending with "?".
+- It can be PERSONAL (to understand) or OFFER (proposing concrete help).
+- Paraphrase creatively; avoid echoing recent questions and these exact ones: ${avoidJoined}.
+- Do not use generic formulas ("How are you today?", "How can I help?").
+- Fit the topic and pastoral tone (service + self-help + spiritual).
+${mode !== "auto" ? `- Prefer this style now: ${mode.toUpperCase()}.` : ""}
+`;
+  const map = { es: ES, en: EN,
+    pt: EN, it: EN, de: EN, ca: EN, fr: EN // reusar EN como guía (modelo es multilingüe)
+  };
+  return map[lang] || ES;
+}
+
 // ---------- WELCOME ----------
 app.post("/api/welcome", async (req, res) => {
   try {
@@ -498,29 +376,26 @@ app.post("/api/welcome", async (req, res) => {
     const mem = await readUserMemory(userId);
     const avoidRefs = Array.isArray(mem.last_bible_refs) ? mem.last_bible_refs.slice(-8) : [];
     const avoidQs = Array.isArray(mem.last_questions) ? mem.last_questions.slice(-10) : [];
-    const recentSet = new Set(avoidQs.map(NORM));
 
-    // Preludio solicitado: saludo + vocativo + bendición + una frase alentadora
+    // Prelude (saludo + toque espiritual + una frase alentadora añadida por IA)
     const prelude = `${hi}${nm ? `, ${nm}` : ""}. ${voc[0].toUpperCase() + voc.slice(1)}, ${blessing}.`;
 
     const SYSTEM_PROMPT = `
 Hablas con serenidad, claridad y compasión.
-
-SALIDA SOLO JSON:
-- "message": empieza EXACTAMENTE con: "${prelude}"
-  Tras ese inicio, agrega **solo 1 frase alentadora para el día**. Sin signos de pregunta. Máximo 75 palabras. **No incluyas citas bíblicas ni referencias** en "message".
-- "bible": cita pertinente (texto + ref), esperanza simple.
-- "question": **UNA** pregunta abierta, breve (6–14 palabras), **tipo oferta/ayuda** (p.ej., orar 1 minuto, ejercicio de respiración, paso único para hoy).
-  Evita fórmulas genéricas y repetidas.
-
+Salida SOLO JSON.
+"message": comienza EXACTAMENTE con: "${prelude}"
+Después añade UNA sola frase breve de aliento para el día (autoayuda simple + toque espiritual). Sin preguntas. Máximo 75 palabras totales. No incluyas citas ni referencias bíblicas en "message".
+"bible": cita pertinente (texto + ref) de esperanza/ánimo.
+"question": crea tú mismo UNA pregunta **nueva** siguiendo estas pautas:
+${questionGuidelines(lang, avoidQs, "auto")}
 Responde SIEMPRE en ${langLabel(lang)}.
+Evita estas referencias exactas: ${avoidRefs.map((r) => `"${r}"`).join(", ") || "(ninguna)"}.
 `;
 
     const shortHistory = compactHistory(history, 6, 200);
     const header =
       `Lang: ${lang}\n` +
       `Nombre: ${nm || "(anónimo)"}\n` +
-      `Prelude: ${prelude}\n` +
       (shortHistory.length ? `Historial: ${shortHistory.join(" | ")}` : "Historial: (sin antecedentes)") +
       "\n";
 
@@ -529,17 +404,13 @@ Responde SIEMPRE en ${langLabel(lang)}.
         { role: "system", content: SYSTEM_PROMPT },
         { role: "user", content: header },
       ],
-      temperature: 0.65,
+      temperature: 0.7,
       max_tokens: 220,
     });
 
     const content = r?.choices?.[0]?.message?.content || "{}";
     let data = {};
-    try {
-      data = JSON.parse(content);
-    } catch {
-      data = {};
-    }
+    try { data = JSON.parse(content); } catch { data = {}; }
 
     let msg = limitWords(stripQuestionsFromMessage(removeBibleLike(String(data?.message || ""))), 75);
     if (!msg.startsWith(prelude)) msg = `${prelude} ${msg}`.trim();
@@ -553,51 +424,37 @@ Responde SIEMPRE en ${langLabel(lang)}.
     const avoidRefSet = new Set(avoidRefs.map((x) => NORM(cleanRef(x))));
     if (!ref || avoidRefSet.has(NORM(cleanRef(ref)))) {
       const alt = pickAltVerse(lang, "general", avoidRefs);
-      ref = alt.ref;
-      text = alt.text;
+      ref = alt.ref; text = alt.text;
     }
 
-    // Antirepetición + patrones
-    if (isBannedQuestion(question, lang, recentSet)) {
-      question = fallbackOfferQuestionByTopic(lang, "general", recentSet);
-    }
-
-    // Persistir memoria
-    const cleanedRef = cleanRef(ref);
-    if (cleanedRef) {
-      const arr = Array.isArray(mem.last_bible_refs) ? mem.last_bible_refs : [];
-      arr.push(cleanedRef);
-      while (arr.length > 8) arr.shift();
-      mem.last_bible_refs = arr;
-    }
+    // Guardar pregunta y posibles estados
     if (question) {
-      const qs = Array.isArray(mem.last_questions) ? mem.last_questions : [];
-      qs.push(question);
-      while (qs.length > 10) qs.shift();
-      mem.last_questions = qs;
+      const arr = Array.isArray(mem.last_questions) ? mem.last_questions : [];
+      arr.push(question); while (arr.length > 10) arr.shift();
+      mem.last_questions = arr;
     }
+    // Bienvenida: no fijamos oferta específica aún
+    mem.last_offer = null;
+
     await writeUserMemory(userId, mem);
 
     res.status(200).json({
-      message: msg || `${prelude} Caminemos con calma: un pequeño bien hoy basta.`,
-      bible: {
-        text: text || (lang === "en" ? "The Lord is close to the brokenhearted." : "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu."),
-        ref: cleanedRef || (lang === "en" ? "Psalm 34:18" : "Salmos 34:18"),
-      },
-      question,
+      message: msg || `${prelude} Comparte en pocas palabras y damos un paso sencillo.`,
+      bible: { text: text || (lang === "en" ? "The Lord is close to the brokenhearted." : "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu."), ref: ref || (lang === "en" ? "Psalm 34:18" : "Salmos 34:18") },
+      question
     });
   } catch (e) {
     console.error("WELCOME ERROR:", e);
     const hi = greetingByHour("es");
     res.status(200).json({
-      message: `${hi}. Alma amada, que la paz del Señor esté siempre contigo. Un pequeño paso amable basta para hoy.`,
+      message: `${hi}. Alma amada, que la paz del Señor esté siempre contigo. Cuéntame en pocas palabras qué te trae hoy.`,
       bible: { text: "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu.", ref: "Salmos 34:18" },
-      question: "¿Quieres que oremos 1 minuto ahora mismo?",
+      question: "¿Qué te gustaría poner en palabras hoy?",
     });
   }
 });
 
-// ---------- ASK ----------
+// ---------- ASK (≤75 palabras, IA genera pregunta variada, sí/no, antirepetición cita) ----------
 app.post("/api/ask", async (req, res) => {
   try {
     const { persona = "jesus", message = "", history = [], userId = "anon", lang = "es" } = req.body || {};
@@ -614,20 +471,71 @@ app.post("/api/ask", async (req, res) => {
 
     const avoidRefs = Array.isArray(mem.last_bible_refs) ? mem.last_bible_refs.slice(-8) : [];
     const avoidQs = Array.isArray(mem.last_questions) ? mem.last_questions.slice(-10) : [];
-    const recentSet = new Set(avoidQs.map(NORM));
+    const shortHistory = compactHistory(history, 10, 240);
 
+    // Sí/No ante posible oferta previa
+    const yn = detectYesNo(lang, message);
+    if (yn && mem.last_offer) {
+      const alt = pickAltVerse(lang, topic, avoidRefs);
+      if (yn === "yes") {
+        const body = realizeOffer(mem.last_offer.type || "step_today", lang, topic);
+        const msg = limitWords(stripQuestionsFromMessage(body), 75);
+
+        // check-in recordable
+        const ck = (topic === "relationship" ? (lang === "en" ? "that gesture of love" : "ese gesto de amor")
+                  : topic === "mood" ? (lang === "en" ? "the 3-breath cycle" : "la respiración de 3 ciclos")
+                  : (lang === "en" ? "today’s small step" : "el paso pequeño de hoy"));
+        const cks = Array.isArray(mem.checkins) ? mem.checkins : [];
+        if (ck) { cks.push(ck); while (cks.length > 5) cks.shift(); mem.checkins = cks; }
+
+        // memoria de cita
+        const cleanedRef = cleanRef(alt.ref);
+        if (cleanedRef) {
+          const arr = avoidRefs.slice();
+          arr.push(cleanedRef); while (arr.length > 8) arr.shift();
+          mem.last_bible_refs = arr;
+        }
+        mem.last_offer = null; // cumplida
+
+        await writeUserMemory(userId, mem);
+        return res.status(200).json({
+          message: msg || (lang === "en" ? "Here is a gentle step for today." : "Aquí tienes un paso sencillo para hoy."),
+          bible: { text: alt.text, ref: alt.ref },
+          question: (lang === "en" ? "What would you like to share next?" : "¿Qué te gustaría compartir después?")
+        });
+      } else {
+        // no → alternativa suave y dejamos que IA elija nueva pregunta
+        const soft = lang === "en" ? "All right. Let’s try something kinder for you." : "Está bien. Probemos algo más amable para ti.";
+        const msg = limitWords(stripQuestionsFromMessage(soft), 75);
+        const cleanedRef = cleanRef(alt.ref);
+        if (cleanedRef) {
+          const arr = avoidRefs.slice();
+          arr.push(cleanedRef); while (arr.length > 8) arr.shift();
+          mem.last_bible_refs = arr;
+        }
+        // no fijamos nueva oferta; IA decidirá estilo de pregunta
+        mem.last_offer = null;
+        await writeUserMemory(userId, mem);
+        return res.status(200).json({
+          message: msg,
+          bible: { text: alt.text, ref: alt.ref },
+          question: lang === "en" ? "Would you like a different kind of support?" : "¿Te gustaría otro tipo de apoyo?"
+        });
+      }
+    }
+
+    // Flujo normal con IA generando pregunta variada
     const SYSTEM_PROMPT = `
 Hablas con serenidad, claridad y compasión.
-
-SALIDA SOLO JSON:
-- "message": máximo 75 palabras, sin signos de pregunta. Primero 2–3 frases de autoayuda práctica (1–2 micro-pasos); luego toque espiritual cristiano. **No incluyas citas ni referencias** en "message".
-- "bible": cita pertinente que apoye el micro-paso.
-- "question": **UNA** pregunta breve **tipo oferta/ayuda personalizada por tema** (p.ej.: orar 1 minuto, ejercicio de respiración de 3 pasos, escribir mensaje con límites, mini-plan de hoy, ritual de gratitud, etc.). Evita “¿qué harías…?” y fórmulas genéricas/repetidas.
-Evita estas referencias exactas: ${avoidRefs.map((r) => `"${r}"`).join(", ") || "(ninguna)"}.
-Responde SIEMPRE en ${langLabel(lang)}.
+Salida SOLO JSON.
+"message": máximo 75 palabras, sin signos de pregunta. Primero autoayuda breve (2–3 frases) con 1–2 micro-pasos; luego un toque espiritual cristiano. **No incluyas citas bíblicas ni referencias en "message"**.
+"bible": cita pertinente que apoye el micro-paso (texto + ref).
+"question": crea tú mismo UNA pregunta **nueva**, breve (6–16 palabras), cálida, que avance el caso.
+Puede ser PERSONAL (para comprender) u OFERTA (p. ej., “¿Quieres que te enseñe X?” / “¿Quieres orar 1 minuto?”).
+Evita repetir o parafrasear pobremente preguntas recientes: ${avoidQs.map((q)=>`"${q}"`).join(", ") || "(ninguna)"}.
+Responde SIEMPRE en ${langLabel(lang)} y alinea con el tema detectado: ${topic}.
 `;
 
-    const shortHistory = compactHistory(history, 10, 240);
     const header =
       `Persona: ${persona}\n` +
       `Lang: ${lang}\n` +
@@ -641,17 +549,13 @@ Responde SIEMPRE en ${langLabel(lang)}.
         { role: "system", content: SYSTEM_PROMPT },
         { role: "user", content: header },
       ],
-      temperature: 0.65,
+      temperature: 0.7,
       max_tokens: 260,
     });
 
     const content = r?.choices?.[0]?.message?.content || "{}";
     let data = {};
-    try {
-      data = JSON.parse(content);
-    } catch {
-      data = {};
-    }
+    try { data = JSON.parse(content); } catch { data = {}; }
 
     let msg = limitWords(stripQuestionsFromMessage(removeBibleLike(String(data?.message || ""))), 75);
     let ref = cleanRef(String(data?.bible?.ref || ""));
@@ -659,41 +563,52 @@ Responde SIEMPRE en ${langLabel(lang)}.
     let question = String(data?.question || "").trim();
     if (question && !/\?\s*$/.test(question)) question += "?";
 
-    // Antirepetición de cita
+    // Antirepetición cita
     const avoidSet = new Set(avoidRefs.map((x) => NORM(cleanRef(x))));
     if (!ref || avoidSet.has(NORM(cleanRef(ref)))) {
       const alt = pickAltVerse(lang, topic, avoidRefs);
-      ref = alt.ref;
-      text = alt.text;
+      ref = alt.ref; text = alt.text;
     }
 
-    // Antirepetición + patrones
-    if (isBannedQuestion(question, lang, recentSet)) {
-      question = fallbackOfferQuestionByTopic(lang, topic, recentSet);
-    }
-
-    // Guardar memoria
+    // Guardar memoria: cita y pregunta
     const cleanedRef = cleanRef(ref);
     if (cleanedRef) {
-      const arr = Array.isArray(mem.last_bible_refs) ? mem.last_bible_refs : [];
-      arr.push(cleanedRef);
-      while (arr.length > 8) arr.shift();
+      const arr = avoidRefs.slice();
+      arr.push(cleanedRef); while (arr.length > 8) arr.shift();
       mem.last_bible_refs = arr;
     }
     if (question) {
-      const qs = Array.isArray(mem.last_questions) ? mem.last_questions : [];
-      qs.push(question);
-      while (qs.length > 10) qs.shift();
-      mem.last_questions = qs;
+      const qArr = Array.isArray(mem.last_questions) ? mem.last_questions : [];
+      qArr.push(question); while (qArr.length > 10) qArr.shift();
+      mem.last_questions = qArr;
     }
+
+    // Si la pregunta es de “oferta” (heurística simple)
+    const qIsOffer = /quieres|quieres que|would you like|want me to|quer|vuoi|möchtest|vols|veux-tu/i.test(question);
+    if (qIsOffer) {
+      // definimos tipo genérico (se usará si luego responde “sí”)
+      mem.last_offer = { type: "step_today", ts: Date.now() };
+    } else {
+      mem.last_offer = null;
+    }
+
+    // check-in base según tema
+    if (!mem.last_topic) mem.last_topic = topic;
+    if (topic && !/general/.test(topic)) {
+      const ck = (topic === "relationship"
+        ? (lang === "en" ? "that pending conversation" : "esa conversación pendiente")
+        : topic === "mood"
+        ? (lang === "en" ? "the 3-breath cycle" : "la respiración de 3 ciclos")
+        : (lang === "en" ? "today’s step" : "el paso de hoy"));
+      const cks = Array.isArray(mem.checkins) ? mem.checkins : [];
+      if (ck) { cks.push(ck); while (cks.length > 5) cks.shift(); mem.checkins = cks; }
+    }
+
     await writeUserMemory(userId, mem);
 
     res.status(200).json({
       message: msg || (lang === "en" ? "I am with you. Let’s take one small and practical step." : "Estoy contigo. Demos un paso pequeño y práctico."),
-      bible: {
-        text: text || (lang === "en" ? "The Lord is close to the brokenhearted." : "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu."),
-        ref: cleanedRef || (lang === "en" ? "Psalm 34:18" : "Salmos 34:18"),
-      },
+      bible: { text: text || (lang === "en" ? "The Lord is close to the brokenhearted." : "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu."), ref: cleanedRef || (lang === "en" ? "Psalm 34:18" : "Salmos 34:18") },
       ...(question ? { question } : {}),
     });
   } catch (err) {
@@ -704,6 +619,54 @@ Responde SIEMPRE en ${langLabel(lang)}.
     });
   }
 });
+
+// ---------- Ofertas (acciones) ----------
+function doPrayer(lang = "es") {
+  const ES = "Señor, mira su corazón y dale consuelo. Ilumina sus pasos hoy y acércalo a tu paz. Amén.";
+  const EN = "Lord, look upon this heart and bring comfort. Light the steps today and draw near with Your peace. Amen.";
+  const PT = "Senhor, olha para este coração e traz consolo. Ilumina os passos de hoje e aproxima com Tua paz. Amém.";
+  const IT = "Signore, guarda questo cuore e dona consolazione. Illumina i passi di oggi e avvicina con la Tua pace. Amen.";
+  const DE = "Herr, sieh auf dieses Herz und schenke Trost. Erleuchte die Schritte heute und sei nahe mit deinem Frieden. Amen.";
+  const CA = "Senyor, mira aquest cor i porta consol. Il·lumina els passos d’avui i acosta’t amb la teva pau. Amén.";
+  const FR = "Seigneur, regarde ce cœur et apporte la consolation. Éclaire les pas d’aujourd’hui et approche avec ta paix. Amen.";
+  const map = { es: ES, en: EN, pt: PT, it: IT, de: DE, ca: CA, fr: FR };
+  return map[lang] || ES;
+}
+function stepsExpressLove(lang = "es") {
+  const ES = "Hoy, saluda a alguien con calidez, ofrece ayuda pequeña y expresa gratitud concreta. Tres gestos, un corazón abierto.";
+  const EN = "Today, greet someone warmly, offer a small help, and express concrete gratitude. Three gestures, one open heart.";
+  const PT = "Hoje, cumprimente alguém com carinho, ofereça uma pequena ajuda e expresse gratidão concreta. Três gestos, um coração aberto.";
+  const IT = "Oggi, saluta qualcuno con calore, offri un piccolo aiuto ed esprimi gratitudine concreta. Tre gesti, un cuore aperto.";
+  const DE = "Grüße heute jemanden herzlich, biete eine kleine Hilfe an und zeige konkrete Dankbarkeit. Drei Gesten, ein offenes Herz.";
+  const CA = "Avui, saluda algú amb calidesa, ofereix una petita ajuda i expressa gratitud concreta. Tres gestos, un cor obert.";
+  const FR = "Aujourd’hui, salue quelqu’un chaleureusement, offre une petite aide et exprime une gratitude concrète. Trois gestes, un cœur ouvert.";
+  const map = { es: ES, en: EN, pt: PT, it: IT, de: DE, ca: CA, fr: FR };
+  return map[lang] || ES;
+}
+function tinyPlan(lang = "es") {
+  const ES = "Plan simple: 5’ de silencio al despertar, 1 gesto amable, 1 gratitud escrita al final del día.";
+  const EN = "Simple plan: 5’ of quiet on waking, 1 kind gesture, 1 written gratitude at day’s end.";
+  const PT = "Plano simples: 5’ de silêncio ao acordar, 1 gesto gentil, 1 gratidão escrita ao final do dia.";
+  const IT = "Piano semplice: 5’ di silenzio al risveglio, 1 gesto gentile, 1 gratitudine scritta a fine giornata.";
+  const DE = "Einfacher Plan: 5 Min Ruhe am Morgen, 1 freundliche Geste, 1 schriftliche Dankbarkeit am Abend.";
+  const CA = "Pla simple: 5’ de silenci en despertar, 1 gest amable, 1 gratitud escrita al final del dia.";
+  const FR = "Plan simple : 5’ de silence au réveil, 1 geste bienveillant, 1 gratitude écrite en fin de journée.";
+  const map = { es: ES, en: EN, pt: PT, it: IT, de: DE, ca: CA, fr: FR };
+  return map[lang] || ES;
+}
+function pickNextOffer(lang = "es", topic = "general") {
+  // heurística simple (podrías afinar por topic)
+  return "step_today";
+}
+function realizeOffer(offerType, lang = "es", topic = "general") {
+  switch (offerType) {
+    case "pray_one_min": return doPrayer(lang);
+    case "express_love": return stepsExpressLove(lang);
+    case "weekly_plan":  return tinyPlan(lang);
+    case "step_today":
+    default:             return stepsExpressLove(lang);
+  }
+}
 
 // ---------- HeyGen ----------
 app.get("/api/heygen/token", async (_req, res) => {
