@@ -1,6 +1,5 @@
 const express = require("express");
 const cors = require("cors");
-const bodyParser = require("body-parser");
 const OpenAI = require("openai");
 const path = require("path");
 const fs = require("fs/promises");
@@ -8,7 +7,8 @@ require("dotenv").config();
 
 const app = express();
 app.use(cors());
-app.use(bodyParser.json());
+app.use(express.json({ limit: "1mb" }));
+app.use(express.urlencoded({ extended: true }));
 
 // ---- OpenAI ----
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -25,12 +25,23 @@ const BIBLE_PREF = {
   ca: "Bíblia Catalana Interconfessional",
   fr: "Louis Segond",
 };
-const safeLang = (lang) => (SUPPORTED.includes(String(lang || "").toLowerCase()) ? String(lang).toLowerCase() : FALLBACK_LANG);
+const safeLang = (lang) =>
+  SUPPORTED.includes(String(lang || "").toLowerCase())
+    ? String(lang).toLowerCase()
+    : FALLBACK_LANG;
 
 // ====== Memoria por usuario (persistente + 7 días) ======
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
-async function ensureDataDir() { try { await fs.mkdir(DATA_DIR, { recursive: true }); } catch {} }
-const memPath = (uid) => path.join(DATA_DIR, `mem_${String(uid || "anon").replace(/[^a-z0-9_-]/gi, "_")}.json`);
+async function ensureDataDir() {
+  try {
+    await fs.mkdir(DATA_DIR, { recursive: true });
+  } catch {}
+}
+const memPath = (uid) =>
+  path.join(
+    DATA_DIR,
+    `mem_${String(uid || "anon").replace(/[^a-z0-9_-]/gi, "_")}.json`
+  );
 const nowTs = () => Date.now();
 const daysAgo = (n) => nowTs() - n * 24 * 60 * 60 * 1000;
 
@@ -41,7 +52,9 @@ async function readUserMemory(userId) {
     const parsed = JSON.parse(raw);
     // Limpieza de logs >7 días
     const cutoff = daysAgo(7);
-    parsed.log = Array.isArray(parsed.log) ? parsed.log.filter(e => (e.ts || 0) >= cutoff) : [];
+    parsed.log = Array.isArray(parsed.log)
+      ? parsed.log.filter((e) => (e.ts || 0) >= cutoff)
+      : [];
     return parsed;
   } catch {
     return {
@@ -51,7 +64,7 @@ async function readUserMemory(userId) {
       frame: null,
       last_welcome_questions: [],
       topics: [], // {ts, topic, summary}
-      log: [],    // {ts, role:"user|assistant", text}
+      log: [], // {ts, role:"user|assistant", text}
     };
   }
 }
@@ -70,16 +83,26 @@ async function appendLog(userId, role, text) {
 }
 
 // ===== Utilidades comunes =====
-function cleanRef(ref = "") { return String(ref).replace(/\s*\([^)]*\)\s*/g, " ").replace(/\s+/g, " ").trim(); }
+function cleanRef(ref = "") {
+  return String(ref).replace(/\s*\([^)]*\)\s*/g, " ").replace(/\s+/g, " ").trim();
+}
 function stripQuestionsFromMessage(s = "") {
-  const noTrailingQLines = (s || "").split(/\n+/).map((l) => l.trim()).filter((l) => !/\?\s*$/.test(l)).join("\n").trim();
+  const noTrailingQLines = (s || "")
+    .split(/\n+/)
+    .map((l) => l.trim())
+    .filter((l) => !/\?\s*$/.test(l))
+    .join("\n")
+    .trim();
   return noTrailingQLines.replace(/[¿?]+/g, "").trim();
 }
-function limitWords(s = "", max = 80) { // ↑ 80 para permitir contenido más útil
+function limitWords(s = "", max = 80) {
+  // ↑ 80 para permitir contenido más útil
   const words = String(s || "").trim().split(/\s+/);
   return words.length <= max ? String(s || "").trim() : words.slice(0, max).join(" ").trim();
 }
-function normalizeQuestion(q = "") { return String(q).toLowerCase().replace(/\s+/g, " ").trim(); }
+function normalizeQuestion(q = "") {
+  return String(q).toLowerCase().replace(/\s+/g, " ").trim();
+}
 function compactHistory(history = [], keep = 8, maxLen = 260) {
   const arr = Array.isArray(history) ? history : [];
   return arr.slice(-keep).map((x) => String(x).slice(0, maxLen));
@@ -176,7 +199,7 @@ function crisisMessage(lang = "es") {
     es: "Siento que estás pasando por un momento muy duro. Tu vida es valiosa. Si estás en peligro inmediato, llama a emergencias de tu país ahora. También puedes hablar con alguien de confianza o buscar ayuda profesional. Si quieres, puedo quedarme contigo aquí mientras das el siguiente paso.",
     en: "I'm really sorry you're going through this. Your life matters. If you're in immediate danger, call your local emergency number now. You can also reach out to someone you trust or a professional. I can stay with you here while you take the next step.",
     pt: "Sinto muito que você esteja passando por isso. Sua vida é valiosa. Se houver perigo imediato, ligue para a emergência do seu país agora. Procure alguém de confiança ou um profissional. Posso ficar aqui com você enquanto dá o próximo passo.",
-    it: "Mi dispiace per ciò che stai vivendo. La tua vita è preziosa. Se sei in pericolo immediato, chiama subito i servizi di emergenza. Parla con qualcuno di fiducia o un professionista. Posso restare qui con te mentre fai il prossimo passo.",
+    it: "Mi dispiace per ciò che stai vivendo. La tua vita è preziosa. Se sei in pericolo immediato, chiama subito i servizi di emergenza. Parla con qualcuno di fiducia o un professionista. Posso restare aqui con te mentre fai il prossimo passo.",
     de: "Es tut mir leid, dass du das durchmachst. Dein Leben ist wertvoll. Bist du in akuter Gefahr, rufe bitte sofort den Notruf an. Sprich mit einer Vertrauensperson oder einer Fachkraft. Ich bleibe gern hier bei dir für den nächsten Schritt.",
     ca: "Em sap greu pel que estàs vivint. La teva vida és valuosa. Si ets en perill immediat, truca als serveis d’emergència ara. Parla amb algú de confiança o amb un professional. Puc quedar-me amb tu mentre fas el següent pas.",
     fr: "Je suis désolé pour ce que vous traversez. Votre vie compte. En cas de danger immédiat, appelez les urgences de votre pays. Parlez à quelqu’un de confiance ou à un professionnel. Je peux rester avec vous pendant la suite."
@@ -185,7 +208,13 @@ function crisisMessage(lang = "es") {
 }
 
 // ===== OpenAI helpers =====
-async function completionWithTimeout({ messages, temperature = 0.6, max_tokens = 300, timeoutMs = 12000, response_format }) {
+async function completionWithTimeout({
+  messages,
+  temperature = 0.6,
+  max_tokens = 300,
+  timeoutMs = 12000,
+  response_format,
+}) {
   const call = openai.chat.completions.create({
     model: "gpt-4o",
     temperature,
@@ -195,7 +224,7 @@ async function completionWithTimeout({ messages, temperature = 0.6, max_tokens =
   });
   return await Promise.race([
     call,
-    new Promise((_, reject) => setTimeout(() => reject(new Error("TIMEOUT")), timeoutMs))
+    new Promise((_, reject) => setTimeout(() => reject(new Error("TIMEOUT")), timeoutMs)),
   ]);
 }
 
@@ -210,14 +239,14 @@ const responseFormatAsk = {
         bible: {
           type: "object",
           properties: { text: { type: "string" }, ref: { type: "string" } },
-          required: ["text", "ref"]
+          required: ["text", "ref"],
         },
-        question: { type: "string" }
+        question: { type: "string" },
       },
       required: ["message", "bible", "question"], // fuerza pregunta siempre
-      additionalProperties: false
-    }
-  }
+      additionalProperties: false,
+    },
+  },
 };
 
 const responseFormatWelcome = {
@@ -228,12 +257,12 @@ const responseFormatWelcome = {
       type: "object",
       properties: {
         message: { type: "string" },
-        question: { type: "string" }
+        question: { type: "string" },
       },
       required: ["message", "question"],
-      additionalProperties: false
-    }
-  }
+      additionalProperties: false,
+    },
+  },
 };
 
 // ====== SYSTEM PROMPTS ======
@@ -250,7 +279,7 @@ OBJETIVO
 - No menciones técnica/IA ni el propio modelo.
 
 CONTENIDO (obligatorio, en cada respuesta)
-- Autoayuda: 1 micro‑paso concreto y realista.
+- Autoayuda: 1 micro-paso concreto y realista.
 - Psicología: un marco breve (p.ej., respiración, regulación emocional, reencuadre cognitivo, conductas de afrontamiento).
 - Espiritualidad: sentido de esperanza/compañía.
 - Cita bíblica (${bible}): coherente con el tema y en "ref" usa el formato Libro 0:0.
@@ -267,8 +296,8 @@ Return ONLY JSON: { "message", "bible": { "text","ref" }, "question" }.
 - message ≤80 words; affirmative; no question marks.
 - question: ONE, open, brief, ends with "?", do not repeat recent ones.
 Content (each reply):
-- Self‑help: one concrete micro‑step.
-- Psychology: brief evidence‑based frame (breathing, grounding, CBT reframe, coping).
+- Self-help: one concrete micro-step.
+- Psychology: brief evidence-based frame (breathing, grounding, CBT reframe, coping).
 - Spirituality: hope/companionship.
 - Bible (${bible}) with proper "Book 0:0" ref.
 - If crisis language, prioritize support and encourage immediate help.
@@ -277,7 +306,7 @@ Focus: keep topic within current issue and last 7 days; optionally check progres
 }
 
 function buildSystemPromptWelcome(lang = "es") {
-  return (lang === "es")
+  return lang === "es"
     ? `
 Eres Jesús: voz serena y cercana. Responde SIEMPRE en español.
 
@@ -303,7 +332,7 @@ Style: warm, brief, concrete. No tech/model talk.
 
 // ====== Hora local / saludo ======
 function greetingByHour(lang = "es", hour = null) {
-  const h = (typeof hour === "number" && hour >= 0 && hour < 24) ? hour : new Date().getHours();
+  const h = typeof hour === "number" && hour >= 0 && hour < 24 ? hour : new Date().getHours();
   const bucket = h < 12 ? "m1" : h < 19 ? "m2" : "m3";
   const map = {
     es: { m1: "Buenos días", m2: "Buenas tardes", m3: "Buenas noches" },
@@ -321,7 +350,7 @@ function greetingByHour(lang = "es", hour = null) {
 // ===== Utilidad: resumen de últimos 7 días =====
 function recentTopicHint(mem) {
   const cutoff = daysAgo(7);
-  const recent = Array.isArray(mem.topics) ? mem.topics.filter(t => (t.ts || 0) >= cutoff) : [];
+  const recent = Array.isArray(mem.topics) ? mem.topics.filter((t) => (t.ts || 0) >= cutoff) : [];
   if (!recent.length) return null;
   // último tópico declarado por el sistema
   const last = recent[recent.length - 1];
@@ -334,90 +363,99 @@ async function welcomeLLM({ lang = "es", name = "", userId = "anon", history = [
   const mem = await readUserMemory(userId);
   const recent = compactHistory(history, 6, 200);
 
-  const bannedWelcome = Array.isArray(mem.last_welcome_questions) ? mem.last_welcome_questions.slice(-6) : [];
+  const bannedWelcome = Array.isArray(mem.last_welcome_questions)
+    ? mem.last_welcome_questions.slice(-6)
+    : [];
   const daypart = greetingByHour(lang, hour);
   const hint = recentTopicHint(mem);
 
-  const userContent = (lang === "es")
-    ? [
-        `lang: ${lang}`,
-        `saludo_frase: ${daypart}`,
-        `nombre: ${String(name || "").trim() || "(n/a)"}`,
-        `banned_welcome_questions: ${bannedWelcome.join(" | ") || "(ninguna)"}`,
-        hint ? `tema_reciente: ${hint.topic} — ${limitWords(hint.summary, 20)}` : "tema_reciente: (ninguno)",
-        recent.length ? `historial_breve: ${recent.join(" | ")}` : "historial_breve: (sin antecedentes)"
-      ].join("\n")
-    : [
-        `lang: ${lang}`,
-        `greeting_phrase: ${daypart}`,
-        `name: ${String(name || "").trim() || "(n/a)"}`,
-        `banned_welcome_questions: ${bannedWelcome.join(" | ") || "(none)"}`,
-        hint ? `recent_topic: ${hint.topic} — ${limitWords(hint.summary, 20)}` : "recent_topic: (none)",
-        recent.length ? `short_history: ${recent.join(" | ")}` : "short_history: (none)"
-      ].join("\n");
+  const userContent =
+    lang === "es"
+      ? [
+          `lang: ${lang}`,
+          `saludo_frase: ${daypart}`,
+          `nombre: ${String(name || "").trim() || "(n/a)"}`,
+          `banned_welcome_questions: ${bannedWelcome.join(" | ") || "(ninguna)"}`,
+          hint ? `tema_reciente: ${hint.topic} — ${limitWords(hint.summary, 20)}` : "tema_reciente: (ninguno)",
+          recent.length ? `historial_breve: ${recent.join(" | ")}` : "historial_breve: (sin antecedentes)",
+        ].join("\n")
+      : [
+          `lang: ${lang}`,
+          `greeting_phrase: ${daypart}`,
+          `name: ${String(name || "").trim() || "(n/a)"}`,
+          `banned_welcome_questions: ${bannedWelcome.join(" | ") || "(none)"}`,
+          hint ? `recent_topic: ${hint.topic} — ${limitWords(hint.summary, 20)}` : "recent_topic: (none)",
+          recent.length ? `short_history: ${recent.join(" | ")}` : "short_history: (none)",
+        ].join("\n");
 
   const resp = await completionWithTimeout({
-    messages: [
-      { role: "system", content: buildSystemPromptWelcome(lang) },
-      { role: "user", content: userContent }
-    ],
+    messages: [{ role: "system", content: buildSystemPromptWelcome(lang) }, { role: "user", content: userContent }],
     temperature: 0.75,
     max_tokens: 180,
     timeoutMs: 12000,
-    response_format: responseFormatWelcome
+    response_format: responseFormatWelcome,
   });
 
   const content = resp?.choices?.[0]?.message?.content || "{}";
   let data = {};
-  try { data = JSON.parse(content); } catch { data = {}; }
+  try {
+    data = JSON.parse(content);
+  } catch {
+    data = {};
+  }
 
   let message = String(data?.message || "").trim();
   let question = String(data?.question || "").trim();
 
   message = stripQuestionsFromMessage(limitWords(message, 60));
-  if (!/\?\s*$/.test(question)) question = question ? (question + "?") : "";
+  if (!/\?\s*$/.test(question)) question = question ? question + "?" : "";
 
   // Evitar pregunta repetida
   const normalizedQ = normalizeQuestion(question);
   const already = (bannedWelcome || []).map(normalizeQuestion);
   if (!question || already.includes(normalizedQ)) {
     const moreBanned = Array.from(new Set([...(already || []), normalizedQ].filter(Boolean))).slice(-10);
-    const regenUserContent = userContent.replace(/banned_welcome_questions:.*$/m, `banned_welcome_questions: ${moreBanned.join(" | ") || "(none)"}`);
+    const regenUserContent = userContent.replace(
+      /banned_welcome_questions:.*$/m,
+      `banned_welcome_questions: ${moreBanned.join(" | ") || "(none)"}`
+    );
     const r2 = await completionWithTimeout({
-      messages: [
-        { role: "system", content: buildSystemPromptWelcome(lang) },
-        { role: "user", content: regenUserContent }
-      ],
+      messages: [{ role: "system", content: buildSystemPromptWelcome(lang) }, { role: "user", content: regenUserContent }],
       temperature: 0.8,
       max_tokens: 180,
       timeoutMs: 12000,
-      response_format: responseFormatWelcome
+      response_format: responseFormatWelcome,
     });
     const c2 = r2?.choices?.[0]?.message?.content || "{}";
     let d2 = {};
-    try { d2 = JSON.parse(c2); } catch { d2 = {}; }
+    try {
+      d2 = JSON.parse(c2);
+    } catch {
+      d2 = {};
+    }
     message = stripQuestionsFromMessage(limitWords(String(d2?.message || message || ""), 60));
     const q2 = String(d2?.question || "").trim();
-    question = /\?\s*$/.test(q2) ? q2 : (q2 ? q2 + "?" : question);
+    question = /\?\s*$/.test(q2) ? q2 : q2 ? q2 + "?" : question;
   }
 
   // Actualizar memoria: welcome questions
   const mem2 = await readUserMemory(userId);
   if (question) {
-    mem2.last_welcome_questions = Array.from(new Set([...(mem2.last_welcome_questions || []), normalizeQuestion(question)])).slice(-12);
+    mem2.last_welcome_questions = Array.from(
+      new Set([...(mem2.last_welcome_questions || []), normalizeQuestion(question)])
+    ).slice(-12);
     await writeUserMemory(userId, mem2);
   }
 
   if (!message) {
-    const base = (lang === "es")
-      ? `${daypart}${name ? `, ${name}` : ""}. Bienvenido/a. Estoy aquí para escucharte con calma.`
-      : `${daypart}${name ? `, ${name}` : ""}. Welcome. I am here to listen with calm.`;
+    const base =
+      lang === "es"
+        ? `${daypart}${name ? `, ${name}` : ""}. Bienvenido/a. Estoy aquí para escucharte con calma.`
+        : `${daypart}${name ? `, ${name}` : ""}. Welcome. I am here to listen with calm.`;
     message = limitWords(stripQuestionsFromMessage(base), 60);
   }
   if (!question) {
-    question = (lang === "es")
-      ? "¿Qué te gustaría compartir ahora mismo?"
-      : "What would you like to share right now?";
+    question = lang === "es" ? "¿Qué te gustaría compartir ahora mismo?" : "What would you like to share right now?";
   }
 
   return { message, question };
@@ -453,19 +491,23 @@ async function regenerateBibleAvoiding({ lang, persona, message, frame, bannedRe
             bible: {
               type: "object",
               properties: { text: { type: "string" }, ref: { type: "string" } },
-              required: ["text", "ref"]
-            }
+              required: ["text", "ref"],
+            },
           },
           required: ["bible"],
-          additionalProperties: false
-        }
-      }
-    }
+          additionalProperties: false,
+        },
+      },
+    },
   });
 
   const content = r?.choices?.[0]?.message?.content || "{}";
   let data = {};
-  try { data = JSON.parse(content); } catch { data = {}; }
+  try {
+    data = JSON.parse(content);
+  } catch {
+    data = {};
+  }
   const text = (data?.bible?.text || "").toString().trim();
   const ref = cleanRef((data?.bible?.ref || "").toString());
   return text && ref ? { text, ref } : null;
@@ -478,8 +520,18 @@ async function askLLM({ lang = "es", persona, message, history = [], userId = "a
   if (isCrisis(message)) {
     return {
       message: crisisMessage(lang),
-      bible: { text: "Jehová es mi luz y mi salvación; ¿de quién temeré?", ref: lang === "es" ? "Salmos 27:1" : (lang === "pt" ? "Salmos 27:1" : (lang === "fr" ? "Psaume 27:1" : "Psalm 27:1")) },
-      question: (lang === "es") ? "¿Puedes decirme dónde estás y si hay alguien contigo ahora?" : (lang === "pt" ? "Você pode me dizer onde está e se há alguém com você agora?" : (lang === "fr" ? "Pouvez-vous me dire où vous êtes et s’il y a quelqu’un avec vous maintenant?" : "Can you tell me where you are and if someone is with you now?"))
+      bible: {
+        text: "Jehová es mi luz y mi salvación; ¿de quién temeré?",
+        ref: lang === "es" ? "Salmos 27:1" : lang === "pt" ? "Salmos 27:1" : lang === "fr" ? "Psaume 27:1" : "Psalm 27:1",
+      },
+      question:
+        lang === "es"
+          ? "¿Puedes decirme dónde estás y si hay alguien contigo ahora?"
+          : lang === "pt"
+          ? "Você pode me dizer onde está e se há alguém com você agora?"
+          : lang === "fr"
+          ? "Pouvez-vous me dire où vous êtes et s’il y a quelqu’un avec vous maintenant?"
+          : "Can you tell me where you are and if someone is with you now?",
     };
   }
 
@@ -490,15 +542,20 @@ async function askLLM({ lang = "es", persona, message, history = [], userId = "a
   const mainSubject = detectMainSubject(message);
   const frame = {
     topic_primary: topic,
-    main_subject: mem.frame?.topic_primary === topic ? (mem.frame?.main_subject || mainSubject) : mainSubject,
-    support_persons: support ? [{ label: support.label }] : (mem.frame?.topic_primary === topic ? (mem.frame?.support_persons || []) : []),
+    main_subject: mem.frame?.topic_primary === topic ? mem.frame?.main_subject || mainSubject : mainSubject,
+    support_persons: support
+      ? [{ label: support.label }]
+      : mem.frame?.topic_primary === topic
+      ? mem.frame?.support_persons || []
+      : [],
   };
   mem.frame = frame;
 
   const lastRefFromHistory = extractRecentBibleRefs(history, 1)[0] || "";
   const lastRef = mem.last_bible_ref || lastRefFromHistory || "";
   const recentRefs = extractRecentBibleRefs(history, 3);
-  const bannedRefs = Array.from(new Set([...(mem.last_bible_refs || []), lastRef, ...recentRefs].filter(Boolean))).slice(-5);
+  const bannedRefs = Array.from(new Set([...(mem.last_bible_refs || []), lastRef, ...recentRefs].filter(Boolean))).
+    slice(-5);
   const recentQs = extractRecentAssistantQuestions(history, 5);
   const shortHistory = compactHistory(history, 10, 240);
 
@@ -506,28 +563,37 @@ async function askLLM({ lang = "es", persona, message, history = [], userId = "a
   const hint = recentTopicHint(mem);
 
   const header =
-    (lang === "es"
-      ? `Persona: ${persona}\nMensaje_actual: ${message}\nFRAME: ${JSON.stringify(frame)}\nlast_bible_ref: ${lastRef || "(n/a)"}\nbanned_refs:\n- ${bannedRefs.join("\n- ") || "(none)"}\n` +
-        (recentQs.length ? `ultimas_preguntas: ${recentQs.join(" | ")}` : "ultimas_preguntas: (ninguna)") + "\n" +
-        (shortHistory.length ? `Historial: ${shortHistory.join(" | ")}` : "Historial: (sin antecedentes)") + "\n" +
-        (hint ? `tema_reciente: ${hint.topic} — ${limitWords(hint.summary, 25)}` : "tema_reciente: (ninguno)") + "\n"
-      : `Persona: ${persona}\nCurrent_message: ${message}\nFRAME: ${JSON.stringify(frame)}\nlast_bible_ref: ${lastRef || "(n/a)"}\nbanned_refs:\n- ${bannedRefs.join("\n- ") || "(none)"}\n` +
-        (recentQs.length ? `recent_questions: ${recentQs.join(" | ")}` : "recent_questions: (none)") + "\n" +
-        (shortHistory.length ? `History: ${shortHistory.join(" | ")}` : "History: (none)") + "\n" +
-        (hint ? `recent_topic: ${hint.topic} — ${limitWords(hint.summary, 25)}` : "recent_topic: (none)") + "\n"
-    );
+    lang === "es"
+      ? `Persona: ${persona}\nMensaje_actual: ${message}\nFRAME: ${JSON.stringify(frame)}\nlast_bible_ref: ${
+          lastRef || "(n/a)"
+        }\nbanned_refs:\n- ${bannedRefs.join("\n- ") || "(none)"}\n${
+          recentQs.length ? `ultimas_preguntas: ${recentQs.join(" | ")}` : "ultimas_preguntas: (ninguna)"
+        }\n${shortHistory.length ? `Historial: ${shortHistory.join(" | ")}` : "Historial: (sin antecedentes)"}\n${
+          hint ? `tema_reciente: ${hint.topic} — ${limitWords(hint.summary, 25)}` : "tema_reciente: (ninguno)"
+        }\n`
+      : `Persona: ${persona}\nCurrent_message: ${message}\nFRAME: ${JSON.stringify(frame)}\nlast_bible_ref: ${
+          lastRef || "(n/a)"
+        }\nbanned_refs:\n- ${bannedRefs.join("\n- ") || "(none)"}\n${
+          recentQs.length ? `recent_questions: ${recentQs.join(" | ")}` : "recent_questions: (none)"
+        }\n${shortHistory.length ? `History: ${shortHistory.join(" | ")}` : "History: (none)"}\n${
+          hint ? `recent_topic: ${hint.topic} — ${limitWords(hint.summary, 25)}` : "recent_topic: (none)"
+        }\n`;
 
   const resp = await completionWithTimeout({
     messages: [{ role: "system", content: buildSystemPromptAsk(lang) }, { role: "user", content: header }],
     temperature: 0.6,
     max_tokens: 320,
     timeoutMs: 12000,
-    response_format: responseFormatAsk
+    response_format: responseFormatAsk,
   });
 
   const content = resp?.choices?.[0]?.message?.content || "{}";
   let data = {};
-  try { data = JSON.parse(content); } catch { data = { message: content }; }
+  try {
+    data = JSON.parse(content);
+  } catch {
+    data = { message: content };
+  }
 
   // Sanitización
   let msg = stripQuestionsFromMessage(limitWords(String(data?.message || ""), 80));
@@ -538,7 +604,10 @@ async function askLLM({ lang = "es", persona, message, history = [], userId = "a
   const hijoOnly = /\bhijo\b/i.test(message) && !/(Jes[uú]s|Cristo)/i.test(message);
   if (!ref || bannedRefs.includes(ref) || (hijoOnly && /Juan\s*8:36/i.test(ref))) {
     const alt = await regenerateBibleAvoiding({ lang, persona, message, frame, bannedRefs, lastRef });
-    if (alt) { ref = alt.ref; text = alt.text; }
+    if (alt) {
+      ref = alt.ref;
+      text = alt.text;
+    }
   }
 
   // Pregunta: siempre requerida; corregir si vino mal
@@ -547,13 +616,20 @@ async function askLLM({ lang = "es", persona, message, history = [], userId = "a
   const isRepeat = !question ? false : recentQs.includes(normalizedQ);
   if (!/\?\s*$/.test(question) || isRepeat) {
     // Fallback corto por idioma
-    question = (lang === "es") ? "¿Qué detalle te gustaría explorar un poco más?" :
-               (lang === "pt") ? "O que você gostaria de explorar um pouco mais?" :
-               (lang === "it") ? "Quale dettaglio vorresti approfondire un po' di più?" :
-               (lang === "de") ? "Welchen Aspekt möchtest du noch etwas vertiefen?" :
-               (lang === "ca") ? "Quin detall t’agradaria explorar una mica més?" :
-               (lang === "fr") ? "Quel détail souhaitez-vous explorer un peu plus ?" :
-               "What detail would you like to explore a bit more?";
+    question =
+      lang === "es"
+        ? "¿Qué detalle te gustaría explorar un poco más?"
+        : lang === "pt"
+        ? "O que você gostaria de explorar um pouco mais?"
+        : lang === "it"
+        ? "Quale dettaglio vorresti approfondire un po' di più?"
+        : lang === "de"
+        ? "Welchen Aspekt möchtest du noch etwas vertiefen?"
+        : lang === "ca"
+        ? "Quin detall t’agradaria explorar una mica més?"
+        : lang === "fr"
+        ? "Quel détail souhaitez-vous explorer un peu plus ?"
+        : "What detail would you like to explore a bit more?";
   }
 
   // Actualizar memoria
@@ -572,9 +648,14 @@ async function askLLM({ lang = "es", persona, message, history = [], userId = "a
   await writeUserMemory(userId, mem);
 
   return {
-    message: msg || ((lang === "es") ? "Estoy contigo. Demos un paso pequeño y realista hoy." : "I am with you. Let’s take a small, realistic step today."),
-    bible: { text: text || "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu.", ref: ref || (lang === "es" ? "Salmos 34:18" : "Psalm 34:18") },
-    question
+    message: msg || (lang === "es" ? "Estoy contigo. Demos un paso pequeño y realista hoy." : "I am with you. Let’s take a small, realistic step today."),
+    bible: {
+      text:
+        text ||
+        "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu.",
+      ref: ref || (lang === "es" ? "Salmos 34:18" : "Psalm 34:18"),
+    },
+    question,
   };
 }
 
@@ -594,10 +675,11 @@ app.post("/api/welcome", async (req, res) => {
     const L = safeLang(req.body?.lang || "es");
     const greet = greetingByHour(L);
     const name = (req.body?.name || "").trim();
-    const message = (L === "es")
-      ? `${greet}${name ? `, ${name}` : ""}. Estoy aquí para escucharte.`
-      : `${greet}${name ? `, ${name}` : ""}. I am here to listen.`;
-    const question = (L === "es") ? "¿Qué te gustaría compartir ahora mismo?" : "What would you like to share right now?";
+    const message =
+      L === "es"
+        ? `${greet}${name ? `, ${name}` : ""}. Estoy aquí para escucharte.`
+        : `${greet}${name ? `, ${name}` : ""}. I am here to listen.`;
+    const question = L === "es" ? "¿Qué te gustaría compartir ahora mismo?" : "What would you like to share right now?";
     res.status(200).json({ message, question });
   }
 });
@@ -615,10 +697,11 @@ app.get("/api/welcome", async (req, res) => {
     const L = safeLang(req.query?.lang || "es");
     const greet = greetingByHour(L);
     const name = (req.query?.name || "").trim();
-    const message = (L === "es")
-      ? `${greet}${name ? `, ${name}` : ""}. Estoy aquí para escucharte.`
-      : `${greet}${name ? `, ${name}` : ""}. I am here to listen.`;
-    const question = (L === "es") ? "¿Qué te gustaría compartir ahora mismo?" : "What would you like to share right now?";
+    const message =
+      L === "es"
+        ? `${greet}${name ? `, ${name}` : ""}. Estoy aquí para escucharte.`
+        : `${greet}${name ? `, ${name}` : ""}. I am here to listen.`;
+    const question = L === "es" ? "¿Qué te gustaría compartir ahora mismo?" : "What would you like to share right now?";
     res.status(200).json({ message, question });
   }
 });
@@ -636,9 +719,9 @@ app.post("/api/ask", async (req, res) => {
       message: (data?.message || "").toString().trim(),
       bible: {
         text: (data?.bible?.text || "").toString().trim(),
-        ref: (data?.bible?.ref || "").toString().trim()
+        ref: (data?.bible?.ref || "").toString().trim(),
       },
-      question: (data?.question || "").toString().trim()
+      question: (data?.question || "").toString().trim(),
     };
 
     res.setHeader("Content-Type", "application/json; charset=utf-8");
@@ -650,8 +733,11 @@ app.post("/api/ask", async (req, res) => {
     console.error("ASK ERROR:", err);
     res.status(200).json({
       message: "La paz sea contigo. Compárteme en pocas palabras lo esencial, y seguimos paso a paso.",
-      bible: { text: "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu.", ref: "Salmos 34:18" },
-      question: "¿Cuál sería un primer paso pequeño que te verías capaz de intentar hoy?"
+      bible: {
+        text: "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu.",
+        ref: "Salmos 34:18",
+      },
+      question: "¿Cuál sería un primer paso pequeño que te verías capaz de intentar hoy?",
     });
   }
 });
