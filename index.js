@@ -1,11 +1,14 @@
-// index.js — Bienvenida y diálogo 100% generados por OpenAI (multi-idioma, antirep)
-// - /api/welcome: saludo por hora + nombre + frase alentadora + 1 pregunta de servicio (oferta A/B) — TODO por OpenAI
-// - /api/ask: Autoayuda (acciones) + Psicología (marco breve) + Espiritualidad + Cita bíblica + pregunta final (oferta A/B)
-// - Anti-repetición: evita preguntas/versos/técnicas recientes; no “escritura” consecutiva
-// - Memoria en /data (configurable con DATA_DIR)
+// index.js — Conversación servicial y profunda (multi-idioma, antirep, 100% OpenAI)
+// - /api/welcome: saludo por hora + nombre + frase alentadora + 1 pregunta ABIERTA (sin A/B, sin técnicas)
+// - /api/ask: tres modos conversacionales
+//     * explore: validar + cita + 1 pregunta focal (sin técnicas)
+//     * permiso: 1–2 acciones generales + línea espiritual + 1 pregunta de permiso (“¿Querés que te diga qué decir y cómo?”) *variada*
+//     * ejecutar: guía paso a paso (guion/técnica) + 1 pregunta de ajuste/check-in
+// - Anti-repetición: preguntas, estilos de pregunta (q_style), citas bíblicas y técnicas (evitar “escritura” consecutiva)
+// - Memoria en /data (DATA_DIR configurable)
 // - HeyGen y CORS abiertos
 //
-// Env: OPENAI_API_KEY, DATA_DIR (opcional), HEYGEN_* (opc)
+// Env: OPENAI_API_KEY, DATA_DIR (opcional), HEYGEN_* (opcional)
 
 const express = require("express");
 const cors = require("cors");
@@ -71,16 +74,17 @@ async function readUserMemory(userId){
   try{
     const raw = await fs.readFile(memPath(userId),"utf8");
     const mem = JSON.parse(raw);
-    // normaliza campos nuevos
-    mem.last_techniques = Array.isArray(mem.last_techniques) ? mem.last_techniques : [];
     mem.last_bible_refs = Array.isArray(mem.last_bible_refs) ? mem.last_bible_refs : [];
     mem.last_questions  = Array.isArray(mem.last_questions)  ? mem.last_questions  : [];
+    mem.last_techniques = Array.isArray(mem.last_techniques) ? mem.last_techniques : [];
+    mem.last_q_styles   = Array.isArray(mem.last_q_styles)   ? mem.last_q_styles   : [];
     return mem;
   }catch{
     return {
       last_bible_refs:[],
       last_questions:[],
-      last_techniques:[], // etiquetas declaradas por el modelo
+      last_techniques:[],
+      last_q_styles:[],
       frame:null,
       last_offer_kind:null,
       last_user_reply:null,
@@ -94,7 +98,7 @@ async function writeUserMemory(userId,mem){
   await fs.writeFile(memPath(userId), JSON.stringify(mem,null,2), "utf8");
 }
 
-// ---------- Heurísticas de tema ----------
+// ---------- Heurísticas ----------
 function guessTopic(s=""){
   const t=(s||"").toLowerCase();
   if (/(droga|adicci|alcohol|apuestas)/.test(t)) return "addiction";
@@ -119,8 +123,6 @@ function detectMainSubject(s=""){
   if (/(mi\s+amig[oa])/.test(t)) return "friend";
   return "self";
 }
-
-// ---------- Detección de sí / no / cierre (multi-idioma) ----------
 function detectAffirmation(s=""){
   const x=NORM(s);
   const pats=[
@@ -158,25 +160,21 @@ function detectByeThanks(s=""){
   ];
   return pats.some(r=>r.test(x));
 }
+// ¿Mensaje vago?
+function detectVague(s=""){
+  const x=NORM(s);
+  if (!x) return true;
+  if (x.length < 12) return true;
+  if (/\btengo un problema\b|\bproblema\b|\bnecesito ayuda\b|\bno sé por dónde empezar\b|\bno se por donde empezar\b|\bhola\b|\bestoy mal\b/i.test(x)) return true;
+  return false;
+}
+// ¿Usuario pide guía/ejecución o acepta?
+function detectRequestExecute(s=""){
+  const x=NORM(s);
+  return /\bdime qu[eé] hacer\b|\bdecime qu[eé] hacer\b|\bquiero pasos\b|\bquiero que me digas\b|\bayudame a\b|\bayúdame a\b|\bquiero que me gu[ií]es\b|\bprobar[eé] la respiraci[oó]n\b|\bquiero hablar con\b|\bc[oó]mo hablar con\b|\barmar un guion\b|\bgu[ií]ame\b/i.test(x);
+}
 
-// ---------- OpenAI helpers ----------
-const FORMAT_ASK = {
-  type:"json_schema",
-  json_schema:{
-    name:"SpiritualGuidance",
-    schema:{
-      type:"object",
-      properties:{
-        message:{type:"string"},
-        bible:{type:"object",properties:{text:{type:"string"},ref:{type:"string"}},required:["text","ref"]},
-        question:{type:"string"},
-        techniques:{type:"array", items:{type:"string"}} // etiquetas declaradas por el modelo
-      },
-      required:["message","bible","question"],
-      additionalProperties:false
-    }
-  }
-};
+// ---------- OpenAI formats ----------
 const FORMAT_WELCOME = {
   type:"json_schema",
   json_schema:{
@@ -188,6 +186,24 @@ const FORMAT_WELCOME = {
         question:{type:"string"}
       },
       required:["message","question"],
+      additionalProperties:false
+    }
+  }
+};
+const FORMAT_ASK = {
+  type:"json_schema",
+  json_schema:{
+    name:"SpiritualGuidance",
+    schema:{
+      type:"object",
+      properties:{
+        message:{type:"string"},
+        bible:{type:"object",properties:{text:{type:"string"},ref:{type:"string"}},required:["text","ref"]},
+        question:{type:"string"},
+        techniques:{type:"array", items:{type:"string"}},
+        q_style:{type:"string"} // etiqueta del estilo de pregunta generado
+      },
+      required:["message","bible","question","q_style"],
       additionalProperties:false
     }
   }
@@ -204,7 +220,6 @@ const FORMAT_BIBLE_ONLY = {
     }
   }
 };
-
 async function completionJson({messages, temperature=0.6, max_tokens=260, timeoutMs=12000, response_format}){
   const call = openai.chat.completions.create({
     model:"gpt-4o",
@@ -221,28 +236,24 @@ app.get("/", (_req,res)=> res.json({ok:true, service:"backend", ts:Date.now()}))
 app.get("/api/welcome", (_req,res)=> res.json({ok:true, hint:"POST /api/welcome { lang, name, userId, history }"}));
 app.post("/api/memory/sync", (_req,res)=> res.json({ok:true}));
 
-// ---------- WELCOME (100% OpenAI) ----------
+// ---------- /api/welcome (apertura real, sin A/B ni técnicas) ----------
 app.post("/api/welcome", async (req,res)=>{
   try{
     const { lang="es", name="", userId="anon", history=[] } = req.body||{};
     const nm = String(name||"").trim();
     const hi = greetingByHour(lang);
     const mem = await readUserMemory(userId);
-
     const avoidQs = Array.isArray(mem.last_questions)? mem.last_questions.slice(-10):[];
     const shortHistory = compactHistory(history,6,200);
 
     const SYSTEM_PROMPT = `
-Eres cercano, sereno y compasivo. Debes generar **variedad**; evita fórmulas fijas.
+Eres cercano, sereno y compasivo. Varía el lenguaje, evita muletillas.
 
 SALIDA SOLO JSON (en ${langLabel(lang)}):
-- "message": ≤75 palabras. Incluye saludo por franja horaria y **nombre si existe** (p.ej. "${hi}${nm?`, ${nm}`:""}"). Da **1 frase alentadora** y **una línea breve de disponibilidad servicial**. **Sin signos de pregunta** y **sin citas bíblicas** dentro del mensaje.
-- "question": **UNA sola** pregunta **de servicio** con **dos opciones** (p.ej., “escucharte más” **o** “compartir pasos concretos ahora”). Debe **terminar en "?"**. Evita preguntas sobre planes del día o triviales. Varía el lenguaje.
-
-NO repitas literalmente preguntas recientes: ${avoidQs.map(q=>`"${q}"`).join(", ")||"(ninguna)"}.
-Debes sonar natural y humano, **sin** mencionar IA/modelos.
+- "message": ≤75 palabras. Incluye saludo por franja y **nombre si existe** (p.ej. "${hi}${nm?`, ${nm}`:""}"). Da **una** frase alentadora para el día y expresa **disponibilidad**. **Sin preguntas** y **sin citas bíblicas** dentro del "message".
+- "question": **UNA** pregunta **abierta** para iniciar conversación (no A/B, no técnicas, no trivialidades). Debe **terminar en "?"**. Varía la formulación y evita repetir recientes: ${avoidQs.map(q=>`"${q}"`).join(", ")||"(ninguna)"}.
+No menciones IA/modelos.
 `;
-
     const header =
       `Lang: ${lang}\n`+
       `Nombre: ${nm||"(anónimo)"}\n`+
@@ -263,13 +274,10 @@ Debes sonar natural y humano, **sin** mencionar IA/modelos.
     let question = String(data?.question||"").trim();
     if (question && !/\?\s*$/.test(question)) question += "?";
 
-    // Validaciones mínimas: que sea oferta A/B
-    const looksBinaryNoOptions = /(qué te aliviaría|qué pequeño paso|qué vas a|qué harás|qué plan)/i.test(question||"");
-    const hasOptionConnector = /\b(o|ou|or|oder|ou bien|o bien)\b/i.test(question||"");
-    const banned = new Set(avoidQs.map(NORM));
-    if (!question || banned.has(NORM(question)) || looksBinaryNoOptions || !hasOptionConnector){
-      // Regenerar forzando oferta A/B
-      const SYS2 = SYSTEM_PROMPT + `\nReformula la "question" como **oferta con dos opciones** explícitas y nuevas (A/B), sin repetir ninguna reciente.`;
+    // Si la pregunta parece menú A/B, regenerar
+    const looksAB = /\b(o|ou|or|oder|o bien|ou bien)\b/i.test(question||"");
+    if (!question || looksAB){
+      const SYS2 = SYSTEM_PROMPT + `\nReformula la "question" como **pregunta abierta natural**, sin “o …”, sin ofrecer técnicas.`;
       const r2 = await completionJson({
         messages: [{ role:"system", content: SYS2 }, { role:"user", content: header }],
         temperature: 0.85,
@@ -283,7 +291,7 @@ Debes sonar natural y humano, **sin** mencionar IA/modelos.
       if (question && !/\?\s*$/.test(question)) question += "?";
     }
 
-    // Persistencia de última pregunta
+    // Persistir pregunta
     if (question){
       mem.last_questions = Array.isArray(mem.last_questions)? mem.last_questions : [];
       mem.last_questions.push(question);
@@ -292,22 +300,22 @@ Debes sonar natural y humano, **sin** mencionar IA/modelos.
     }
 
     res.status(200).json({
-      message: msg || `${hi}${nm?`, ${nm}`:""}. Estoy aquí para acompañarte con calma.`,
-      bible: { text:"", ref:"" }, // bienvenida no incluye cita en message; omitimos contenido
-      question: question || (lang==="en"?"Would you like me to listen more or share a practical next step?":"¿Preferís que te escuche un poco más o que te comparta un paso práctico?")
+      message: msg || `${hi}${nm?`, ${nm}`:""}. Estoy aquí para escucharte con calma.`,
+      bible: { text:"", ref:"" },
+      question: question || (lang==="en"?"What would you like to share today?":"¿Qué te gustaría contarme hoy?")
     });
   }catch(e){
     console.error("WELCOME ERROR:", e);
     const hi = greetingByHour("es");
     res.status(200).json({
-      message: `${hi}. Estoy aquí para acompañarte con calma.`,
+      message: `${hi}. Estoy aquí para escucharte con calma.`,
       bible:{ text:"", ref:"" },
-      question: "¿Preferís que te escuche un poco más o que te comparta un paso práctico?"
+      question: "¿Qué te gustaría contarme hoy?"
     });
   }
 });
 
-// ---------- ASK (servicial, con soluciones concretas y oferta A/B) ----------
+// ---------- /api/ask (explorar → permiso → ejecutar) ----------
 async function regenerateBibleAvoiding({ lang, persona, message, frame, bannedRefs = [], lastRef = "" }) {
   const SYS = `
 Devuelve SOLO JSON {"bible":{"text":"…","ref":"Libro 0:0"}} en ${langLabel(lang)}.
@@ -339,6 +347,7 @@ app.post("/api/ask", async (req,res)=>{
     const saidYes = detectAffirmation(userTxt);
     const saidNo  = detectNegation(userTxt);
 
+    // FRAME básico
     const topic = guessTopic(userTxt);
     const mainSubject = detectMainSubject(userTxt);
     const frame = {
@@ -349,46 +358,48 @@ app.post("/api/ask", async (req,res)=>{
     mem.frame = frame;
     mem.last_topic = topic;
 
+    // Memorias recientes
     const avoidRefs = Array.isArray(mem.last_bible_refs)? mem.last_bible_refs.slice(-8):[];
     const avoidQs   = Array.isArray(mem.last_questions)? mem.last_questions.slice(-10):[];
     const avoidTech = Array.isArray(mem.last_techniques)? mem.last_techniques.slice(-6):[];
+    const avoidQStyles = Array.isArray(mem.last_q_styles)? mem.last_q_styles.slice(-6):[];
     const shortHistory = compactHistory(history,10,240);
 
-    const QUESTION_POLICY =
-      isBye
-        ? `El usuario se despide/agradece: **no incluyas "question"**.`
-        : `Cierra con **UNA pregunta** en ${langLabel(lang)} como **oferta con dos opciones** (A/B), p. ej. seguir escuchando **o** compartir pasos concretos ahora. Varía idioma y no repitas recientes: ${avoidQs.map(q=>`"${q}"`).join(", ")||"(ninguna)"}; termina en "?". Evita “¿qué te aliviaría…?” u otras donde el usuario deba inventar la solución.`;
+    // Selección de modo
+    let MODE = "explore";
+    if (isBye) MODE = "bye";
+    else if (detectRequestExecute(userTxt) || saidYes) MODE = "execute";
+    else if (!detectVague(userTxt) && topic!=="general") MODE = "permiso";
+    // Si negó, mantenemos explore con validación
+    if (saidNo && MODE!=="bye") MODE = "explore";
 
-    const WRITING_RULE = `
-La **autoayuda** debe ser el eje (acciones concretas + mini-práctica 1–3 minutos).
-**No sugieras "escribir/diario"** si ya se sugirió recientemente: ${avoidTech.map(t=>`"${t}"`).join(", ")||"(ninguna)"}.
-Usa rotación de técnicas: respiración (4-7-8, caja, exhalación lenta), grounding 5-4-3-2-1, agua fría en la cara, caminar 5 minutos, oración breve, chequeo con persona de confianza, límites/tiempo fuera 24h, higiene de sueño simple, hidratación y alimento sencillo, reencuadre cognitivo. Elige 2–3 pasos concretos y guiados.
-Solo menciona "escritura" si el usuario la pide o si **no** fue usada en el último turno. Nunca en dos turnos consecutivos.`;
-
-    const ACCEPT_REJECT_RULE =
-      saidYes
-        ? `El usuario aceptó: brinda 2–3 pasos concretos y **una mini-práctica guiada**; luego la pregunta-oferta A/B.`
-        : saidNo
-        ? `El usuario rechazó: valida con calidez, ofrece otra vía concreta y suave; luego pregunta-oferta A/B.`
-        : `Sin aceptación clara: propone 2–3 pasos y una mini-práctica guiada; luego pregunta-oferta A/B.`;
+    const BAD_GENERIC_Q = /(qué te aliviaría|que te aliviar[ií]a|qué pequeño paso|qué vas a|qué harás|qué plan)/i;
 
     const SYSTEM_PROMPT = `
-Hablas con serenidad, claridad y compasión. **Nada de frases fijas**: varía tu lenguaje en cada respuesta.
+Hablas con serenidad, claridad y compasión. Varía el lenguaje en cada turno.
+
+MODO ACTUAL: ${MODE}
 
 SALIDA SOLO JSON (en ${langLabel(lang)}):
-- "message": ≤75 palabras, **sin signos de pregunta**. Contiene:
-  - **Autoayuda (eje):** 2–3 pasos concretos (imperativos suavizados: “podemos…”, “si te sirve, probemos…”, “podrías considerar…”).
-  - **Mini-práctica guiada (1–3 min)** con instrucciones simples.
-  - **Espiritualidad:** 1 línea de esperanza/compañía (sin cita dentro del mensaje).
-- "bible": texto + ref (evita repetir: ${avoidRefs.map(r=>`"${r}"`).join(", ")||"(ninguna)"}).
-- "question": ${isBye ? "omite la pregunta." : "UNA sola pregunta como oferta A/B; no pidas que el usuario invente la solución."}
-- "techniques": lista de etiquetas breves de las técnicas sugeridas (ej.: ["breathing_box","grounding_54321","cold_water","time_out_24h","prayer_short","walk_5min","support_checkin","sleep_hygiene","hydrate","cognitive_reframe","writing_optional"]).
+- "message": ≤75 palabras, **sin signos de pregunta**.
+  * Si MODO=explore: valida y contiene; añade una línea espiritual **sin** cita dentro del "message". **No** propongas técnicas todavía.
+  * Si MODO=permiso: ofrece **1–2 acciones generales** suaves y realistas (sin detallar técnicas), añade una línea espiritual, y prepara al usuario para recibir guía concreta.
+  * Si MODO=execute: ofrece guía **paso a paso** (guion/técnica) clara y breve (1–3 min si es práctica), con lenguaje sencillo.
+- "bible": texto + ref, ajustada al contexto/tema. Evita repetir: ${avoidRefs.map(r=>`"${r}"`).join(", ")||"(ninguna)"}.
+- "question": **UNA sola**.
+  * explore → **pregunta focal** para entender: por área, hecho o impacto (no “qué te aliviaría”).
+  * permiso → **pregunta de permiso** (variada) del tipo: “¿Querés que te diga qué decir y cómo?”, **en tus palabras** (no literal), una sola idea.
+  * execute → **pregunta de ajuste/check-in** (p.ej., adaptar guion, medir intensidad, siguiente micro-paso).
+  * bye → **omite** pregunta.
+  Debe terminar en "?" y **no** depender de opciones A/B repetitivas; evita preguntas genéricas: ${BAD_GENERIC_Q}.
+- "techniques": lista de etiquetas si sugieres técnicas (ej.: ["breathing_box","grounding_54321","cold_water","walk_5min","support_checkin","time_out_24h","sleep_hygiene","hydrate","cognitive_reframe","prayer_short","writing_optional"]).
+- "q_style": etiqueta del estilo de pregunta (ej.: "explore_area","explore_event","explore_impact","permiso_guion","permiso_practica","execute_checkin","execute_adjust").
 
-${WRITING_RULE}
-${ACCEPT_REJECT_RULE}
-
-Enfoca en el **tema**: ${frame.topic_primary}. Si es “general”, ayuda a concretar mediante los pasos que propongas (no con preguntas abiertas).
-No menciones IA/modelos ni muletillas repetitivas.
+PRIORIDADES:
+- La **autoayuda** es el eje: acciones concretas y útiles al tema. Evita “escritura/diario” si aparece en recientes: ${avoidTech.join(", ")||"(ninguna)"}; jamás dos turnos seguidos.
+- Si MODO=explore: 0 técnicas. Si MODO=permiso: aún sin detalles de técnicas; ofrece empezar cuando el usuario lo pida. Si MODO=execute: guía práctica concreta.
+- Varía el estilo de la **pregunta** y evita repetir estilos recientes: ${avoidQStyles.join(", ")||"(ninguno)"}.
+No menciones IA/modelos.
 `;
 
     const header =
@@ -399,9 +410,10 @@ No menciones IA/modelos ni muletillas repetitivas.
       `Evitar_refs: ${avoidRefs.join(" | ")||"(ninguna)"}\n`+
       `Evitar_preguntas: ${avoidQs.join(" | ")||"(ninguna)"}\n`+
       `Evitar_tecnicas: ${avoidTech.join(" | ")||"(ninguna)"}\n`+
+      `Evitar_q_styles: ${avoidQStyles.join(" | ")||"(ninguno)"}\n`+
       `FRAME: ${JSON.stringify(frame)}\n`;
 
-    // 1) Primera generación
+    // 1) Generación
     let r = await completionJson({
       messages: [{role:"system",content:SYSTEM_PROMPT},{role:"user",content:header}],
       temperature:0.6,
@@ -417,78 +429,74 @@ No menciones IA/modelos ni muletillas repetitivas.
       let text = String(data?.bible?.text||"").trim();
       let question = String(data?.question||"").trim();
       let techniques = Array.isArray(data?.techniques)? data.techniques.map(String) : [];
-      return { msg, ref, text, question, techniques };
+      let q_style = String(data?.q_style||"").trim();
+      return { msg, ref, text, question, techniques, q_style };
     };
 
-    let { msg, ref, text, question, techniques } = parseOut(r);
+    let { msg, ref, text, question, techniques, q_style } = parseOut(r);
 
-    // 2) Guardas: evitar pregunta genérica o sin oferta A/B; evitar escritura consecutiva
-    const hasGenericAsk = /(qué te aliviaría|qué pequeño paso|qué vas a|qué harás|qué plan)/i.test(question||"");
-    const hasAB = /\b(o|ou|or|oder|ou bien|o bien)\b/i.test(question||"");
+    // 2) Guardas de calidad
+    if (isBye){ question=""; }
+    else{
+      if (question && !/\?\s*$/.test(question)) question += "?";
+      // evitar preguntas genéricas o A/B
+      const isGeneric = BAD_GENERIC_Q.test(question||"");
+      const looksAB = /\b(o|ou|or|oder|o bien|ou bien)\b/i.test(question||"");
+      if (!question || isGeneric || looksAB){
+        const SYS2 = SYSTEM_PROMPT + `\nAjusta la "question": una sola, natural, sin A/B, no genérica.`;
+        const r2 = await completionJson({
+          messages: [{role:"system",content:SYS2},{role:"user",content:header}],
+          temperature:0.65,
+          max_tokens:320,
+          response_format: FORMAT_ASK
+        });
+        ({ msg, ref, text, question, techniques, q_style } = parseOut(r2));
+        if (question && !/\?\s*$/.test(question)) question += "?";
+      }
+    }
+
+    // Evitar técnica "escritura" consecutiva
     const lastWasWriting = (mem.last_techniques || []).slice(-1)[0] === "writing_optional";
     const thisMentionsWriting = (techniques||[]).includes("writing_optional") || /escrib/i.test(msg);
-
-    if ((!isBye && (!question || hasGenericAsk || !hasAB)) || (thisMentionsWriting && lastWasWriting)) {
-      const SYS2 = SYSTEM_PROMPT + `
-Refuerza: **no** usar "escritura" si ya se sugirió en el último turno; formula la **pregunta como oferta A/B** explícita y distinta.`;
-      r = await completionJson({
-        messages: [{role:"system",content:SYS2},{role:"user",content:header}],
+    if (!isBye && MODE!=="explore" && lastWasWriting && thisMentionsWriting){
+      const SYS3 = SYSTEM_PROMPT + `\nEvita "escritura/diario" porque se usó recién; ofrece otra vía concreta coherente con el tema.`;
+      const r3 = await completionJson({
+        messages: [{role:"system",content:SYS3},{role:"user",content:header}],
         temperature:0.65,
         max_tokens:320,
         response_format: FORMAT_ASK
       });
-      ({ msg, ref, text, question, techniques } = parseOut(r));
-    }
-
-    // 3) Asegurar signo de pregunta y longitudes razonables
-    if (!isBye){
+      ({ msg, ref, text, question, techniques, q_style } = parseOut(r3));
       if (question && !/\?\s*$/.test(question)) question += "?";
-      const tooShort = (question||"").split(/\s+/).length < 6;
-      const tooLong  = (question||"").split(/\s+/).length > 22;
-      if (tooShort || tooLong){
-        const SYS3 = SYSTEM_PROMPT + `\nAjusta la "question" a 10–20 palabras, oferta A/B, clara y concreta.`;
-        const r3 = await completionJson({
-          messages: [{role:"system",content:SYS3},{role:"user",content:header}],
-          temperature:0.65,
-          max_tokens:300,
-          response_format: FORMAT_ASK
-        });
-        ({ msg, ref, text, question, techniques } = parseOut(r3));
-        if (question && !/\?\s*$/.test(question)) question += "?";
-      }
-    } else {
-      question = "";
     }
 
-    // 4) Evitar cita repetida/regenerar solo la Biblia si hace falta
+    // 3) Evitar cita repetida/regenerar sólo Biblia si hace falta
     const avoidSet = new Set((mem.last_bible_refs||[]).map(x=>NORM(cleanRef(x))));
     if (!ref || avoidSet.has(NORM(ref))){
       const alt = await regenerateBibleAvoiding({ lang, persona, message:userTxt, frame, bannedRefs: mem.last_bible_refs||[], lastRef: mem.last_bible_refs?.slice(-1)[0]||"" });
       if (alt){ ref = alt.ref; text = alt.text; }
     }
 
-    // 5) Persistencia
+    // 4) Persistencia
     const cleanedRef = cleanRef(ref);
     if (cleanedRef){
       mem.last_bible_refs = Array.isArray(mem.last_bible_refs)? mem.last_bible_refs : [];
       mem.last_bible_refs.push(cleanedRef);
       while(mem.last_bible_refs.length>8) mem.last_bible_refs.shift();
     }
-
     if (!isBye && question){
       mem.last_questions = Array.isArray(mem.last_questions)? mem.last_questions : [];
       mem.last_questions.push(question);
       while(mem.last_questions.length>10) mem.last_questions.shift();
     }
-
-    // técnicas (para rotación anti-rep)
     if (Array.isArray(techniques) && techniques.length){
       mem.last_techniques = Array.isArray(mem.last_techniques)? mem.last_techniques : [];
       mem.last_techniques = [...mem.last_techniques, ...techniques].slice(-12);
-    } else {
-      // heurística mínima si no devuelve técnicas
-      if (/4-7-8|4 7 8|4,7,8/i.test(msg)) mem.last_techniques = [...(mem.last_techniques||[]), "breathing_478"].slice(-12);
-      else if (/caja|box breath/i.test(msg)) mem.last_techniques = [...(mem.last_techniques||[]), "breathing_box"].slice(-12);
+    }
+    if (q_style){
+      mem.last_q_styles = Array.isArray(mem.last_q_styles)? mem.last_q_styles : [];
+      mem.last_q_styles.push(q_style);
+      while(mem.last_q_styles.length>10) mem.last_q_styles.shift();
     }
 
     await writeUserMemory(userId, mem);
