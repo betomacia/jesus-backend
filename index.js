@@ -1,6 +1,7 @@
-// index.js — Diálogo servicial con bienvenida íntima (multi-idioma), ≤75 palabras,
-// preguntas personales variadas, ramificación sí/no/bye, antirepetición de citas/preguntas,
-// memoria ampliada (retoma pendientes), HeyGen y CORS.
+// index.js — Bienvenida con pregunta de servicio (multilenguaje, antirep),
+// diálogo servicial y colaborativo, pregunta final alineada al tema,
+// ≤75 palabras en message, sin cita dentro de "message", memoria ampliada,
+// HeyGen y CORS abiertos.
 //
 // Env: OPENAI_API_KEY, HEYGEN_API_KEY (opc), HEYGEN_DEFAULT_AVATAR (opc),
 // HEYGEN_VOICE_ID (opc), HEYGEN_AVATAR_ES/EN/PT/IT/DE/CA/FR (opc)
@@ -53,34 +54,34 @@ function greetingByHour(lang="es"){
   }
 }
 
-// Vocativos y bendiciones espirituales (cálidos/íntimos)
+// Vocativos y bendiciones espirituales (ligeramente aleatorios)
 function pickVocative(lang="es", gender="unknown"){
   const rnd = (arr)=>arr[Math.floor(Math.random()*arr.length)];
-  const ES_neutral = ["alma amada","tesoro de mi corazón","corazón buscador","hija/o del Altísimo","alma de mi vida"];
-  const ES_f = ["hija mía","amada de mi corazón","alma amada","amiga del Señor","corazón valiente"];
-  const ES_m = ["hijo mío","amado de mi corazón","alma amada","amigo del Señor","corazón valiente"];
+  const ES_neutral = ["alma amada","alma querida","corazón buscador","hijo/a del Altísimo","tesoro de Dios"];
+  const ES_f = ["hija mía","alma amada","hija querida","amiga del Señor","corazón valiente"];
+  const ES_m = ["hijo mío","alma amada","hijo querido","amigo del Señor","corazón valiente"];
   if(lang==="en"){
-    const NEU = ["beloved daughter/son of my heart","beloved soul","dear heart","precious one","child of the Most High"];
+    const NEU = ["beloved soul","dear heart","child of the Most High","precious soul","cherished one"];
     return rnd(NEU);
   }
   if(lang==="pt"){
-    const NEU = ["alma amada","tesouro do meu coração","filha/o do Altíssimo","querida do Senhor","coração valente"];
+    const NEU = ["alma amada","coração querido","filho/a do Altíssimo","alma preciosa","querido/a do Senhor"];
     return rnd(NEU);
   }
   if(lang==="it"){
-    const NEU = ["anima amata","tesoro del mio cuore","figlia/figlio dell’Altissimo","caro cuore","amata del Signore"];
+    const NEU = ["anima amata","caro cuore","figlia/figlio dell’Altissimo","anima preziosa","caro/a del Signore"];
     return rnd(NEU);
   }
   if(lang==="de"){
-    const NEU = ["geliebte Seele","Schatz meines Herzens","Kind des Höchsten","liebes Herz","Geliebte/r des Herrn"];
+    const NEU = ["geliebte Seele","liebes Herz","Kind des Höchsten","kostbare Seele","Geliebte/r des Herrn"];
     return rnd(NEU);
   }
   if(lang==="ca"){
-    const NEU = ["ànima estimada","tresor del meu cor","fill/a de l’Altíssim","cor estimat","estimada del Senyor"];
+    const NEU = ["ànima estimada","cor estimat","fill/a de l’Altíssim","ànima preciosa","estimada del Senyor"];
     return rnd(NEU);
   }
   if(lang==="fr"){
-    const NEU = ["âme bien-aimée","trésor de mon cœur","enfant du Très-Haut","cher cœur","bien-aimé(e) du Seigneur"];
+    const NEU = ["âme bien-aimée","cher cœur","enfant du Très-Haut","âme précieuse","bien-aimé(e) du Seigneur"];
     return rnd(NEU);
   }
   if(gender==="female") return rnd(ES_f);
@@ -143,7 +144,6 @@ async function readUserMemory(userId){
       last_offer_kind:null,
       last_user_reply:null,
       pending_action:null,
-      pending_ts: null,
       last_topic:null
     };
   }
@@ -216,6 +216,359 @@ function detectByeThanks(s=""){
     /\bmerci\b|\bje dois partir\b|\bau revoir\b/
   ];
   return pats.some(r=>r.test(x));
+}
+
+// ---------- Pools de preguntas de servicio (bienvenida) ----------
+const SERVICE_QUESTION_POOL = {
+  es: [
+    "¿De qué vamos a hablar hoy?",
+    "¿En qué puedo ayudarte ahora mismo?",
+    "¿Qué vamos a resolver juntos hoy?",
+    "¿Qué te inquieta y quieres atender hoy?",
+    "¿Qué problema atendemos primero?",
+    "¿Qué necesitas que miremos con calma hoy?"
+  ],
+  en: [
+    "What shall we talk about today?",
+    "How can I help you right now?",
+    "What are we going to solve together today?",
+    "What is weighing on you that you’d like to address today?",
+    "What problem should we handle first?",
+    "What do you need us to look at calmly today?"
+  ],
+  pt: [
+    "Sobre o que vamos falar hoje?",
+    "Como posso te ajudar agora mesmo?",
+    "O que vamos resolver juntos hoje?",
+    "O que te inquieta e quer cuidar hoje?",
+    "Que problema tratamos primeiro?",
+    "Do que você precisa que olhemos com calma hoje?"
+  ],
+  it: [
+    "Di cosa parliamo oggi?",
+    "Come posso aiutarti adesso?",
+    "Cosa risolviamo insieme oggi?",
+    "Cosa ti pesa e vuoi affrontare oggi?",
+    "Quale problema affrontiamo per primo?",
+    "Di cosa hai bisogno che guardiamo con calma oggi?"
+  ],
+  de: [
+    "Worüber sprechen wir heute?",
+    "Wobei kann ich dir jetzt helfen?",
+    "Was lösen wir heute gemeinsam?",
+    "Was belastet dich und möchtest du heute angehen?",
+    "Welches Problem packen wir zuerst an?",
+    "Wobei sollen wir heute in Ruhe hinschauen?"
+  ],
+  ca: [
+    "De què parlem avui?",
+    "En què puc ajudar-te ara mateix?",
+    "Què resolem junts avui?",
+    "Què et inquieta i vols atendre avui?",
+    "Quin problema abordem primer?",
+    "Què necessites que mirem amb calma avui?"
+  ],
+  fr: [
+    "De quoi parlons-nous aujourd’hui ?",
+    "Comment puis-je t’aider maintenant ?",
+    "Qu’allons-nous résoudre ensemble aujourd’hui ?",
+    "Qu’est-ce qui te pèse et que tu veux aborder aujourd’hui ?",
+    "Quel problème traitons en premier ?",
+    "De quoi as-tu besoin que nous regardions avec calme aujourd’hui ?"
+  ]
+};
+
+// ---------- Pregunta final de servicio alineada al tema ----------
+function buildTopicAlignedQuestion(lang="es", topic="general"){
+  const L = lang in SERVICE_QUESTION_POOL ? lang : "es";
+  // Si el tema es general/indefinido: pedir concreción
+  if (topic==="general"){
+    const pool = {
+      es: [
+        "¿Qué problema concreto quieres que abordemos juntos ahora?",
+        "¿Qué parte de esto te gustaría aclarar primero?",
+        "¿Qué situación específica miramos primero?"
+      ],
+      en: [
+        "What concrete problem shall we tackle together now?",
+        "Which part would you like to clarify first?",
+        "Which specific situation do we look at first?"
+      ],
+      pt: [
+        "Que problema concreto vamos enfrentar juntos agora?",
+        "Que parte você quer esclarecer primeiro?",
+        "Que situação específica olhamos primeiro?"
+      ],
+      it: [
+        "Quale problema concreto affrontiamo insieme adesso?",
+        "Quale parte vorresti chiarire per prima?",
+        "Quale situazione specifica guardiamo per prima?"
+      ],
+      de: [
+        "Welches konkrete Problem gehen wir jetzt gemeinsam an?",
+        "Welchen Teil möchtest du zuerst klären?",
+        "Welche konkrete Situation schauen wir uns zuerst an?"
+      ],
+      ca: [
+        "Quin problema concret vols que abordem plegats ara?",
+        "Quina part t’agradaria aclarir primer?",
+        "Quina situació específica mirem primer?"
+      ],
+      fr: [
+        "Quel problème concret voulons-nous aborder ensemble maintenant ?",
+        "Quelle partie souhaites-tu clarifier en premier ?",
+        "Quelle situation spécifique examinons-nous d’abord ?"
+      ]
+    };
+    const arr = pool[L] || pool.es;
+    return arr[Math.floor(Math.random()*arr.length)];
+  }
+  // Con tema detectado: menciona el tema
+  const map = {
+    relationship: {
+      es: [
+        "¿Qué paso quieres dar hoy con tu relación?",
+        "¿Qué conversación concreta necesitas tener con tu pareja?"
+      ],
+      en: [
+        "What step would you like to take today in your relationship?",
+        "What specific conversation do you need to have with your partner?"
+      ],
+      pt: [
+        "Que passo você quer dar hoje no seu relacionamento?",
+        "Que conversa específica você precisa ter com seu parceiro?"
+      ],
+      it: [
+        "Quale passo vuoi compiere oggi nella tua relazione?",
+        "Quale conversazione concreta devi avere con il tuo partner?"
+      ],
+      de: [
+        "Welchen Schritt möchtest du heute in deiner Beziehung gehen?",
+        "Welches konkrete Gespräch musst du mit deinem Partner führen?"
+      ],
+      ca: [
+        "Quin pas vols fer avui en la teva relació?",
+        "Quina conversa concreta necessites tenir amb la teva parella?"
+      ],
+      fr: [
+        "Quelle étape veux-tu franchir aujourd’hui dans ta relation ?",
+        "Quelle conversation précise dois-tu avoir avec ton/ta partenaire ?"
+      ]
+    },
+    work_finance: {
+      es: [
+        "¿Qué gestión sencilla hacemos hoy para avanzar en lo laboral/financiero?",
+        "¿Qué decisión específica necesitas tomar respecto a tu trabajo o finanzas?"
+      ],
+      en: [
+        "What simple step shall we take today for your work/finances?",
+        "What specific decision do you need to make about work or finances?"
+      ],
+      pt: [
+        "Que passo simples damos hoje no trabalho/finanças?",
+        "Que decisão específica você precisa tomar sobre trabalho ou finanças?"
+      ],
+      it: [
+        "Quale passo semplice facciamo oggi su lavoro/finanze?",
+        "Quale decisione specifica devi prendere su lavoro o finanze?"
+      ],
+      de: [
+        "Welchen einfachen Schritt gehen wir heute bei Arbeit/Finanzen?",
+        "Welche konkrete Entscheidung musst du zu Arbeit oder Finanzen treffen?"
+      ],
+      ca: [
+        "Quin pas senzill fem avui en l’àmbit laboral/financer?",
+        "Quina decisió específica necessites prendre sobre la feina o finances?"
+      ],
+      fr: [
+        "Quelle étape simple faisons-nous aujourd’hui pour le travail/les finances ?",
+        "Quelle décision précise dois-tu prendre sur le travail ou les finances ?"
+      ]
+    },
+    health: {
+      es: [
+        "¿Qué cuidado concreto podemos incorporar hoy para tu salud?",
+        "¿Qué consulta o paso médico te ayudaría a avanzar?"
+      ],
+      en: [
+        "What concrete self-care can we add today for your health?",
+        "Which medical step or consult would help you move forward?"
+      ],
+      pt: [
+        "Que cuidado concreto podemos incluir hoje para sua saúde?",
+        "Que passo ou consulta médica te ajudaria a avançar?"
+      ],
+      it: [
+        "Quale cura concreta possiamo aggiungere oggi per la tua salute?",
+        "Quale passo o consulto medico ti aiuterebbe ad avanzare?"
+      ],
+      de: [
+        "Welche konkrete Fürsorge können wir heute für deine Gesundheit einbauen?",
+        "Welcher medizinische Schritt oder Termin würde dir helfen, voranzukommen?"
+      ],
+      ca: [
+        "Quina cura concreta podem incorporar avui per a la teva salut?",
+        "Quin pas o consulta mèdica t’ajudaria a avançar?"
+      ],
+      fr: [
+        "Quel soin concret pouvons-nous ajouter aujourd’hui pour ta santé ?",
+        "Quelle démarche ou consultation médicale t’aiderait à avancer ?"
+      ]
+    },
+    mood: {
+      es: [
+        "¿Qué te aliviaría hoy de forma sencilla y realista?",
+        "¿Qué pequeño hábito de calma probamos primero?"
+      ],
+      en: [
+        "What would bring you simple, realistic relief today?",
+        "Which small calming habit shall we try first?"
+      ],
+      pt: [
+        "O que te traria alívio simples e realista hoje?",
+        "Que pequeno hábito de calma tentamos primeiro?"
+      ],
+      it: [
+        "Cosa ti darebbe sollievo semplice e realistico oggi?",
+        "Quale piccolo gesto di calma proviamo per primo?"
+      ],
+      de: [
+        "Was würde dir heute einfache, realistische Erleichterung bringen?",
+        "Welche kleine Ruhe-Gewohnheit probieren wir zuerst?"
+      ],
+      ca: [
+        "Què et aportaria avui un alleujament senzill i realista?",
+        "Quin petit hàbit de calma provem primer?"
+      ],
+      fr: [
+        "Qu’est-ce qui t’apporterait aujourd’hui un soulagement simple et réaliste ?",
+        "Quelle petite habitude apaisante essayons-nous d’abord ?"
+      ]
+    },
+    grief: {
+      es: [
+        "¿Qué detalle de tu duelo quisieras cuidar primero hoy?",
+        "¿Qué apoyo cercano podría acompañarte estos días?"
+      ],
+      en: [
+        "Which part of your grief would you like to tend to first today?",
+        "Who close to you could support you these days?"
+      ],
+      pt: [
+        "Que parte do seu luto você quer cuidar primeiro hoje?",
+        "Quem próximo poderia te apoiar nesses dias?"
+      ],
+      it: [
+        "Quale parte del tuo lutto vuoi curare per prima oggi?",
+        "Chi vicino a te potrebbe sostenerti in questi giorni?"
+      ],
+      de: [
+        "Welchen Teil deiner Trauer möchtest du heute zuerst behutsam angehen?",
+        "Wer in deiner Nähe könnte dich in diesen Tagen unterstützen?"
+      ],
+      ca: [
+        "Quina part del teu dol vols cuidar primer avui?",
+        "Qui a prop teu podria acompanyar-te aquests dies?"
+      ],
+      fr: [
+        "Quelle part de ton deuil souhaites-tu prendre en soin d’abord aujourd’hui ?",
+        "Qui, près de toi, pourrait t’accompagner ces jours-ci ?"
+      ]
+    },
+    separation: {
+      es: [
+        "¿Qué límite o cuidado necesitas hoy para atravesar esta ruptura?",
+        "¿Qué conversación o decisión te ayudaría a ordenar este momento?"
+      ],
+      en: [
+        "What boundary or care do you need today to navigate this breakup?",
+        "What conversation or decision would help you bring order to this moment?"
+      ],
+      pt: [
+        "Que limite ou cuidado você precisa hoje para atravessar esta ruptura?",
+        "Que conversa ou decisão te ajudaria a organizar este momento?"
+      ],
+      it: [
+        "Quale confine o cura ti serve oggi per attraversare questa rottura?",
+        "Quale conversazione o decisione ti aiuterebbe a fare ordine in questo momento?"
+      ],
+      de: [
+        "Welche Grenze oder Fürsorge brauchst du heute in dieser Trennung?",
+        "Welches Gespräch oder welche Entscheidung würde dir helfen, Ordnung zu schaffen?"
+      ],
+      ca: [
+        "Quin límit o cura necessites avui per travessar aquesta ruptura?",
+        "Quina conversa o decisió t’ajudaria a posar ordre en aquest moment?"
+      ],
+      fr: [
+        "Quelle limite ou quel soin te faut-il aujourd’hui pour traverser cette rupture ?",
+        "Quelle conversation ou décision t’aiderait à remettre de l’ordre dans ce moment ?"
+      ]
+    },
+    addiction: {
+      es: [
+        "¿Qué apoyo práctico sumamos hoy para sostener tu proceso?",
+        "¿Qué situación de riesgo conviene prevenir primero?"
+      ],
+      en: [
+        "What practical support shall we add today to sustain your process?",
+        "Which risk situation is best to prevent first?"
+      ],
+      pt: [
+        "Que apoio prático somamos hoje para sustentar seu processo?",
+        "Qual situação de risco convém prevenir primeiro?"
+      ],
+      it: [
+        "Quale supporto pratico aggiungiamo oggi per sostenere il tuo percorso?",
+        "Quale situazione a rischio conviene prevenire per prima?"
+      ],
+      de: [
+        "Welche praktische Unterstützung fügen wir heute hinzu, um deinen Weg zu tragen?",
+        "Welche Risikosituation sollten wir zuerst vorbeugen?"
+      ],
+      ca: [
+        "Quin suport pràctic afegim avui per sostenir el teu procés?",
+        "Quina situació de risc convé prevenir primer?"
+      ],
+      fr: [
+        "Quel soutien pratique ajoutons-nous aujourd’hui pour soutenir ton processus ?",
+        "Quelle situation à risque vaut-il mieux prévenir d’abord ?"
+      ]
+    },
+    family_conflict: {
+      es: [
+        "¿Qué gesto pacificador te ayudaría hoy en tu familia?",
+        "¿Qué límite claro necesitas expresar con respeto?"
+      ],
+      en: [
+        "What peacemaking gesture would help in your family today?",
+        "What clear boundary do you need to express respectfully?"
+      ],
+      pt: [
+        "Que gesto pacificador ajudaria hoje na sua família?",
+        "Que limite claro você precisa expressar com respeito?"
+      ],
+      it: [
+        "Quale gesto di pace aiuterebbe oggi nella tua famiglia?",
+        "Quale confine chiaro devi esprimere con rispetto?"
+      ],
+      de: [
+        "Welche friedensstiftende Geste hilft heute in deiner Familie?",
+        "Welche klare Grenze musst du respektvoll ausdrücken?"
+      ],
+      ca: [
+        "Quin gest pacificador t’ajudaria avui a la teva família?",
+        "Quin límit clar necessites expressar amb respecte?"
+      ],
+      fr: [
+        "Quel geste de paix aiderait aujourd’hui dans ta famille ?",
+        "Quelle limite claire dois-tu exprimer avec respect ?"
+      ]
+    }
+  };
+  const arr = (map[topic] && map[topic][L]) || (map[topic] && map[topic]["es"]) || null;
+  if (!arr) return buildTopicAlignedQuestion(L, "general");
+  return arr[Math.floor(Math.random()*arr.length)];
 }
 
 // ---------- Pool de citas (fallback si repite) ----------
@@ -321,7 +674,8 @@ function versePoolByTopic(lang="es"){
     general: [
       { ref:"Psalm 23:1", text:"The Lord is my shepherd; I lack nothing." },
       { ref:"1 Peter 5:7", text:"Cast all your anxiety on him because he cares for you." },
-      { ref:"Isaiah 40:31", text:"Those who hope in the Lord will renew their strength." }
+      { ref:"Isaiah 40:31", text:"Those who hope in the Lord will renew their strength."
+      }
     ]
   };
   return (lang==="en"?EN:ES);
@@ -370,7 +724,7 @@ app.get("/", (_req,res)=> res.json({ok:true, service:"backend", ts:Date.now()}))
 app.get("/api/welcome", (_req,res)=> res.json({ok:true, hint:"POST /api/welcome { lang, name, userId, gender?, history }"}));
 app.post("/api/memory/sync", (_req,res)=> res.json({ok:true}));
 
-// ---------- WELCOME (íntima + memoria de pendientes) ----------
+// ---------- WELCOME ----------
 app.post("/api/welcome", async (req,res)=>{
   try{
     const { lang="es", name="", userId="anon", gender="unknown", history=[] } = req.body||{};
@@ -383,39 +737,27 @@ app.post("/api/welcome", async (req,res)=>{
     const avoidRefs = Array.isArray(mem.last_bible_refs)? mem.last_bible_refs.slice(-8):[];
     const avoidQs   = Array.isArray(mem.last_questions)? mem.last_questions.slice(-10):[];
 
-    // Si hay acción pendiente reciente (<=48h), suavemente la recordamos con intimidad
-    const hasRecentPending = mem.pending_action && (!mem.pending_ts || (Date.now() - mem.pending_ts) < 48*60*60*1000);
-    const pendLineByLang = (l)=>(
-      l==="en" ? `If you wish, we can gently revisit what was pending: ${mem.pending_action}`
-      : l==="pt" ? `Se quiser, retomamos com carinho o que ficou pendente: ${mem.pending_action}`
-      : l==="it" ? `Se vuoi, riprendiamo con dolcezza ciò che era in sospeso: ${mem.pending_action}`
-      : l==="de" ? `Wenn du möchtest, greifen wir behutsam das Anstehende wieder auf: ${mem.pending_action}`
-      : l==="ca" ? `Si vols, reprenem amb suavitat allò que va quedar pendent: ${mem.pending_action}`
-      : l==="fr" ? `Si tu veux, reprenons avec douceur ce qui était en suspens : ${mem.pending_action}`
-      : `Si quieres, retomamos con calma lo pendiente: ${mem.pending_action}`
-    );
-
     const prelude = `${hi}${nm?`, ${nm}`:""}. ${voc[0].toUpperCase()+voc.slice(1)}, ${blessing}.`;
 
-    // Evitar preguntas genéricas/frías
-    const GENERIC_QS = [
-      "¿cómo estás hoy?","¿en qué quieres profundizar?","¿qué tienes para contarme?",
-      "¿qué te gustaría compartir?","¿de qué quieres hablar?","¿qué necesitas hoy?"
-    ];
+    // Selecciona pregunta de servicio (antirep)
+    function pickServiceQuestion(lang="es", bannedSet=new Set()){
+      const pool = SERVICE_QUESTION_POOL[lang] || SERVICE_QUESTION_POOL.es;
+      const candidates = pool.filter(q => !bannedSet.has(NORM(q)));
+      const chosen = (candidates.length? candidates[Math.floor(Math.random()*candidates.length)] : pool[0]) || pool[0];
+      return /\?\s*$/.test(chosen) ? chosen : (chosen + "?");
+    }
 
     const SYSTEM_PROMPT = `
-Hablas con intimidad, cercanía y compasión, como quien ya conoce la historia de la persona.
+Hablas con serenidad, claridad y compasión.
 
 Salida SOLO JSON:
 - "message": empieza EXACTAMENTE con: "${prelude}"
-  Añade 1 frase breve alentadora (autoayuda suave + toque espiritual), íntima y personal. Evita tono de entrevista. **Sin preguntas**. Máximo 75 palabras totales. **No incluyas citas bíblicas ni referencias** en "message".
-  ${hasRecentPending ? `Incluye al final una mención suave y agradecida por recordar el pendiente si aparece: "${pendLineByLang(lang)}".` : ""}
-- "bible": cita pertinente (texto + ref) de esperanza/consuelo.
-- "question": **UNA** pregunta personal, íntima y concreta (6–14 palabras), que invite a abrir el corazón (no oferta, no sí/no, no genérica, no fría). Varía el enunciado.
+  Añade 1 frase alentadora práctica (autoayuda breve + toque espiritual). **Sin preguntas**. Máximo 75 palabras totales. **No incluyas citas bíblicas ni referencias** en "message".
+- "bible": cita pertinente (texto + ref) de esperanza.
+- "question": **UNA sola** pregunta **de servicio práctico** (no poética, no abstracta, no oferta de “¿Quieres…?”). 6–12 palabras. Debe ser equivalente a: “¿De qué vamos a hablar hoy?”, “¿En qué puedo ayudarte ahora mismo?”, “¿Qué vamos a resolver juntos hoy?”, variando el enunciado y siempre terminando en "?".
 
 Evita estas referencias: ${avoidRefs.map(r=>`"${r}"`).join(", ") || "(ninguna)"}.
 Evita estas preguntas recientes: ${avoidQs.map(q=>`"${q}"`).join(", ") || "(ninguna)"}.
-Evita preguntas genéricas como: ${GENERIC_QS.map(q=>`"${q}"`).join(", ")}.
 
 Responde SIEMPRE en ${langLabel(lang)}.
 `;
@@ -425,15 +767,14 @@ Responde SIEMPRE en ${langLabel(lang)}.
       `Lang: ${lang}\n`+
       `Nombre: ${nm||"(anónimo)"}\n`+
       `Prelude: ${prelude}\n`+
-      (shortHistory.length?`Historial: ${shortHistory.join(" | ")}`:"Historial: (sin antecedentes)")+"\n"+
-      `Pendiente: ${mem.pending_action?mem.pending_action:"(ninguno)"}\n`;
+      (shortHistory.length?`Historial: ${shortHistory.join(" | ")}`:"Historial: (sin antecedentes)")+"\n";
 
     const r = await completionJson({
       messages: [
         { role:"system", content: SYSTEM_PROMPT },
         { role:"user", content: header }
       ],
-      temperature: 0.7,
+      temperature: 0.65,
       max_tokens: 240
     });
 
@@ -447,7 +788,6 @@ Responde SIEMPRE en ${langLabel(lang)}.
     let text = String(data?.bible?.text||"").trim();
     let question = String(data?.question||"").trim();
     if (question && !/\?\s*$/.test(question)) question += "?";
-    const qNorm = NORM(question);
 
     // Antirepetición cita
     const avoidRefSet = new Set(avoidRefs.map(x=>NORM(cleanRef(x))));
@@ -456,61 +796,13 @@ Responde SIEMPRE en ${langLabel(lang)}.
       ref = alt.ref; text = alt.text;
     }
 
-    // Antirepetición / calidad de pregunta
+    // Antirepetición pregunta + forzar servicio
     const banned = new Set(avoidQs.map(NORM));
-    const tooShort = qNorm.split(/\s+/).length < 5;
-    const tooLong  = qNorm.split(/\s+/).length > 16;
-    const genericish = /(cómo estás|qué te inquieta|qué quieres hablar|qué te gustaría compartir|de qué hablamos|qué necesitas hoy)/i;
-
-    if (!question || banned.has(qNorm) || tooShort || tooLong || genericish.test(question)){
-      // Fallback íntimo por idioma
-      const seeds = {
-        es: [
-          "¿Qué late más fuerte en tu corazón ahora mismo?",
-          "¿Qué te duele por dentro y necesitas poner en palabras?",
-          "¿Dónde sientes que te falta fuerza hoy por dentro?",
-          "¿Qué necesitas de mí en este instante para aliviar tu carga?"
-        ],
-        en: [
-          "What is beating strongest in your heart right now?",
-          "What aches inside that needs gentle words today?",
-          "Where do you feel you lack strength inside today?",
-          "What do you need from me right now to ease your burden?"
-        ],
-        pt: [
-          "O que pulsa mais forte no seu coração agora?",
-          "O que dói por dentro e precisa ser dito com carinho?",
-          "Onde você sente que falta força hoje, por dentro?",
-          "O que você precisa de mim agora para aliviar o peso?"
-        ],
-        it: [
-          "Cosa pulsa più forte nel tuo cuore adesso?",
-          "Cosa ti fa male dentro e ha bisogno di parole gentili?",
-          "Dove senti che ti manca forza, oggi, nel profondo?",
-          "Di cosa hai bisogno da me ora per alleggerire il peso?"
-        ],
-        de: [
-          "Was schlägt gerade am stärksten in deinem Herzen?",
-          "Was schmerzt in dir und braucht behutsame Worte?",
-          "Wo fehlt dir heute innerlich die Kraft?",
-          "Was brauchst du jetzt von mir, um die Last zu erleichtern?"
-        ],
-        ca: [
-          "Què batega més fort al teu cor ara mateix?",
-          "Què et fa mal per dins i necessita paraules suaus?",
-          "On sents que et falta força avui, per dins?",
-          "Què necessites de mi ara per alleujar la càrrega?"
-        ],
-        fr: [
-          "Qu’est-ce qui bat le plus fort dans ton cœur maintenant ?",
-          "Qu’est-ce qui te fait mal au dedans et a besoin de mots doux ?",
-          "Où sens-tu qu’il te manque de la force aujourd’hui, au fond ?",
-          "De quoi as-tu besoin de moi maintenant pour alléger ta charge ?"
-        ]
-      };
-      const pool = seeds[lang]||seeds.es;
-      question = pool[Math.floor(Math.random()*pool.length)];
-      if (!/\?\s*$/.test(question)) question += "?";
+    const looksLikeOffer = /^¿\s*(quieres|te gustaría|prefieres|puedo|hacemos)/i.test(question || "");
+    const tooShort = (question||"").split(/\s+/).length < 5;
+    const tooLong  = (question||"").split(/\s+/).length > 15;
+    if (!question || banned.has(NORM(question)) || looksLikeOffer || tooShort || tooLong){
+      question = pickServiceQuestion(lang, banned);
     }
 
     // Persistencia
@@ -539,14 +831,14 @@ Responde SIEMPRE en ${langLabel(lang)}.
     console.error("WELCOME ERROR:", e);
     const hi = greetingByHour("es");
     res.status(200).json({
-      message: `${hi}. Alma amada, que la paz del Señor esté contigo. Estoy aquí, cuéntame con calma qué te trae hoy.`,
+      message: `${hi}. Alma amada, que la paz del Señor esté contigo. Cuéntame en pocas palabras qué te trae hoy.`,
       bible:{ text:"Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu.", ref:"Salmos 34:18" },
-      question: "¿Qué late más fuerte en tu corazón ahora mismo?"
+      question: "¿En qué puedo ayudarte ahora mismo?"
     });
   }
 });
 
-// ---------- ASK (servicial + ramificación sí/no/bye, ≤75 palabras, antirep) ----------
+// ---------- ASK (servicial, colaborativo, pregunta final alineada) ----------
 app.post("/api/ask", async (req,res)=>{
   try{
     const { persona="jesus", message="", history=[], userId="anon", lang="es" } = req.body||{};
@@ -571,43 +863,44 @@ app.post("/api/ask", async (req,res)=>{
     const avoidQs   = Array.isArray(mem.last_questions)? mem.last_questions.slice(-10):[];
     const shortHistory = compactHistory(history,10,240);
 
-    // Reglas dinámicas de pregunta
     let QUESTION_RULE = "";
     if (isBye){
-      QUESTION_RULE = `No incluyas "question" si el usuario se está despidiendo o agradeciendo.`;
+      QUESTION_RULE = `No incluyas "question" si el usuario se despide o agradece.`;
     } else if (saidYes){
       QUESTION_RULE = `
 El usuario aceptó. Entonces:
-- Da 2–3 pasos concretos + 1 mini práctica guiada (1–3 minutos).
-- Luego UNA pregunta breve de seguimiento **no binaria** (preferencias/ajuste). Prohibidas preguntas sí/no y “¿Te gustaría…?”.
-`;
+- Brinda 2–3 pasos concretos con tono colaborativo (“podemos…”, “si te ayuda, probemos…”), y 1 mini práctica guiada (1–3 minutos).
+- Luego UNA pregunta breve **no binaria** (seguimiento o preferencia), evitando “¿Te gustaría…?”, “¿Quieres…?”.`;
     } else if (saidNo){
       QUESTION_RULE = `
 El usuario rechazó. Entonces:
-- Valida con calidez y ofrece alternativa distinta **en el mensaje** (no como pregunta).
-- UNA pregunta personal breve para entender mejor (no sí/no), variada.
-`;
+- Valida con calidez y ofrece en el **mensaje** una alternativa distinta y suave (“si prefieres, podemos…”).
+- UNA pregunta personal breve para entender mejor (no sí/no), variada.`;
     } else {
       QUESTION_RULE = `
-No hay aceptación/negativa. Haz UNA pregunta personal abierta, concreta (no oferta, no sí/no), que ayude a entender para elegir la mejor ayuda.
-`;
+No hay aceptación/negativa clara. Haz UNA pregunta personal de clarificación **alineada al tema** detectado (si existe); si el tema es difuso, pide concretar el problema. No binaria, breve, práctica.`;
     }
 
     const SYSTEM_PROMPT = `
-Hablas con serenidad, cercanía y compasión. Eres servicial: ofreces ayuda concreta sin dar órdenes ni sonar imperativo.
-
+Hablas con serenidad, claridad y compasión.
 Salida SOLO JSON.
 
-"message": máximo 75 palabras, sin signos de pregunta. Primero autoayuda breve y práctica (2–3 frases, con 1–2 micro-pasos concretos ajustados al tema); luego un toque espiritual cristiano. **No incluyas citas bíblicas ni referencias en "message"**. Evita repetir literalmente las últimas 2–3 palabras del usuario.
-"bible": cita pertinente que apoye el micro-paso (texto + ref). Evita repetir referencias recientes.
+"message": máximo 75 palabras, **sin signos de pregunta**. Tono **colaborativo y servicial** (evita imperativos duros):
+- 2–3 frases de autoayuda **práctica** con 1–2 micro-pasos posibles (“podemos…”, “si te ayuda, probemos…”, “podrías considerar…”).
+- Luego un toque espiritual cristiano.
+**No incluyas citas bíblicas ni referencias en "message"**.
+
+"bible": cita pertinente (texto + ref). Evita repetir referencias recientes.
+
 "question": UNA, según estas reglas:
 ${QUESTION_RULE}
-- Varía el enunciado; evita equivalentes semánticos de turnos recientes.
+- Alinea la pregunta con el **tema** (FRAME.topic_primary). Si el tema es “general”, pide concretar el problema (“¿Qué problema concreto…?”).
+- Varía el enunciado; evita equivalentes de turnos recientes.
 - Termina en "?" si existe.
 
-Marco (FRAME): ${JSON.stringify(frame)}.
-Evita estas referencias: ${avoidRefs.map(r=>`"${r}"`).join(", ")||"(ninguna)"}.
-Evita estas preguntas recientes: ${avoidQs.map(q=>`"${q}"`).join(", ")||"(ninguna)"}.
+FRAME: ${JSON.stringify(frame)}.
+Evita referencias: ${avoidRefs.map(r=>`"${r}"`).join(", ")||"(ninguna)"}.
+Evita preguntas recientes: ${avoidQs.map(q=>`"${q}"`).join(", ")||"(ninguna)"}.
 Responde SIEMPRE en ${langLabel(lang)}.
 `;
 
@@ -622,7 +915,7 @@ Responde SIEMPRE en ${langLabel(lang)}.
 
     const r = await completionJson({
       messages: [{role:"system",content:SYSTEM_PROMPT},{role:"user",content:header}],
-      temperature:0.65,
+      temperature:0.6,
       max_tokens:260
     });
 
@@ -638,62 +931,51 @@ Responde SIEMPRE en ${langLabel(lang)}.
     if (isBye){
       question = "";
       if (!/paz|esperanz|luz|fortalec|acompa/i.test(msg)) {
-        msg = limitWords(`${msg} ${lang==="en"?"Go in peace; may the Lord keep you.":lang==="pt"?"Vai em paz; que o Senhor te guarde.":lang==="it"?"Va' in pace; il Signore ti custodisca.":lang==="de"?"Geh in Frieden; der Herr behüte dich.":lang==="ca"?"Vés en pau; que el Senyor et guardi.":lang==="fr"?"Va en paix; que le Seigneur te garde.":"Ve en paz; que el Señor te guarde."}`, 75);
+        msg = limitWords(`${msg} ${
+          lang==="en"?"Go in peace; may the Lord keep you.":
+          lang==="pt"?"Vai em paz; que o Senhor te guarde.":
+          lang==="it"?"Va' in pace; il Signore ti custodisca.":
+          lang==="de"?"Geh in Frieden; der Herr behüte dich.":
+          lang==="ca"?"Vés en pau; que el Senyor et guardi.":
+          lang==="fr"?"Va en paix; que le Seigneur te garde.":
+          "Ve en paz; que el Señor te guarde."
+        }`, 75);
       }
     } else {
+      // Normaliza signo de interrogación
       if (question && !/\?\s*$/.test(question)) question+="?";
+
+      // Si el tema es "general" y la pregunta no concreta, sustituir
+      if (topic==="general"){
+        const forced = buildTopicAlignedQuestion(lang, "general");
+        const tooGeneric = /(cómo estás|qué te inquieta|de qué quieres hablar|qué te gustaría compartir)/i.test(question||"");
+        if (!question || tooGeneric) question = forced;
+      } else {
+        // Si hay tema, asegurar alineación semántica (heurística)
+        const topicWord = {
+          relationship:/pareja|relaci|espos|novi|matr/i,
+          work_finance:/trabaj|emple|finanz|dinero|deud/i,
+          health:/salud|dolor|diagn|m[eé]dic/i,
+          mood:/ansied|triste|miedo|p[áa]nico|estr[eé]s/i,
+          grief:/duelo|perd|fallec|luto/i,
+          separation:/separaci|ruptur|divorcio/i,
+          addiction:/adici|alcohol|droga|apuest/i,
+          family_conflict:/familia|conflict|discusi|suegr|hij[oa]/i
+        }[topic] || null;
+        if (topicWord && !(topicWord.test(question||""))) {
+          // Reemplazo por una pregunta alineada
+          question = buildTopicAlignedQuestion(lang, topic);
+        }
+      }
+
+      // Filtros de calidad y antirepetición
       const qNorm = NORM(question);
       const banned = new Set(avoidQs.map(NORM));
-      const isYesNo = /^(quieres|deseas|te gustaría|prefieres|puedo|hacemos|lo hacemos|queres)\b/i.test(question);
-      const tooShort = qNorm.split(/\s+/).length < 5;
-      const tooLong  = qNorm.split(/\s+/).length > 18;
-      if ((saidYes && isYesNo) || banned.has(qNorm) || tooShort || tooLong){
-        const follow = {
-          es: [
-            "¿Qué parte te haría bien practicar primero?",
-            "¿En qué situación concreta quisieras aplicarlo hoy?",
-            "¿En qué momento del día encaja mejor para ti?",
-            "¿Quién cercano podría acompañarte en este paso?"
-          ],
-          en: [
-            "Which part would help to practice first?",
-            "Which concrete situation shall we apply it to today?",
-            "When in your day would it fit best?",
-            "Who close to you could support this step?"
-          ],
-          pt: [
-            "Que parte ajudaria praticar primeiro?",
-            "Em que situação concreta aplicamos hoje?",
-            "Em que horário do dia se encaixa melhor?",
-            "Quem poderia apoiar você neste passo?"
-          ],
-          it: [
-            "Quale parte ti aiuterebbe a praticare per prima?",
-            "A quale situazione concreta lo applichiamo oggi?",
-            "In quale momento della giornata si adatta meglio?",
-            "Chi vicino a te potrebbe sostenerti in questo passo?"
-          ],
-          de: [
-            "Welcher Teil hilft dir zuerst zu üben?",
-            "Auf welche konkrete Situation wenden wir es heute an?",
-            "Wann im Tagesablauf passt es am besten?",
-            "Wer in deiner Nähe könnte diesen Schritt unterstützen?"
-          ],
-          ca: [
-            "Quina part t’ajudaria a practicar primer?",
-            "A quina situació concreta ho apliquem avui?",
-            "En quin moment del dia t’encaixa millor?",
-            "Qui a prop teu podria acompanyar-te en aquest pas?"
-          ],
-          fr: [
-            "Quelle partie t’aiderait à pratiquer d’abord ?",
-            "À quelle situation concrète l’appliquons-nous aujourd’hui ?",
-            "À quel moment de la journée cela te conviendrait le mieux ?",
-            "Qui, près de toi, pourrait soutenir cette étape ?"
-          ]
-        };
-        const pool = follow[lang]||follow.es;
-        question = pool[Math.floor(Math.random()*pool.length)];
+      const yesNoLike = /^\s*¿\s*(quieres|te gustaría|prefieres|puedo|hacemos|lo hacemos)/i.test(question||"");
+      const tooShort = (question||"").split(/\s+/).length < 5;
+      const tooLong  = (question||"").split(/\s+/).length > 18;
+      if (banned.has(qNorm) || tooShort || tooLong || yesNoLike){
+        question = buildTopicAlignedQuestion(lang, topic);
         if (!/\?\s*$/.test(question)) question += "?";
       }
     }
@@ -705,20 +987,19 @@ Responde SIEMPRE en ${langLabel(lang)}.
       ref = alt.ref; text = alt.text;
     }
 
-    // Guardar memoria (oferta y pendiente)
+    // Guardar memoria
     const offerKind = /respir|respira|oraci|orar|rezo/i.test(msg) ? "calma_breve"
                     : /escribe|diario|gratitud|lista/i.test(msg) ? "escritura_breve"
-                    : /paso|gesto|amor|contacta|saluda|acerc|aplica/i.test(msg) ? "gestos_amor"
+                    : /paso|gesto|amor|contacta|saluda/i.test(msg) ? "gestos_amor"
                     : null;
 
-    // Extraer micro-paso simple como pendiente
     let pending = null;
-    const mImp = msg.match(/\b(Prueba|Intenta|Dedica|Escribe|Respira|Llama|Saluda|Agradece|Camina|Ora|Pide|Celebra)\b[^.]{3,80}\./i);
+    const mImp = msg.match(/\b(Podemos|Si te ayuda, probemos|Podrías considerar|Tal vez ayuda)\b[^.]{3,100}\./i);
     if (mImp) pending = mImp[0].replace(/\s+/g," ").trim();
 
     if (offerKind) mem.last_offer_kind = offerKind;
     mem.last_user_reply = saidYes ? "yes" : saidNo ? "no" : isBye ? "bye" : "text";
-    if (pending){ mem.pending_action = pending; mem.pending_ts = Date.now(); }
+    if (pending) mem.pending_action = pending;
 
     const cleanedRef = cleanRef(ref);
     if (cleanedRef){
