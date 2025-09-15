@@ -1,5 +1,5 @@
 // index.js — Conversación servicial y profunda (multi-idioma, antirep, 100% OpenAI)
-// - /api/welcome: saludo por hora + nombre + frase alentadora + 1 pregunta ABIERTA (sin A/B, sin técnicas)
+// - /api/welcome: saludo por hora **del dispositivo** + nombre + frase alentadora + 1 pregunta ABIERTA (sin A/B, sin técnicas)
 // - /api/ask: tres modos conversacionales
 //     * explore: validar + cita + 1 pregunta focal (sin técnicas)
 //     * permiso: 1–2 acciones generales + línea espiritual + 1 pregunta de permiso (“¿Querés que te diga qué decir y cómo?”) *variada*
@@ -51,8 +51,30 @@ function langLabel(l="es"){
   const m={es:"Español",en:"English",pt:"Português",it:"Italiano",de:"Deutsch",ca:"Català",fr:"Français"};
   return m[l]||"Español";
 }
-function greetingByHour(lang="es"){
-  const h=new Date().getHours();
+
+// --- Hora local del cliente ---
+function resolveClientHour({hour=null, client_iso=null, tz=null}={}){
+  // 1) Hora explícita (0–23)
+  if (Number.isInteger(hour) && hour>=0 && hour<24) return hour;
+  // 2) ISO del cliente
+  if (client_iso){
+    const d = new Date(client_iso);
+    if (!isNaN(d.getTime())) return d.getHours();
+  }
+  // 3) Zona horaria IANA
+  if (tz){
+    try{
+      const fmt = new Intl.DateTimeFormat("en-US", { timeZone: tz, hour: "numeric", hour12: false });
+      const parts = fmt.formatToParts(new Date());
+      const h = parseInt(parts.find(p=>p.type==="hour")?.value || "0",10);
+      if (!isNaN(h)) return h;
+    }catch{}
+  }
+  // 4) Fallback: hora del servidor
+  return new Date().getHours();
+}
+function greetingByHour(lang="es", opts={}){
+  const h = resolveClientHour(opts);
   const g=(m,a,n)=>h<12?m:h<19?a:n;
   switch(lang){
     case "en": return g("Good morning","Good afternoon","Good evening");
@@ -233,25 +255,28 @@ async function completionJson({messages, temperature=0.6, max_tokens=260, timeou
 
 // ---------- Health ----------
 app.get("/", (_req,res)=> res.json({ok:true, service:"backend", ts:Date.now()}));
-app.get("/api/welcome", (_req,res)=> res.json({ok:true, hint:"POST /api/welcome { lang, name, userId, history }"}));
+app.get("/api/welcome", (_req,res)=> res.json({ok:true, hint:"POST /api/welcome { lang, name, userId, history, hour?, client_iso?, tz? }"}));
 app.post("/api/memory/sync", (_req,res)=> res.json({ok:true}));
 
-// ---------- /api/welcome (apertura real, sin A/B ni técnicas) ----------
+// ---------- /api/welcome (apertura real, sin A/B ni técnicas; hora local del cliente) ----------
 app.post("/api/welcome", async (req,res)=>{
   try{
-    const { lang="es", name="", userId="anon", history=[] } = req.body||{};
+    const { lang="es", name="", userId="anon", history=[], hour=null, client_iso=null, tz=null } = req.body||{};
     const nm = String(name||"").trim();
-    const hi = greetingByHour(lang);
+
+    const hi = greetingByHour(lang, {hour, client_iso, tz});
     const mem = await readUserMemory(userId);
     const avoidQs = Array.isArray(mem.last_questions)? mem.last_questions.slice(-10):[];
     const shortHistory = compactHistory(history,6,200);
 
     const SYSTEM_PROMPT = `
-Eres cercano, sereno y compasivo. Varía el lenguaje, evita muletillas.
+Eres cercano, sereno y compasivo. Varía el lenguaje, evita muletillas y hobbies/planes.
 
 SALIDA SOLO JSON (en ${langLabel(lang)}):
-- "message": ≤75 palabras. Incluye saludo por franja y **nombre si existe** (p.ej. "${hi}${nm?`, ${nm}`:""}"). Da **una** frase alentadora para el día y expresa **disponibilidad**. **Sin preguntas** y **sin citas bíblicas** dentro del "message".
-- "question": **UNA** pregunta **abierta** para iniciar conversación (no A/B, no técnicas, no trivialidades). Debe **terminar en "?"**. Varía la formulación y evita repetir recientes: ${avoidQs.map(q=>`"${q}"`).join(", ")||"(ninguna)"}.
+- "message": ≤75 palabras. Incluye saludo por franja y **nombre si existe** (p.ej. "${hi}${nm?`, ${nm}`:""}"). Da **una** frase alentadora del día y expresa **disponibilidad**. **Sin preguntas** y **sin citas bíblicas** dentro del "message".
+- "question": **UNA** pregunta **abierta terapéutica** para que el usuario cuente lo que trae **hoy**. Debe **terminar en "?"**. 
+  - Prohibido: opciones A/B, técnicas, temas triviales como hobbies o planes del día.
+  - Evita repetir recientes: ${avoidQs.map(q=>`"${q}"`).join(", ")||"(ninguna)"}.
 No menciones IA/modelos.
 `;
     const header =
@@ -274,10 +299,11 @@ No menciones IA/modelos.
     let question = String(data?.question||"").trim();
     if (question && !/\?\s*$/.test(question)) question += "?";
 
-    // Si la pregunta parece menú A/B, regenerar
+    // Filtros: nada de A/B ni hobbies/planes
     const looksAB = /\b(o|ou|or|oder|o bien|ou bien)\b/i.test(question||"");
-    if (!question || looksAB){
-      const SYS2 = SYSTEM_PROMPT + `\nReformula la "question" como **pregunta abierta natural**, sin “o …”, sin ofrecer técnicas.`;
+    const looksHobby = /(hobby|pasatiempo|disfrutas|planes|tardes libres|fin de semana|qué te gusta hacer)/i.test(question||"");
+    if (!question || looksAB || looksHobby){
+      const SYS2 = SYSTEM_PROMPT + `\nReformula la "question" como **pregunta abierta terapéutica** (sin A/B, sin hobbies/planes), natural y breve.`;
       const r2 = await completionJson({
         messages: [{ role:"system", content: SYS2 }, { role:"user", content: header }],
         temperature: 0.85,
@@ -370,28 +396,27 @@ app.post("/api/ask", async (req,res)=>{
     if (isBye) MODE = "bye";
     else if (detectRequestExecute(userTxt) || saidYes) MODE = "execute";
     else if (!detectVague(userTxt) && topic!=="general") MODE = "permiso";
-    // Si negó, mantenemos explore con validación
     if (saidNo && MODE!=="bye") MODE = "explore";
 
     const BAD_GENERIC_Q = /(qué te aliviaría|que te aliviar[ií]a|qué pequeño paso|qué vas a|qué harás|qué plan)/i;
 
     const SYSTEM_PROMPT = `
-Hablas con serenidad, claridad y compasión. Varía el lenguaje en cada turno.
+Hablas con serenidad, claridad y compasión. Varía el lenguaje en cada turno y evita metáforas largas.
 
 MODO ACTUAL: ${MODE}
 
 SALIDA SOLO JSON (en ${langLabel(lang)}):
 - "message": ≤75 palabras, **sin signos de pregunta**.
-  * Si MODO=explore: valida y contiene; añade una línea espiritual **sin** cita dentro del "message". **No** propongas técnicas todavía.
-  * Si MODO=permiso: ofrece **1–2 acciones generales** suaves y realistas (sin detallar técnicas), añade una línea espiritual, y prepara al usuario para recibir guía concreta.
-  * Si MODO=execute: ofrece guía **paso a paso** (guion/técnica) clara y breve (1–3 min si es práctica), con lenguaje sencillo.
+  * Si MODO=explore: valida y contiene en 1–2 frases **concretas**; añade 1 línea espiritual **sin** cita dentro del "message". **No** propongas técnicas todavía.
+  * Si MODO=permiso: ofrece **1–2 acciones generales** suaves y realistas (sin detallar técnicas), añade 1 línea espiritual, y encuadra que podés guiar cuando el usuario quiera.
+  * Si MODO=execute: guía **paso a paso** (guion/técnica) clara y breve (1–3 min si es práctica), con lenguaje sencillo.
 - "bible": texto + ref, ajustada al contexto/tema. Evita repetir: ${avoidRefs.map(r=>`"${r}"`).join(", ")||"(ninguna)"}.
 - "question": **UNA sola**.
   * explore → **pregunta focal** para entender: por área, hecho o impacto (no “qué te aliviaría”).
-  * permiso → **pregunta de permiso** (variada) del tipo: “¿Querés que te diga qué decir y cómo?”, **en tus palabras** (no literal), una sola idea.
-  * execute → **pregunta de ajuste/check-in** (p.ej., adaptar guion, medir intensidad, siguiente micro-paso).
+  * permiso → **pregunta de permiso** natural (ej.: “¿Querés que te diga qué decir y cómo?”), en tus palabras, sin A/B.
+  * execute → **pregunta de ajuste/check-in** (adaptar guion, medir intensidad, siguiente micro-paso).
   * bye → **omite** pregunta.
-  Debe terminar en "?" y **no** depender de opciones A/B repetitivas; evita preguntas genéricas: ${BAD_GENERIC_Q}.
+  Debe terminar en "?" y **no** usar opciones A/B; evita preguntas genéricas: ${BAD_GENERIC_Q}.
 - "techniques": lista de etiquetas si sugieres técnicas (ej.: ["breathing_box","grounding_54321","cold_water","walk_5min","support_checkin","time_out_24h","sleep_hygiene","hydrate","cognitive_reframe","prayer_short","writing_optional"]).
 - "q_style": etiqueta del estilo de pregunta (ej.: "explore_area","explore_event","explore_impact","permiso_guion","permiso_practica","execute_checkin","execute_adjust").
 
@@ -458,7 +483,7 @@ No menciones IA/modelos.
     // Evitar técnica "escritura" consecutiva
     const lastWasWriting = (mem.last_techniques || []).slice(-1)[0] === "writing_optional";
     const thisMentionsWriting = (techniques||[]).includes("writing_optional") || /escrib/i.test(msg);
-    if (!isBye && MODE!=="explore" && lastWasWriting && thisMentionsWriting){
+    if (!isBye && lastWasWriting && thisMentionsWriting){
       const SYS3 = SYSTEM_PROMPT + `\nEvita "escritura/diario" porque se usó recién; ofrece otra vía concreta coherente con el tema.`;
       const r3 = await completionJson({
         messages: [{role:"system",content:SYS3},{role:"user",content:header}],
