@@ -1,8 +1,9 @@
 // index.js — Conversación servicial y profunda (multi-idioma, antirep, 100% OpenAI)
-// - /api/welcome: saludo por hora **del dispositivo** + nombre + frase alentadora + 1 pregunta ABIERTA (sin A/B, sin técnicas)
+// - /api/welcome: saludo por hora **del dispositivo** + nombre + frase alentadora + 1 pregunta ABIERTA terapéutica
+//     (sin A/B, sin técnicas, sin hobbies/planes/positivismo forzado; centrada en “lo que trae hoy”)
 // - /api/ask: tres modos conversacionales
-//     * explore: validar + cita + 1 pregunta focal (sin técnicas)
-//     * permiso: 1–2 acciones generales + línea espiritual + 1 pregunta de permiso (“¿Querés que te diga qué decir y cómo?”) *variada*
+//     * explore: validar concreta + 1 línea espiritual (sin cita en "message") + 1 pregunta focal (hecho/desde-cuándo/impacto), sin técnicas
+//     * permiso: 1–2 acciones generales + 1 línea espiritual + 1 pregunta de permiso específica al tema (“¿Querés que te diga qué decir y cómo?”) *variada*
 //     * ejecutar: guía paso a paso (guion/técnica) + 1 pregunta de ajuste/check-in
 // - Anti-repetición: preguntas, estilos de pregunta (q_style), citas bíblicas y técnicas (evitar “escritura” consecutiva)
 // - Memoria en /data (DATA_DIR configurable)
@@ -196,6 +197,34 @@ function detectRequestExecute(s=""){
   return /\bdime qu[eé] hacer\b|\bdecime qu[eé] hacer\b|\bquiero pasos\b|\bquiero que me digas\b|\bayudame a\b|\bayúdame a\b|\bquiero que me gu[ií]es\b|\bprobar[eé] la respiraci[oó]n\b|\bquiero hablar con\b|\bc[oó]mo hablar con\b|\barmar un guion\b|\bgu[ií]ame\b/i.test(x);
 }
 
+// ---- Filtros adicionales para la PREGUNTA de bienvenida (multi-idioma) ----
+function isBadWelcomeQuestion(q=""){
+  const x=NORM(q);
+  if (!x) return true;
+  // Menú A/B
+  if (/\b(o|ou|or|oder|o bien|ou bien)\b/.test(x)) return true;
+  // Hobbies / planes / tiempo libre (ES, EN, PT, IT, DE, CA, FR)
+  const hobbyOrPlans = [
+    "hobby","hobbies","pasatiempo","pasatiempos","aficion","aficiones","aficions",
+    "planes","planos","pläne","plans","weekend","fin de semana","wochenende",
+    "tiempo libre","temps libre","tempo livre","freizeit",
+    "qué te gusta hacer","que te gusta hacer","what do you like to do",
+    "cosa ti piace fare","was machst du gern","què t'agrada fer","ce que tu aimes faire",
+    "disfrutas","enjoy","curtir","loisirs","passe-temps","passatempi"
+  ].some(p=>x.includes(p));
+  if (hobbyOrPlans) return true;
+  // Positivismo forzado / plenitud
+  const forcedPos = [
+    "pleno","plenitud","plena","alegria","alegrías","alegrias","felicidad",
+    "joy","joys","joyful","happy today","gioia","felice","freude","glücklich",
+    "joie","heureux","feliç","alegria avui"
+  ].some(p=>x.includes(p));
+  if (forcedPos) return true;
+  // Small talk trivial
+  if (/\b(c[oó]mo est[aá]s|how are you|como vai|come stai|wie geht|comment [çc]a va)\b/.test(x)) return true;
+  return false;
+}
+
 // ---------- OpenAI formats ----------
 const FORMAT_WELCOME = {
   type:"json_schema",
@@ -258,7 +287,7 @@ app.get("/", (_req,res)=> res.json({ok:true, service:"backend", ts:Date.now()}))
 app.get("/api/welcome", (_req,res)=> res.json({ok:true, hint:"POST /api/welcome { lang, name, userId, history, hour?, client_iso?, tz? }"}));
 app.post("/api/memory/sync", (_req,res)=> res.json({ok:true}));
 
-// ---------- /api/welcome (apertura real, sin A/B ni técnicas; hora local del cliente) ----------
+// ---------- /api/welcome (apertura real, hora local del cliente, pregunta centrada en “lo que trae hoy”) ----------
 app.post("/api/welcome", async (req,res)=>{
   try{
     const { lang="es", name="", userId="anon", history=[], hour=null, client_iso=null, tz=null } = req.body||{};
@@ -270,12 +299,12 @@ app.post("/api/welcome", async (req,res)=>{
     const shortHistory = compactHistory(history,6,200);
 
     const SYSTEM_PROMPT = `
-Eres cercano, sereno y compasivo. Varía el lenguaje, evita muletillas y hobbies/planes.
+Eres cercano, sereno y compasivo. Varía el lenguaje, evita muletillas, hobbies/planes y positivismo forzado.
 
 SALIDA SOLO JSON (en ${langLabel(lang)}):
 - "message": ≤75 palabras. Incluye saludo por franja y **nombre si existe** (p.ej. "${hi}${nm?`, ${nm}`:""}"). Da **una** frase alentadora del día y expresa **disponibilidad**. **Sin preguntas** y **sin citas bíblicas** dentro del "message".
-- "question": **UNA** pregunta **abierta terapéutica** para que el usuario cuente lo que trae **hoy**. Debe **terminar en "?"**. 
-  - Prohibido: opciones A/B, técnicas, temas triviales como hobbies o planes del día.
+- "question": **UNA** pregunta **abierta terapéutica** para que el usuario cuente **lo que trae hoy** (tema actual, qué pasó, desde cuándo o cómo le afecta). Debe **terminar en "?"**. 
+  - Prohibido: opciones A/B, técnicas, hobbies/planes/tiempo libre, y fórmulas de plenitud/alegrías.
   - Evita repetir recientes: ${avoidQs.map(q=>`"${q}"`).join(", ")||"(ninguna)"}.
 No menciones IA/modelos.
 `;
@@ -285,36 +314,45 @@ No menciones IA/modelos.
       `Saludo_sugerido: ${hi}${nm?`, ${nm}`:""}\n`+
       (shortHistory.length?`Historial: ${shortHistory.join(" | ")}`:"Historial: (sin antecedentes)")+"\n";
 
-    const r = await completionJson({
+    let r = await completionJson({
       messages: [{ role:"system", content: SYSTEM_PROMPT }, { role:"user", content: header }],
       temperature: 0.8,
       max_tokens: 260,
       response_format: FORMAT_WELCOME
     });
 
-    const content = r?.choices?.[0]?.message?.content || "{}";
-    let data={}; try{ data=JSON.parse(content);}catch{ data={}; }
+    const parseWelcome = (raw) => {
+      const content = raw?.choices?.[0]?.message?.content || "{}";
+      let data={}; try{ data=JSON.parse(content);}catch{ data={}; }
+      let msg = limitWords(stripQuestionsFromMessage(removeBibleLike(String(data?.message||""))), 75);
+      let question = String(data?.question||"").trim();
+      if (question && !/\?\s*$/.test(question)) question += "?";
+      return {msg, question};
+    };
 
-    let msg = limitWords(stripQuestionsFromMessage(removeBibleLike(String(data?.message||""))), 75);
-    let question = String(data?.question||"").trim();
-    if (question && !/\?\s*$/.test(question)) question += "?";
+    let { msg, question } = parseWelcome(r);
 
-    // Filtros: nada de A/B ni hobbies/planes
-    const looksAB = /\b(o|ou|or|oder|o bien|ou bien)\b/i.test(question||"");
-    const looksHobby = /(hobby|pasatiempo|disfrutas|planes|tardes libres|fin de semana|qué te gusta hacer)/i.test(question||"");
-    if (!question || looksAB || looksHobby){
-      const SYS2 = SYSTEM_PROMPT + `\nReformula la "question" como **pregunta abierta terapéutica** (sin A/B, sin hobbies/planes), natural y breve.`;
+    // Filtros: evitar A/B, hobbies, planes, positivismo forzado, small talk trivial
+    if (!question || isBadWelcomeQuestion(question)){
+      const SYS2 = SYSTEM_PROMPT + `\nReformula la "question" como **pregunta abierta terapéutica** centrada en lo que trae HOY (hecho/desde-cuándo/impacto), sin A/B, sin hobbies/planes, sin “pleno/alegrías”, sin small talk.`;
       const r2 = await completionJson({
         messages: [{ role:"system", content: SYS2 }, { role:"user", content: header }],
         temperature: 0.85,
         max_tokens: 220,
         response_format: FORMAT_WELCOME
       });
-      const c2 = r2?.choices?.[0]?.message?.content || "{}";
-      try{ data=JSON.parse(c2);}catch{}
-      msg = limitWords(stripQuestionsFromMessage(removeBibleLike(String(data?.message||msg||""))), 75);
-      question = String(data?.question||question||"").trim();
-      if (question && !/\?\s*$/.test(question)) question += "?";
+      ({ msg, question } = parseWelcome(r2));
+      if (!question || isBadWelcomeQuestion(question)){
+        // Fallback seguro
+        question = (lang==="en"
+          ? "What happened recently that you’d like to talk about?"
+          : lang==="pt" ? "O que aconteceu recentemente que você gostaria de conversar?"
+          : lang==="it" ? "Che cosa è successo recentemente di cui vorresti parlare?"
+          : lang==="de" ? "Was ist kürzlich passiert, worüber du sprechen möchtest?"
+          : lang==="ca" ? "Què ha passat recentment que vulguis compartir?"
+          : lang==="fr" ? "Qu’est-il arrivé récemment dont tu aimerais parler ?"
+          : "¿Qué ocurrió recientemente que te gustaría conversar?") + "";
+      }
     }
 
     // Persistir pregunta
@@ -328,7 +366,7 @@ No menciones IA/modelos.
     res.status(200).json({
       message: msg || `${hi}${nm?`, ${nm}`:""}. Estoy aquí para escucharte con calma.`,
       bible: { text:"", ref:"" },
-      question: question || (lang==="en"?"What would you like to share today?":"¿Qué te gustaría contarme hoy?")
+      question: question
     });
   }catch(e){
     console.error("WELCOME ERROR:", e);
@@ -336,7 +374,7 @@ No menciones IA/modelos.
     res.status(200).json({
       message: `${hi}. Estoy aquí para escucharte con calma.`,
       bible:{ text:"", ref:"" },
-      question: "¿Qué te gustaría contarme hoy?"
+      question: "¿Qué ocurrió recientemente que te gustaría conversar?"
     });
   }
 });
@@ -400,20 +438,33 @@ app.post("/api/ask", async (req,res)=>{
 
     const BAD_GENERIC_Q = /(qué te aliviaría|que te aliviar[ií]a|qué pequeño paso|qué vas a|qué harás|qué plan)/i;
 
+    // Pista de tema para preguntas de permiso (multi-idioma)
+    const TOPIC_HINT = {
+      relationship: { es:"tu pareja", en:"your partner", pt:"sua parceria", it:"il tuo partner", de:"deinem Partner", ca:"la teva parella", fr:"ton/ta partenaire" },
+      family_conflict: { es:"tu familia", en:"your family", pt:"sua família", it:"la tua famiglia", de:"deiner Familie", ca:"la teva família", fr:"ta famille" },
+      mood: { es:"tus emociones", en:"your emotions", pt:"suas emoções", it:"le tue emozioni", de:"deine Gefühle", ca:"les teves emocions", fr:"tes émotions" },
+      grief: { es:"tu duelo", en:"your grief", pt:"seu luto", it:"il tuo lutto", de:"deine Trauer", ca:"el teu dol", fr:"ton deuil" },
+      separation: { es:"esta separación", en:"this separation", pt:"esta separação", it:"questa separazione", de:"diese Trennung", ca:"aquesta separació", fr:"cette séparation" },
+      health: { es:"tu salud", en:"your health", pt:"sua saúde", it:"la tua salute", de:"deine Gesundheit", ca:"la teva salut", fr:"ta santé" },
+      work_finance: { es:"tu trabajo o finanzas", en:"your work or finances", pt:"seu trabalho ou finanças", it:"il tuo lavoro o finanze", de:"deine Arbeit oder Finanzen", ca:"la teva feina o finances", fr:"ton travail ou tes finances" },
+      addiction: { es:"tu proceso de recuperación", en:"your recovery process", pt:"seu processo de recuperação", it:"il tuo percorso di recupero", de:"deinen Genesungsweg", ca:"el teu procés de recuperació", fr:"ton chemin de rétablissement" },
+      faith: { es:"tu fe", en:"your faith", pt:"sua fé", it:"la tua fede", de:"deinen Glauben", ca:"la teva fe", fr:"ta foi" }
+    }[topic]?.[lang] || null;
+
     const SYSTEM_PROMPT = `
-Hablas con serenidad, claridad y compasión. Varía el lenguaje en cada turno y evita metáforas largas.
+Hablas con serenidad, claridad y compasión. Evita metáforas largas; sé concreto.
 
 MODO ACTUAL: ${MODE}
 
 SALIDA SOLO JSON (en ${langLabel(lang)}):
 - "message": ≤75 palabras, **sin signos de pregunta**.
-  * Si MODO=explore: valida y contiene en 1–2 frases **concretas**; añade 1 línea espiritual **sin** cita dentro del "message". **No** propongas técnicas todavía.
-  * Si MODO=permiso: ofrece **1–2 acciones generales** suaves y realistas (sin detallar técnicas), añade 1 línea espiritual, y encuadra que podés guiar cuando el usuario quiera.
+  * Si MODO=explore: 1–2 frases de validación **concreta** (no poética), + 1 línea espiritual **sin** cita dentro del "message". **No** propongas técnicas todavía.
+  * Si MODO=permiso: ofrece **1–2 acciones generales** suaves y realistas (sin detallar técnicas), + 1 línea espiritual, y encuadra que podés guiar cuando el usuario quiera.
   * Si MODO=execute: guía **paso a paso** (guion/técnica) clara y breve (1–3 min si es práctica), con lenguaje sencillo.
 - "bible": texto + ref, ajustada al contexto/tema. Evita repetir: ${avoidRefs.map(r=>`"${r}"`).join(", ")||"(ninguna)"}.
 - "question": **UNA sola**.
-  * explore → **pregunta focal** para entender: por área, hecho o impacto (no “qué te aliviaría”).
-  * permiso → **pregunta de permiso** natural (ej.: “¿Querés que te diga qué decir y cómo?”), en tus palabras, sin A/B.
+  * explore → **pregunta focal** para entender: qué ocurrió, desde cuándo, y/o dónde impacta (pareja/familia/trabajo/salud/fe); evita “qué te aliviaría”.
+  * permiso → **pregunta de permiso** natural (ej.: “¿Querés que te diga qué decir y cómo?”), **específica al tema**${TOPIC_HINT?` (menciona: "${TOPIC_HINT}")`:""}; sin A/B.
   * execute → **pregunta de ajuste/check-in** (adaptar guion, medir intensidad, siguiente micro-paso).
   * bye → **omite** pregunta.
   Debe terminar en "?" y **no** usar opciones A/B; evita preguntas genéricas: ${BAD_GENERIC_Q}.
@@ -468,7 +519,7 @@ No menciones IA/modelos.
       const isGeneric = BAD_GENERIC_Q.test(question||"");
       const looksAB = /\b(o|ou|or|oder|o bien|ou bien)\b/i.test(question||"");
       if (!question || isGeneric || looksAB){
-        const SYS2 = SYSTEM_PROMPT + `\nAjusta la "question": una sola, natural, sin A/B, no genérica.`;
+        const SYS2 = SYSTEM_PROMPT + `\nAjusta la "question": una sola, natural, específica al tema, sin A/B, no genérica.`;
         const r2 = await completionJson({
           messages: [{role:"system",content:SYS2},{role:"user",content:header}],
           temperature:0.65,
