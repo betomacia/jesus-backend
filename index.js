@@ -4,7 +4,7 @@
 //   * explore: validación concreta + 1 micro-acción inmediata + toque espiritual (sin cita en "message") + 1 pregunta focal
 //   * permiso: 1–2 rumbos claros + toque espiritual + 1 pregunta de permiso específica
 //   * ejecutar: guion/plan paso a paso (p.ej., conversación con la pareja) + 1 pregunta de ajuste
-// - Anti-repetición: preguntas, estilos de pregunta (q_style), técnicas (cooldown respiración/escritura) y **citas bíblicas** (bloquea Mateo/Matt 11:28 en todos los idiomas)
+// - Anti-repetición: preguntas, estilos de pregunta (q_style), técnicas (cooldown respiración/escritura) y **citas bíblicas** (bloquea Mateo/Matt 11:28)
 // - Memoria en /data (DATA_DIR configurable)
 // - HeyGen y CORS abiertos
 //
@@ -124,7 +124,6 @@ function sanitizeSingleQuestion(q="", lang="es", recency="generic"){
   // Bloquear A/B
   const ab = /\b(o|ou|or|oder|o bien|ou bien)\b/i;
   if (ab.test(s)){
-    // corta antes del conector
     s = s.split(ab)[0].trim();
     if (!/\?\s*$/.test(s)) s += "?";
   }
@@ -136,8 +135,8 @@ function sanitizeSingleQuestion(q="", lang="es", recency="generic"){
     if (!/\?\s*$/.test(s)) s += "?";
   }
 
-  // Evitar preguntas genéricas repetitivas tipo “¿Qué te aliviaría…?”
-  const badGeneric = /(qué te aliviar[ií]a|que te aliviar[ií]a|qué pequeño paso|qué plan|what would help|which plan|quel plan|welcher plan)/i;
+  // Evitar preguntas genéricas repetitivas
+  const badGeneric = /(qué te aliviar[ií]a|que te aliviar[ií]a|qué pequeño paso|qué vas a|qué harás|qué plan|what would help|which plan|quel plan|welcher plan)/i;
   if (badGeneric.test(s)){
     s = (lang==="en"
       ? "What happened today that you want to talk about?"
@@ -299,7 +298,7 @@ function isRefMat11_28(ref=""){
 }
 const BANNED_REFS = ["Mateo 11:28","Mt 11:28","Mat 11:28","Matthew 11:28","Matteo 11:28","Matthäus 11:28","Matthieu 11:28","Mateu 11:28","Mateus 11:28"];
 
-// ---------- OpenAI formats (FIX del bug: ref.type = "string") ----------
+// ---------- OpenAI formats ----------
 const FORMAT_WELCOME = {
   type:"json_schema",
   json_schema:{
@@ -404,7 +403,6 @@ No menciones IA/modelos.
     let question = sanitizeSingleQuestion(questionRaw, lang, "today"); // bienvenida siempre en “hoy”
 
     if (!question || isBadWelcomeQuestion(question)){
-      // Fallback seguro
       question = (lang==="en"
         ? "What happened today that you’d like to talk about?"
         : lang==="pt" ? "O que aconteceu hoje que você gostaria de conversar?"
@@ -496,6 +494,7 @@ app.post("/api/ask", async (req,res)=>{
     else if (!detectVague(userTxt) && topic!=="general") MODE = "permiso";
     if (saidNo && MODE!=="bye") MODE = "explore";
 
+    // Declaración única (FIX) — guardamos preguntas genéricas a evitar
     const BAD_GENERIC_Q = /(qué te aliviaría|que te aliviar[ií]a|qué pequeño paso|qué vas a|qué harás|qué plan)/i;
 
     const TOPIC_HINT = {
@@ -580,7 +579,6 @@ No menciones IA/modelos.
     let question = isBye ? "" : sanitizeSingleQuestion(questionRaw, lang, recency);
 
     // 3) Guardas de calidad para pregunta
-    const BAD_GENERIC_Q = /(qué te aliviaría|que te aliviar[ií]a|qué pequeño paso|qué vas a|qué harás|qué plan)/i;
     if (!isBye && (!question || BAD_GENERIC_Q.test(question))){
       const SYS2 = SYSTEM_PROMPT + `\nAjusta la "question": una sola, natural, específica al tema, sin A/B ni dobles, temporalmente congruente con RECENCY=${recency}.`;
       const r2 = await completionJson({
