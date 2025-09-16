@@ -1,8 +1,10 @@
-// index.js — Conversación servicial, profunda y práctica (multi-idioma, antirep, ámbito cristiano/autoayuda)
-// - /api/welcome: saludo por hora del cliente + nombre + 1 pregunta **simple** de arranque
-// - /api/ask: modos explore → permiso → ejecutar; preguntas **simples** (evento/tiempo/lugar), micro-acciones variadas
-//   * Anti-repetición técnicas (respiración/escritura y ahora caminar_10min)
-//   * Redirección fuera de ámbito (deportes, espectáculos, política partidaria, resultados, recetas, ciencia, mates, geografía/historia no cristianas)
+// index.js — Conversación servicial, profunda y práctica (multi-idioma, antirep, 100% OpenAI)
+// - /api/welcome: saludo por hora **del dispositivo** + nombre + frase alentadora + 1 sola pregunta abierta (sin A/B)
+// - /api/ask: modos explore → permiso → ejecutar con AUTOAYUDA psicológica real (no “solo respiración”)
+//   * explore: validación concreta + 1 micro-acción inmediata + toque espiritual (sin cita en "message") + 1 pregunta focal
+//   * permiso: 1–2 rumbos claros + toque espiritual + 1 pregunta de permiso específica
+//   * ejecutar: guion/plan paso a paso (p.ej., conversación con la pareja) + 1 pregunta de ajuste
+// - Anti-repetición: preguntas, estilos de pregunta (q_style), técnicas (cooldown respiración/escritura) y **citas bíblicas** (bloquea Mateo/Matt 11:28)
 // - Memoria en /data (DATA_DIR configurable)
 // - HeyGen y CORS abiertos
 //
@@ -23,172 +25,224 @@ app.use(bodyParser.json());
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 // ---------- Utils ----------
-const NORM = (s="") => String(s).toLowerCase().replace(/\s+/g," ").trim();
+const NORM = (s = "") => String(s).toLowerCase().replace(/\s+/g, " ").trim();
 
-function cleanRef(ref=""){ return String(ref).replace(/\s*\([^)]*\)\s*/g," ").replace(/\s+/g," ").trim(); }
-function stripQuestionsFromMessage(s=""){
-  const noTrailingQ = String(s).split(/\n+/).map(l=>l.trim()).filter(l=>!/\?\s*$/.test(l)).join("\n").trim();
-  return noTrailingQ.replace(/[¿?]+/g,"").trim();
+function cleanRef(ref = "") {
+  return String(ref).replace(/\s*\([^)]*\)\s*/g, " ").replace(/\s+/g, " ").trim();
 }
-function limitWords(s="", max=75){
+function stripQuestionsFromMessage(s = "") {
+  const noTrailingQ = String(s)
+    .split(/\n+/)
+    .map((l) => l.trim())
+    .filter((l) => !/\?\s*$/.test(l))
+    .join("\n")
+    .trim();
+  return noTrailingQ.replace(/[¿?]+/g, "").trim();
+}
+function limitWords(s = "", max = 75) {
   const w = String(s).trim().split(/\s+/);
-  return w.length<=max ? String(s).trim() : w.slice(0,max).join(" ").trim();
+  return w.length <= max ? String(s).trim() : w.slice(0, max).join(" ").trim();
 }
-function removeBibleLike(text=""){
-  let s=String(text||"");
-  s=s.replace(/^[\s]*[—-]\s*.*?\([^)]+?\d+\s*:\s*\d+\)[\s]*$/gim,"").trim();
-  s=s.replace(/\(([^)]+?\d+\s*:\s*\d+)\)/g,()=> "");
-  s=s.replace(/\s*[—-]\s*[^()]*\(\s*[^)]+?\d+\s*:\s*\d+\s*\)\s*$/g,"").trim();
-  return s.replace(/[ \t]+\n/g,"\n").replace(/\n{3,}/g,"\n\n").trim();
+function removeBibleLike(text = "") {
+  let s = String(text || "");
+  s = s.replace(/^[\s]*[—-]\s*.*?\([^)]+?\d+\s*:\s*\d+\)[\s]*$/gim, "").trim();
+  s = s.replace(/\(([^)]+?\d+\s*:\s*\d+)\)/g, () => "");
+  s = s.replace(/\s*[—-]\s*[^()]*\(\s*[^)]+?\d+\s*:\s*\d+\s*\)\s*$/g, "").trim();
+  return s.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
 }
-function compactHistory(history=[], keep=8, maxLen=260){
-  const arr = Array.isArray(history)?history:[];
-  return arr.slice(-keep).map(x=>String(x).slice(0,maxLen));
+function compactHistory(history = [], keep = 8, maxLen = 260) {
+  const arr = Array.isArray(history) ? history : [];
+  return arr.slice(-keep).map((x) => String(x).slice(0, maxLen));
 }
-function langLabel(l="es"){
-  const m={es:"Español",en:"English",pt:"Português",it:"Italiano",de:"Deutsch",ca:"Català",fr:"Français"};
-  return m[l]||"Español";
+function langLabel(l = "es") {
+  const m = {
+    es: "Español",
+    en: "English",
+    pt: "Português",
+    it: "Italiano",
+    de: "Deutsch",
+    ca: "Català",
+    fr: "Français",
+  };
+  return m[l] || "Español";
 }
 
 // --- Hora local del cliente ---
-function resolveClientHour({hour=null, client_iso=null, tz=null}={}){
-  if (Number.isInteger(hour) && hour>=0 && hour<24) return hour;
-  if (client_iso){
+function resolveClientHour({ hour = null, client_iso = null, tz = null } = {}) {
+  if (Number.isInteger(hour) && hour >= 0 && hour < 24) return hour;
+  if (client_iso) {
     const d = new Date(client_iso);
     if (!isNaN(d.getTime())) return d.getHours();
   }
-  if (tz){
-    try{
-      const fmt = new Intl.DateTimeFormat("en-US", { timeZone: tz, hour: "numeric", hour12: false });
+  if (tz) {
+    try {
+      const fmt = new Intl.DateTimeFormat("en-US", {
+        timeZone: tz,
+        hour: "numeric",
+        hour12: false,
+      });
       const parts = fmt.formatToParts(new Date());
-      const h = parseInt(parts.find(p=>p.type==="hour")?.value || "0",10);
+      const h = parseInt(parts.find((p) => p.type === "hour")?.value || "0", 10);
       if (!isNaN(h)) return h;
-    }catch{}
+    } catch {}
   }
   return new Date().getHours();
 }
-function greetingByHour(lang="es", opts={}){
+function greetingByHour(lang = "es", opts = {}) {
   const h = resolveClientHour(opts);
-  const g=(m,a,n)=>h<12?m:h<19?a:n;
-  switch(lang){
-    case "en": return g("Good morning","Good afternoon","Good evening");
-    case "pt": return g("Bom dia","Boa tarde","Boa noite");
-    case "it": return g("Buongiorno","Buon pomeriggio","Buonasera");
-    case "de": return g("Guten Morgen","Guten Tag","Guten Abend");
-    case "ca": return g("Bon dia","Bona tarda","Bona nit");
-    case "fr": return g("Bonjour","Bon après-midi","Bonsoir");
-    default:   return g("Buenos días","Buenas tardes","Buenas noches");
+  const g = (m, a, n) => (h < 12 ? m : h < 19 ? a : n);
+  switch (lang) {
+    case "en":
+      return g("Good morning", "Good afternoon", "Good evening");
+    case "pt":
+      return g("Bom dia", "Boa tarde", "Boa noite");
+    case "it":
+      return g("Buongiorno", "Buon pomeriggio", "Buonasera");
+    case "de":
+      return g("Guten Morgen", "Guten Tag", "Guten Abend");
+    case "ca":
+      return g("Bon dia", "Bona tarda", "Bona nit");
+    case "fr":
+      return g("Bonjour", "Bon après-midi", "Bonsoir");
+    default:
+      return g("Buenos días", "Buenas tardes", "Buenas noches");
   }
 }
 
-// ---------- Detección de RECENCIA ----------
-function detectRecency(s=""){
-  const x=NORM(s);
-  const today = /\b(hoy|reci[eé]n|ahora|hace un rato|esta (mañana|tarde|noche))\b/.test(x)
-             || /\b(today|just now|right now|earlier today|this (morning|afternoon|evening))\b/.test(x)
-             || /\b(hoje|agora|agorinha|mais cedo hoje|esta (manhã|tarde|noite))\b/.test(x)
-             || /\b(oggi|adesso|poco fa|questa (mattina|pomeriggio|sera))\b/.test(x)
-             || /\b(heute|gerade eben|soeben|heute (Morgen|Nachmittag|Abend))\b/.test(x)
-             || /\b(avui|ara|fa una estona|aquest (matí|tarda|vespre))\b/.test(x)
-             || /\b(aujourd'hui|à l'instant|tout à l'heure|ce (matin|après-midi|soir))\b/.test(x);
+// ---------- Detección de RECENCIA (multi-idioma) ----------
+function detectRecency(s = "") {
+  const x = NORM(s);
+  const today =
+    /\b(hoy|reci[eé]n|ahora|hace un rato|esta (mañana|tarde|noche))\b/.test(x) ||
+    /\b(today|just now|right now|earlier today|this (morning|afternoon|evening))\b/.test(x) ||
+    /\b(hoje|agora|agorinha|mais cedo hoje|esta (manhã|tarde|noite))\b/.test(x) ||
+    /\b(oggi|adesso|poco fa|questa (mattina|pomeriggio|sera))\b/.test(x) ||
+    /\b(heute|gerade eben|soeben|heute (Morgen|Nachmittag|Abend))\b/.test(x) ||
+    /\b(avui|ara|fa una estona|aquest (matí|tarda|vespre))\b/.test(x) ||
+    /\b(aujourd'hui|à l'instant|tout à l'heure|ce (matin|après-midi|soir))\b/.test(x);
   if (today) return "today";
-  const yesterday = /\b(ayer)\b/.test(x) || /\b(yesterday)\b/.test(x) || /\b(ontem)\b/.test(x) || /\b(ieri)\b/.test(x) || /\b(gestern)\b/.test(x) || /\b(ahir)\b/.test(x) || /\b(hier)\b/.test(x);
+  const yesterday =
+    /\b(ayer)\b/.test(x) ||
+    /\b(yesterday)\b/.test(x) ||
+    /\b(ontem)\b/.test(x) ||
+    /\b(ieri)\b/.test(x) ||
+    /\b(gestern)\b/.test(x) ||
+    /\b(ahir)\b/.test(x) ||
+    /\b(hier)\b/.test(x);
   if (yesterday) return "yesterday";
-  const hours = /\bhace\s+\d+\s*(h|horas?)\b/.test(x) || /\b\d+\s*(hours?|hrs?)\s*ago\b/.test(x) || /\bh[aá]\s*\d+\s*(h|horas?)\b/.test(x);
+  const hours =
+    /\bhace\s+\d+\s*(h|horas?)\b/.test(x) ||
+    /\b\d+\s*(hours?|hrs?)\s*ago\b/.test(x) ||
+    /\bh[aá]\s*\d+\s*(h|horas?)\b/.test(x);
   if (hours) return "hours";
   return "generic";
 }
-function fixTemporalQuestion(q="", recency="generic", lang="es"){
+function fixTemporalQuestion(q = "", recency = "generic", lang = "es") {
   if (!q) return q;
-  const weeksLike = /(últimas?|ders? derni[eè]res?|letzte[nr]?|ultime|darreres?)\s+(semanas|weeks|wochen|semaines|setmanes)/i;
-  const daysLike  = /(últimos?|ders?|derni[eè]rs?|letzten?|ultimi|darrers?)\s+(d[ií]as|days|tage|jours|dias|dies)/i;
-  if (recency==="today" || recency==="hours" || recency==="yesterday"){
-    if (weeksLike.test(q) || daysLike.test(q)){
-      const repl = (lang==="en"?"since today":"desde hoy");
+  const weeksLike =
+    /(últimas?|ders? derni[eè]res?|letzte[nr]?|ultime|darreres?)\s+(semanas|weeks|wochen|semaines|setmanes)/i;
+  const daysLike =
+    /(últimos?|ders?|derni[eè]rs?|letzten?|ultimi|darrers?)\s+(d[ií]as|days|tage|jours|dias|dies)/i;
+  if (recency === "today" || recency === "hours" || recency === "yesterday") {
+    if (weeksLike.test(q) || daysLike.test(q)) {
+      const repl = lang === "en" ? "since today" : "desde hoy";
       return q.replace(weeksLike, repl).replace(daysLike, repl);
     }
   }
   return q;
 }
 
-// ---------- Post-filtro de UNA sola pregunta (evita A/B y dobles) ----------
-function sanitizeSingleQuestion(q="", lang="es", recency="generic"){
+// ---------- Post-filtro para UNA sola pregunta (sin A/B, sin dobles) ----------
+function sanitizeSingleQuestion(q = "", lang = "es", recency = "generic") {
   if (!q) return q;
   let s = String(q).trim();
-
-  // Mantener la primera pregunta
-  const idx = s.indexOf("?");
-  s = idx>=0 ? s.slice(0,idx+1) : s + "?";
+  // Mantener solo la primera oración que termina en "?"
+  const firstQ = s.split("?")[0] ?? s;
+  s = firstQ + "?";
 
   // Bloquear A/B
   const ab = /\b(o|ou|or|oder|o bien|ou bien)\b/i;
-  if (ab.test(s)){
+  if (ab.test(s)) {
     s = s.split(ab)[0].trim();
     if (!/\?\s*$/.test(s)) s += "?";
   }
 
-  // Cortar “… y cómo …”
+  // Cortar “y cómo/and how/et comment/und wie/e come/i com”
   const joiners = /(y|and|et|und|e|i)\s+(c[óo]mo|how|comment|wie|come|com)\b/i;
-  if (joiners.test(s)){
+  if (joiners.test(s)) {
     s = s.split(joiners)[0].trim();
     if (!/\?\s*$/.test(s)) s += "?";
   }
 
-  // Evitar preguntas genéricas/rebuscadas
-  const badGeneric = /(qué te aliviar[ií]a|que te aliviar[ií]a|qué pequeño paso|qué vas a|qué harás|qué plan|divide el problema|qué parte espec[ií]fica|qué parte de la situaci[oó]n)/i;
-  if (badGeneric.test(s)){
-    s = (lang==="en"
-      ? "What happened today that you want to talk about?"
-      : lang==="pt" ? "O que aconteceu hoje que você quer conversar?"
-      : lang==="it" ? "Che cosa è successo oggi di cui vuoi parlare?"
-      : lang==="de" ? "Was ist heute passiert, worüber du sprechen möchtest?"
-      : lang==="ca" ? "Què ha passat avui del que vols parlar?"
-      : lang==="fr" ? "Qu’est-il arrivé aujourd’hui dont tu veux parler ?"
-      : "¿Qué pasó hoy de lo que te gustaría hablar?");
+  // Evitar preguntas genéricas repetitivas
+  const badGeneric =
+    /(qué te aliviar[ií]a|que te aliviar[ií]a|qué pequeño paso|qué vas a|qué harás|qué plan|what would help|which plan|quel plan|welcher plan)/i;
+  if (badGeneric.test(s)) {
+    s =
+      lang === "en"
+        ? "What happened today that you want to talk about?"
+        : lang === "pt"
+        ? "O que aconteceu hoje que você quer conversar?"
+        : lang === "it"
+        ? "Che cosa è successo oggi di cui vuoi parlare?"
+        : lang === "de"
+        ? "Was ist heute passiert, worüber du sprechen möchtest?"
+        : lang === "ca"
+        ? "Què ha passat avui del que vols parlar?"
+        : lang === "fr"
+        ? "Qu’est-il arrivé aujourd’hui dont tu veux parler ?"
+        : "¿Qué pasó hoy de lo que te gustaría hablar?";
   }
 
-  // Ajuste recencia
+  // Ajuste de recencia
   s = fixTemporalQuestion(s, recency, lang);
   if (!/\?\s*$/.test(s)) s += "?";
   return s;
 }
 
-// ---------- Memoria FS ----------
-const DATA_DIR = process.env.DATA_DIR || path.join(__dirname,"data");
-async function ensureDataDir(){ try{ await fs.mkdir(DATA_DIR,{recursive:true}); }catch{} }
-function memPath(uid){ const safe=String(uid||"anon").replace(/[^a-z0-9_-]/gi,"_"); return path.join(DATA_DIR,`mem_${safe}.json`); }
-async function readUserMemory(userId){
+// ---------- Memoria en FS ----------
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
+async function ensureDataDir() {
+  try {
+    await fs.mkdir(DATA_DIR, { recursive: true });
+  } catch {}
+}
+function memPath(uid) {
+  const safe = String(uid || "anon").replace(/[^a-z0-9_-]/gi, "_");
+  return path.join(DATA_DIR, `mem_${safe}.json`);
+}
+async function readUserMemory(userId) {
   await ensureDataDir();
-  try{
-    const raw = await fs.readFile(memPath(userId),"utf8");
+  try {
+    const raw = await fs.readFile(memPath(userId), "utf8");
     const mem = JSON.parse(raw);
     mem.last_bible_refs = Array.isArray(mem.last_bible_refs) ? mem.last_bible_refs : [];
-    mem.last_questions  = Array.isArray(mem.last_questions)  ? mem.last_questions  : [];
+    mem.last_questions = Array.isArray(mem.last_questions) ? mem.last_questions : [];
     mem.last_techniques = Array.isArray(mem.last_techniques) ? mem.last_techniques : [];
-    mem.last_q_styles   = Array.isArray(mem.last_q_styles)   ? mem.last_q_styles   : [];
+    mem.last_q_styles = Array.isArray(mem.last_q_styles) ? mem.last_q_styles : [];
     return mem;
-  }catch{
+  } catch {
     return {
-      last_bible_refs:[],
-      last_questions:[],
-      last_techniques:[],
-      last_q_styles:[],
-      frame:null,
-      last_offer_kind:null,
-      last_user_reply:null,
-      pending_action:null,
-      last_topic:null
+      last_bible_refs: [],
+      last_questions: [],
+      last_techniques: [],
+      last_q_styles: [],
+      frame: null,
+      last_offer_kind: null,
+      last_user_reply: null,
+      pending_action: null,
+      last_topic: null,
     };
   }
 }
-async function writeUserMemory(userId,mem){
+async function writeUserMemory(userId, mem) {
   await ensureDataDir();
-  await fs.writeFile(memPath(userId), JSON.stringify(mem,null,2), "utf8");
+  await fs.writeFile(memPath(userId), JSON.stringify(mem, null, 2), "utf8");
 }
 
 // ---------- Heurísticas ----------
-function guessTopic(s=""){
-  const t=(s||"").toLowerCase();
+function guessTopic(s = "") {
+  const t = (s || "").toLowerCase();
   if (/(droga|adicci|alcohol|apuestas)/.test(t)) return "addiction";
   if (/(me separ|separaci[oó]n|divorcio|ruptura)/.test(t)) return "separation";
   if (/(pareja|matrimonio|conyug|novi[oa])/i.test(t)) return "relationship";
@@ -197,11 +251,11 @@ function guessTopic(s=""){
   if (/(trabajo|despido|salario|dinero|deuda|finanzas)/.test(t)) return "work_finance";
   if (/(salud|diagn[oó]stico|enfermedad|dolor)/.test(t)) return "health";
   if (/(familia|conflicto|discusi[oó]n|suegr)/.test(t)) return "family_conflict";
-  if (/(fe|duda|dios|oraci[oó]n|culpa|pecado|perd[oó]n)/.test(t)) return "faith";
+  if (/(fe|duda|dios|oraci[oó]n|culpa)/.test(t)) return "faith";
   return "general";
 }
-function detectMainSubject(s=""){
-  const t=(s||"").toLowerCase();
+function detectMainSubject(s = "") {
+  const t = (s || "").toLowerCase();
   if (/(mi\s+espos|mi\s+marid)/.test(t)) return "partner";
   if (/(mi\s+novi[oa])/.test(t)) return "partner";
   if (/(mi\s+hij[oa])/.test(t)) return "child";
@@ -211,384 +265,477 @@ function detectMainSubject(s=""){
   if (/(mi\s+amig[oa])/.test(t)) return "friend";
   return "self";
 }
-function detectAffirmation(s=""){
-  const x=NORM(s);
-  const pats=[
+function detectAffirmation(s = "") {
+  const x = NORM(s);
+  const pats = [
     /\bsi\b|\bsí\b|\bclaro\b|\bde acuerdo\b|\bok\b|\bvale\b|\bperfecto\b/,
     /\byes\b|\byep\b|\byup\b|\bsure\b|\bok\b|\bokay\b/,
     /\bsim\b|\bclaro\b|\bok\b/,
     /\bsì\b|\bcerto\b|\bva bene\b/,
     /\bja\b|\bjawohl\b|\bok\b/,
     /\boui\b|\bd’accord\b|\bok\b/,
-    /\bsí\b|\bsi\b/
+    /\bsí\b|\bsi\b/,
   ];
-  return pats.some(r=>r.test(x));
+  return pats.some((r) => r.test(x));
 }
-function detectNegation(s=""){
-  const x=NORM(s);
-  const pats=[
+function detectNegation(s = "") {
+  const x = NORM(s);
+  const pats = [
     /\bno\b|\bmejor no\b|\bno gracias\b/,
     /\bnope\b|\bnah\b|\bno thanks\b/,
     /\bnão\b|\bnão obrigado\b|\bnão obrigada\b/,
     /\bnon\b|\bno grazie\b/,
     /\bnein\b|\bkein\b/,
-    /\bnon\b|\bpas\b/
+    /\bnon\b|\bpas\b/,
   ];
-  return pats.some(r=>r.test(x));
+  return pats.some((r) => r.test(x));
 }
-function detectByeThanks(s=""){
-  const x=NORM(s);
-  const pats=[
+function detectByeThanks(s = "") {
+  const x = NORM(s);
+  const pats = [
     /\bgracias\b|\bmuchas gracias\b|\bmil gracias\b|\bme tengo que ir\b|\bme voy\b|\bhasta luego\b|\badiós\b/,
     /\bthanks\b|\bthank you\b|\bi have to go\b|\bgotta go\b|\bbye\b|\bsee you\b/,
     /\bobrigado\b|\bobrigada\b|\bvaleu\b|\btenho que ir\b|\btchau\b|\bate logo\b/,
     /\bgrazie\b|\bdevo andare\b|\bciao\b|\ba dopo\b/,
     /\bdanke\b|\bmuss gehen\b|\btschüss\b/,
-    /\bmerci\b|\bje dois partir\b|\bau revoir\b/
+    /\bmerci\b|\bje dois partir\b|\bau revoir\b/,
   ];
-  return pats.some(r=>r.test(x));
+  return pats.some((r) => r.test(x));
 }
-function detectVague(s=""){
-  const x=NORM(s);
+function detectVague(s = "") {
+  const x = NORM(s);
   if (!x) return true;
   if (x.length < 12) return true;
-  if (/\btengo un problema\b|\bproblema\b|\bnecesito ayuda\b|\bno sé por dónde empezar\b|\bno se por donde empezar\b|\bhola\b|\bestoy mal\b/i.test(x)) return true;
+  if (
+    /\btengo un problema\b|\bproblema\b|\bnecesito ayuda\b|\bno sé por dónde empezar\b|\bno se por donde empezar\b|\bhola\b|\bestoy mal\b/i.test(
+      x
+    )
+  )
+    return true;
   return false;
 }
-function detectRequestExecute(s=""){
-  const x=NORM(s);
-  return /\bdime qu[eé] hacer\b|\bdecime qu[eé] hacer\b|\bquiero pasos\b|\bquiero que me digas\b|\bayudame a\b|\bayúdame a\b|\bquiero que me gu[ií]es\b|\bprobar[eé] la respiraci[oó]n\b|\bquiero hablar con\b|\bc[oó]mo hablar con\b|\barmar un guion\b|\bgu[ií]ame\b/i.test(x);
+function detectRequestExecute(s = "") {
+  const x = NORM(s);
+  return /\bdime qu[eé] hacer\b|\bdecime qu[eé] hacer\b|\bquiero pasos\b|\bquiero que me digas\b|\bayudame a\b|\bayúdame a\b|\bquiero que me gu[ií]es\b|\bprobar[eé] la respiraci[oó]n\b|\bquiero hablar con\b|\bc[oó]mo hablar con\b|\barmar un guion\b|\bgu[ií]ame\b/i.test(
+    x
+  );
 }
 
-// ---- Off-topic detector (deportes/espectáculos/política/recetas/ciencia/mates/geografía o historia no cristianas) ----
-function detectOffTopic(s=""){
-  const x=NORM(s);
-  const sports = /\b(f[uú]tbol|g[oó]l|liga|mundial|champions|resultado|marcador|tenis|nba|fifa|partido)\b/;
-  const showbiz= /\b(pel[ií]cula|serie|netflix|actor|actriz|famos|espect[aá]culo|premios|m[uú]sica)\b/;
-  const politics=/\b(elecci[oó]n|presidente|partido|diputado|senador|votar|voto|pol[ií]tica)\b/;
-  const recipes =/\b(receta|cocinar|ingrediente|hornear|asado|comida|restaurante)\b/;
-  const science =/\b(f[ií]sica|qu[ií]mica|biolog[ií]a|matem[aá]tica|derivada|integral|geometr[ií]a|teorema|astronom[ií]a)\b/;
-  const geoHist =/\b(geograf[ií]a|pa[ií]s|capital|historia)\b/;
-  const techRes =/\b(precio|especificaciones|specs|benchmark|ps5|iphone|android \d+|drivers?)\b/;
-  // permitir si es explícitamente cristiano
-  const christian = /(vaticano|iglesia|parroquia|convento|santo|evangelio|jes[uú]s|disc[ií]pulos|ap[oó]stoles|biblia|salmo|salmos|catecismo|misa|liturgia)/;
-  const off = (sports.test(x)||showbiz.test(x)||politics.test(x)||recipes.test(x)||science.test(x)||geoHist.test(x)||techRes.test(x)) && !christian.test(x);
-  return off;
-}
-
-// ---- Filtros PREGUNTA bienvenida ----
-function isBadWelcomeQuestion(q=""){
-  const x=NORM(q);
+// ---- Filtros PREGUNTA bienvenida (multi-idioma) ----
+function isBadWelcomeQuestion(q = "") {
+  const x = NORM(q);
   if (!x) return true;
   if (/\b(o|ou|or|oder|o bien|ou bien)\b/.test(x)) return true; // A/B
   const hobbyOrPlans = [
-    "hobby","hobbies","pasatiempo","pasatiempos","aficion","aficiones","aficions",
-    "planes","planos","pläne","plans","weekend","fin de semana","wochenende",
-    "tiempo libre","temps libre","tempo livre","freizeit",
-    "qué te gusta hacer","que te gusta hacer","what do you like to do",
-    "cosa ti piace fare","was machst du gern","què t'agrada fer","ce que tu aimes faire",
-    "disfrutas","enjoy","curtir","loisirs","passe-temps","passatempi"
-  ].some(p=>x.includes(p));
+    "hobby",
+    "hobbies",
+    "pasatiempo",
+    "pasatiempos",
+    "aficion",
+    "aficiones",
+    "aficions",
+    "planes",
+    "planos",
+    "pläne",
+    "plans",
+    "weekend",
+    "fin de semana",
+    "wochenende",
+    "tiempo libre",
+    "temps libre",
+    "tempo livre",
+    "freizeit",
+    "qué te gusta hacer",
+    "que te gusta hacer",
+    "what do you like to do",
+    "cosa ti piace fare",
+    "was machst du gern",
+    "què t'agrada fer",
+    "ce que tu aimes faire",
+    "disfrutas",
+    "enjoy",
+    "curtir",
+    "loisirs",
+    "passe-temps",
+    "passatempi",
+  ].some((p) => x.includes(p));
   if (hobbyOrPlans) return true;
   const forcedPos = [
-    "pleno","plenitud","plena","alegria","alegrías","alegrias","felicidad",
-    "joy","joys","joyful","happy today","gioia","felice","freude","glücklich",
-    "joie","heureux","feliç","alegria avui"
-  ].some(p=>x.includes(p));
+    "pleno",
+    "plenitud",
+    "plena",
+    "alegria",
+    "alegrías",
+    "alegrias",
+    "felicidad",
+    "joy",
+    "joys",
+    "joyful",
+    "happy today",
+    "gioia",
+    "felice",
+    "freude",
+    "glücklich",
+    "joie",
+    "heureux",
+    "feliç",
+    "alegria avui",
+  ].some((p) => x.includes(p));
   if (forcedPos) return true;
   if (/\b(c[oó]mo est[aá]s|how are you|como vai|come stai|wie geht|comment [çc]a va)\b/.test(x)) return true;
   return false;
 }
 
-// ---- Citas vetadas (Mateo/Matt 11:28) ----
-function isRefMat11_28(ref=""){
+// ---- Citas bíblicas vetadas (Mateo/Matthew 11:28 en todos los idiomas y alias) ----
+function isRefMat11_28(ref = "") {
   const x = NORM(ref);
   if (!x) return false;
   const pats = [
-    /mateo\s*11\s*:\s*28/, /mt\.?\s*11\s*:\s*28/, /mat\.?\s*11\s*:\s*28/, /san\s+mateo\s*11\s*:\s*28/,
-    /matthew?\s*11\s*:\s*28/, /matteo\s*11\s*:\s*28/, /matthäus\s*11\s*:\s*28/, /matthieu\s*11\s*:\s*28/,
-    /mateu\s*11\s*:\s*28/, /mateus\s*11\s*:\s*28/
+    /mateo\s*11\s*:\s*28/,
+    /mt\.?\s*11\s*:\s*28/,
+    /mat\.?\s*11\s*:\s*28/,
+    /san\s+mateo\s*11\s*:\s*28/,
+    /matthew?\s*11\s*:\s*28/,
+    /matteo\s*11\s*:\s*28/,
+    /matthäus\s*11\s*:\s*28/,
+    /matthieu\s*11\s*:\s*28/,
+    /mateu\s*11\s*:\s*28/,
+    /mateus\s*11\s*:\s*28/,
   ];
-  return pats.some(r=>r.test(x));
+  return pats.some((r) => r.test(x));
 }
-const BANNED_REFS = ["Mateo 11:28","Mt 11:28","Mat 11:28","Matthew 11:28","Matteo 11:28","Matthäus 11:28","Matthieu 11:28","Mateu 11:28","Mateus 11:28"];
+const BANNED_REFS = [
+  "Mateo 11:28",
+  "Mt 11:28",
+  "Mat 11:28",
+  "Matthew 11:28",
+  "Matteo 11:28",
+  "Matthäus 11:28",
+  "Matthieu 11:28",
+  "Mateu 11:28",
+  "Mateus 11:28",
+];
 
 // ---------- OpenAI formats ----------
 const FORMAT_WELCOME = {
-  type:"json_schema",
-  json_schema:{
-    name:"WelcomeSchema",
-    schema:{
-      type:"object",
-      properties:{
-        message:{type:"string"},
-        question:{type:"string"}
+  type: "json_schema",
+  json_schema: {
+    name: "WelcomeSchema",
+    schema: {
+      type: "object",
+      properties: {
+        message: { type: "string" },
+        question: { type: "string" },
       },
-      required:["message","question"],
-      additionalProperties:false
-    }
-  }
+      required: ["message", "question"],
+      additionalProperties: false,
+    },
+  },
 };
 const FORMAT_ASK = {
-  type:"json_schema",
-  json_schema:{
-    name:"SpiritualGuidance",
-    schema:{
-      type:"object",
-      properties:{
-        message:{type:"string"},
-        bible:{type:"object",properties:{text:{type:"string"},ref:{type:"string"}},required:["text","ref"]},
-        question:{type:"string"},
-        techniques:{type:"array", items:{type:"string"}},
-        q_style:{type:"string"}
+  type: "json_schema",
+  json_schema: {
+    name: "SpiritualGuidance",
+    schema: {
+      type: "object",
+      properties: {
+        message: { type: "string" },
+        bible: {
+          type: "object",
+          properties: { text: { type: "string" }, ref: { type: "string" } },
+          required: ["text", "ref"],
+        },
+        question: { type: "string" },
+        techniques: { type: "array", items: { type: "string" } },
+        q_style: { type: "string" },
       },
-      required:["message","bible","question","q_style"],
-      additionalProperties:false
-    }
-  }
+      required: ["message", "bible", "question", "q_style"],
+      additionalProperties: false,
+    },
+  },
 };
 const FORMAT_BIBLE_ONLY = {
-  type:"json_schema",
-  json_schema:{
-    name:"BibleOnly",
-    schema:{
-      type:"object",
-      properties:{ bible:{type:"object",properties:{text:{type:"string"},ref:{type:"string"}},required:["text","ref"]} },
-      required:["bible"],
-      additionalProperties:false
-    }
-  }
+  type: "json_schema",
+  json_schema: {
+    name: "BibleOnly",
+    schema: {
+      type: "object",
+      properties: {
+        bible: {
+          type: "object",
+          properties: { text: { type: "string" }, ref: { type: "string" } },
+          required: ["text", "ref"],
+        },
+      },
+      required: ["bible"],
+      additionalProperties: false,
+    },
+  },
 };
-async function completionJson({messages, temperature=0.6, max_tokens=260, timeoutMs=12000, response_format}){
+async function completionJson({ messages, temperature = 0.6, max_tokens = 260, timeoutMs = 12000, response_format }) {
   const call = openai.chat.completions.create({
-    model:"gpt-4o",
+    model: "gpt-4o",
     temperature,
     max_tokens,
     messages,
-    response_format: response_format || FORMAT_ASK
+    response_format: response_format || FORMAT_ASK,
   });
-  return await Promise.race([ call, new Promise((_,rej)=>setTimeout(()=>rej(new Error("TIMEOUT")), timeoutMs)) ]);
+  return await Promise.race([call, new Promise((_, rej) => setTimeout(() => rej(new Error("TIMEOUT")), timeoutMs))]);
 }
 
 // ---------- Health ----------
-app.get("/", (_req,res)=> res.json({ok:true, service:"backend", ts:Date.now()}));
-app.get("/api/welcome", (_req,res)=> res.json({ok:true, hint:"POST /api/welcome { lang, name, userId, history, hour?, client_iso?, tz? }"}));
-app.post("/api/memory/sync", (_req,res)=> res.json({ok:true}));
+app.get("/", (_req, res) => res.json({ ok: true, service: "backend", ts: Date.now() }));
+app.get("/api/welcome", (_req, res) =>
+  res.json({ ok: true, hint: "POST /api/welcome { lang, name, userId, history, hour?, client_iso?, tz? }" })
+);
+app.post("/api/memory/sync", (_req, res) => res.json({ ok: true }));
 
 // ---------- /api/welcome ----------
-app.post("/api/welcome", async (req,res)=>{
-  try{
-    const { lang="es", name="", userId="anon", history=[], hour=null, client_iso=null, tz=null } = req.body||{};
-    const nm = String(name||"").trim();
+app.post("/api/welcome", async (req, res) => {
+  try {
+    const { lang = "es", name = "", userId = "anon", history = [], hour = null, client_iso = null, tz = null } =
+      req.body || {};
+    const nm = String(name || "").trim();
 
-    const hi = greetingByHour(lang, {hour, client_iso, tz});
+    const hi = greetingByHour(lang, { hour, client_iso, tz });
     const mem = await readUserMemory(userId);
-    const avoidQs = Array.isArray(mem.last_questions)? mem.last_questions.slice(-10):[];
-    const shortHistory = compactHistory(history,6,200);
+    const avoidQs = Array.isArray(mem.last_questions) ? mem.last_questions.slice(-10) : [];
+    const shortHistory = compactHistory(history, 6, 200);
 
     const SYSTEM_PROMPT = `
-Eres cercano, sereno y compasivo. Varía el lenguaje, evita muletillas y positivismo forzado.
-
-ÁMBITO: Solo espiritualidad cristiana/pastoral, autoayuda/psicología personal y temas de vida. 
-Fuera de ámbito (deportes, espectáculos, política partidaria, resultados, recetas, ciencia/matemáticas, geografía/historia no cristianas): redirige con respeto hacia el cuidado interior/fe (sin datos ni opiniones externas).
+Eres cercano, sereno y compasivo. Varía el lenguaje, evita muletillas, hobbies/planes y positivismo forzado.
 
 SALIDA SOLO JSON (en ${langLabel(lang)}):
-- "message": ≤75 palabras. Incluye saludo por franja y **nombre si existe** (p.ej. "${hi}${nm?`, ${nm}`:""}"). Da **una** frase alentadora del día y expresa **disponibilidad**. **Sin preguntas** ni citas dentro del "message".
-- "question": **UNA** pregunta **simple y directa** para empezar (anclada en evento/tiempo/lugar). Debe **terminar en "?"**.
-  - Prohibido: opciones A/B, dobles “y…”, hobbies/planes/tiempo libre, y formulitas genéricas.
-  - Evita repetir recientes: ${avoidQs.map(q=>`"${q}"`).join(", ")||"(ninguna)"}.
+- "message": ≤75 palabras. Incluye saludo por franja y **nombre si existe** (p.ej. "${hi}${nm ? `, ${nm}` : ""}"). Da **una** frase alentadora del día y expresa **disponibilidad**. **Sin preguntas** y **sin citas bíblicas** dentro del "message".
+- "question": **UNA** pregunta **abierta terapéutica, simple y directa** para que el usuario cuente **lo que trae hoy**. Debe **terminar en "?"**.
+  - Prohibido: opciones A/B, doble pregunta con “y ...”, hobbies/planes/tiempo libre, y fórmulas de plenitud/alegrías.
+  - Evita repetir recientes: ${avoidQs.map((q) => `"${q}"`).join(", ") || "(ninguna)"}.
 No menciones IA/modelos.
 `;
     const header =
-      `Lang: ${lang}\n`+
-      `Nombre: ${nm||"(anónimo)"}\n`+
-      `Saludo_sugerido: ${hi}${nm?`, ${nm}`:""}\n`+
-      (shortHistory.length?`Historial: ${shortHistory.join(" | ")}`:"Historial: (sin antecedentes)")+"\n";
+      `Lang: ${lang}\n` +
+      `Nombre: ${nm || "(anónimo)"}\n` +
+      `Saludo_sugerido: ${hi}${nm ? `, ${nm}` : ""}\n` +
+      (shortHistory.length ? `Historial: ${shortHistory.join(" | ")}` : "Historial: (sin antecedentes)") +
+      "\n";
 
     const r = await completionJson({
-      messages: [{ role:"system", content: SYSTEM_PROMPT }, { role:"user", content: header }],
+      messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: header }],
       temperature: 0.8,
       max_tokens: 260,
-      response_format: FORMAT_WELCOME
+      response_format: FORMAT_WELCOME,
     });
 
     const content = r?.choices?.[0]?.message?.content || "{}";
-    let data={}; try{ data=JSON.parse(content);}catch{ data={}; }
-    let msg = limitWords(stripQuestionsFromMessage(removeBibleLike(String(data?.message||""))), 75);
-    let questionRaw = String(data?.question||"").trim();
+    let data = {};
+    try {
+      data = JSON.parse(content);
+    } catch {
+      data = {};
+    }
+    let msg = limitWords(stripQuestionsFromMessage(removeBibleLike(String(data?.message || ""))), 75);
+    let questionRaw = String(data?.question || "").trim();
 
-    // Pregunta simple (evento/tiempo/lugar)
-    let question = sanitizeSingleQuestion(questionRaw, lang, "today"); // bienvenida ⇒ hoy
+    // Sanitizar a **1 sola pregunta simple**
+    let question = sanitizeSingleQuestion(questionRaw, lang, "today"); // bienvenida siempre en “hoy”
 
-    if (!question || isBadWelcomeQuestion(question)){
-      question = (lang==="en"
-        ? "What happened today that you’d like to talk about?"
-        : lang==="pt" ? "O que aconteceu hoje que você gostaria de conversar?"
-        : lang==="it" ? "Che cosa è successo oggi di cui vorresti parlare?"
-        : lang==="de" ? "Was ist heute passiert, worüber du sprechen möchtest?"
-        : lang==="ca" ? "Què ha passat avui que vulguis compartir?"
-        : lang==="fr" ? "Qu’est-il arrivé aujourd’hui dont tu aimerais parler ?"
-        : "¿Qué pasó hoy de lo que te gustaría hablar?");
+    if (!question || isBadWelcomeQuestion(question)) {
+      question =
+        lang === "en"
+          ? "What happened today that you’d like to talk about?"
+          : lang === "pt"
+          ? "O que aconteceu hoje que você gostaria de conversar?"
+          : lang === "it"
+          ? "Che cosa è successo oggi di cui vorresti parlare?"
+          : lang === "de"
+          ? "Was ist heute passiert, worüber du sprechen möchtest?"
+          : lang === "ca"
+          ? "Què ha passat avui que vulguis compartir?"
+          : lang === "fr"
+          ? "Qu’est-il arrivé aujourd’hui dont tu aimerais parler ?"
+          : "¿Qué pasó hoy de lo que te gustaría hablar?";
     }
 
-    if (question){
-      mem.last_questions = Array.isArray(mem.last_questions)? mem.last_questions : [];
+    if (question) {
+      mem.last_questions = Array.isArray(mem.last_questions) ? mem.last_questions : [];
       mem.last_questions.push(question);
-      while(mem.last_questions.length>10) mem.last_questions.shift();
+      while (mem.last_questions.length > 10) mem.last_questions.shift();
       await writeUserMemory(userId, mem);
     }
 
     res.status(200).json({
-      message: msg || `${hi}${nm?`, ${nm}`:""}. Estoy aquí para escucharte con calma.`,
-      bible: { text:"", ref:"" },
-      question
+      message: msg || `${hi}${nm ? `, ${nm}` : ""}. Estoy aquí para escucharte con calma.`,
+      bible: { text: "", ref: "" },
+      question,
     });
-  }catch(e){
+  } catch (e) {
     console.error("WELCOME ERROR:", e);
     const hi = greetingByHour("es");
     const question = "¿Qué pasó hoy de lo que te gustaría hablar?";
     res.status(200).json({
       message: `${hi}. Estoy aquí para escucharte con calma.`,
-      bible:{ text:"", ref:"" },
-      question
+      bible: { text: "", ref: "" },
+      question,
     });
   }
 });
 
-// ---------- /api/ask ----------
+// ---------- /api/ask (explorar → permiso → ejecutar, con AUTOAYUDA real) ----------
 async function regenerateBibleAvoiding({ lang, persona, message, frame, bannedRefs = [], lastRef = "" }) {
   const SYS = `
 Devuelve SOLO JSON {"bible":{"text":"…","ref":"Libro 0:0"}} en ${langLabel(lang)}.
 - Ajusta la cita al tema/contexto.
-- Evita referencias recientes: ${bannedRefs.map(r=>`"${r}"`).join(", ")||"(ninguna)"} y la última: "${lastRef||"(n/a)"}".
+- Evita referencias recientes: ${bannedRefs.map((r) => `"${r}"`).join(", ") || "(ninguna)"} y la última: "${
+    lastRef || "(n/a)"
+  }".
 - Evita Mateo/Matthew 11:28 (todas las variantes de idioma).
 - No agregues nada fuera del JSON.
 `;
   const USR = `Persona: ${persona}\nMensaje_usuario: ${message}\nFRAME: ${JSON.stringify(frame)}`;
   const r = await completionJson({
-    messages:[{role:"system",content:SYS},{role:"user",content:USR}],
-    temperature:0.4,
-    max_tokens:120,
-    response_format: FORMAT_BIBLE_ONLY
+    messages: [{ role: "system", content: SYS }, { role: "user", content: USR }],
+    temperature: 0.4,
+    max_tokens: 120,
+    response_format: FORMAT_BIBLE_ONLY,
   });
   const content = r?.choices?.[0]?.message?.content || "{}";
-  let data={}; try{ data=JSON.parse(content);}catch{ data={}; }
-  const text = (data?.bible?.text||"").toString().trim();
-  const ref  = cleanRef((data?.bible?.ref||"").toString());
+  let data = {};
+  try {
+    data = JSON.parse(content);
+  } catch {
+    data = {};
+  }
+  const text = (data?.bible?.text || "").toString().trim();
+  const ref = cleanRef((data?.bible?.ref || "").toString());
   return text && ref ? { text, ref } : null;
 }
 
-function offTopicRedirect(lang="es"){
-  const msg = {
-    es: "Estoy aquí para acompañarte en lo espiritual y en lo personal. Si querés, podemos mirar lo que te está pasando por dentro y dar un paso concreto.",
-    en: "I’m here to walk with you in your spiritual and personal life. If you’d like, we can look at what’s happening inside and take a concrete step.",
-    pt: "Estou aqui para te acompanhar no que é espiritual e pessoal. Se quiser, podemos olhar para o que acontece aí dentro e dar um passo concreto.",
-    it: "Sono qui per camminare con te nella vita spirituale e personale. Se vuoi, possiamo guardare a ciò che succede dentro e fare un passo concreto.",
-    de: "Ich bin da, um dich geistlich und persönlich zu begleiten. Wenn du magst, schauen wir, was in dir vorgeht, und gehen einen konkreten Schritt.",
-    ca: "Soc aquí per acompanyar-te en allò espiritual i personal. Si vols, podem mirar què et passa per dins i fer un pas concret.",
-    fr: "Je suis là pour t’accompagner sur le plan spirituel et personnel. Si tu veux, on peut regarder ce qui se passe en toi et faire un pas concret."
-  }[lang] || "Estoy aquí para acompañarte en lo espiritual y en lo personal. Si querés, podemos mirar lo que te está pasando por dentro y dar un paso concreto.";
-
-  const q = {
-    es: "¿Qué pasó hoy que te gustaría poner en manos de Dios?",
-    en: "What happened today that you’d like to place in God’s hands?",
-    pt: "O que aconteceu hoje que você gostaria de colocar nas mãos de Deus?",
-    it: "Cosa è successo oggi che vorresti mettere nelle mani di Dio?",
-    de: "Was ist heute passiert, das du in Gottes Hände legen möchtest?",
-    ca: "Què ha passat avui que voldries posar en mans de Déu?",
-    fr: "Qu’est-il arrivé aujourd’hui que tu voudrais remettre entre les mains de Dieu ?"
-  }[lang] || "¿Qué pasó hoy que te gustaría poner en manos de Dios?";
-
-  const verseText = {
-    es: "Cercano está el Señor a los quebrantados de corazón.",
-    en: "The Lord is close to the brokenhearted.",
-    pt: "O Senhor está perto dos que têm o coração quebrantado.",
-    it: "Il Signore è vicino a chi ha il cuore spezzato.",
-    de: "Der Herr ist nahe denen, die zerbrochenen Herzens sind.",
-    ca: "El Senyor és a prop dels cors trencats.",
-    fr: "Le Seigneur est proche de ceux qui ont le cœur brisé."
-  }[lang] || "Cercano está el Señor a los quebrantados de corazón.";
-
-  const verseRef = {
-    es: "Salmos 34:18",
-    en: "Psalm 34:18",
-    pt: "Salmos 34:18",
-    it: "Salmi 34:18",
-    de: "Psalm 34:18",
-    ca: "Salm 34:18",
-    fr: "Psaume 34:18"
-  }[lang] || "Salmos 34:18";
-
-  return { message: msg, bible: { text: verseText, ref: verseRef }, question: q };
-}
-
-app.post("/api/ask", async (req,res)=>{
-  try{
-    const { persona="jesus", message="", history=[], userId="anon", lang="es" } = req.body||{};
+app.post("/api/ask", async (req, res) => {
+  try {
+    const { persona = "jesus", message = "", history = [], userId = "anon", lang = "es" } = req.body || {};
     const mem = await readUserMemory(userId);
 
-    const userTxt = String(message||"").trim();
-    const isBye   = detectByeThanks(userTxt);
+    const userTxt = String(message || "").trim();
+    const isBye = detectByeThanks(userTxt);
     const saidYes = detectAffirmation(userTxt);
-    const saidNo  = detectNegation(userTxt);
-    const offTopic = detectOffTopic(userTxt);
-
-    // Redirección inmediata si está fuera de ámbito
-    if (offTopic && !isBye){
-      const redir = offTopicRedirect(lang);
-      // guardamos la pregunta para anti-rep
-      mem.last_questions = Array.isArray(mem.last_questions)? mem.last_questions : [];
-      mem.last_questions.push(redir.question);
-      while(mem.last_questions.length>10) mem.last_questions.shift();
-      await writeUserMemory(userId, mem);
-      return res.status(200).json(redir);
-    }
+    const saidNo = detectNegation(userTxt);
 
     const topic = guessTopic(userTxt);
     const mainSubject = detectMainSubject(userTxt);
     const recency = detectRecency(userTxt);
     const frame = {
       topic_primary: topic,
-      main_subject: mem.frame?.topic_primary===topic ? (mem.frame?.main_subject||mainSubject) : mainSubject,
-      support_persons: mem.frame?.topic_primary===topic ? (mem.frame?.support_persons||[]) : [],
-      recency_hint: recency
+      main_subject: mem.frame?.topic_primary === topic ? mem.frame?.main_subject || mainSubject : mainSubject,
+      support_persons: mem.frame?.topic_primary === topic ? mem.frame?.support_persons || [] : [],
+      recency_hint: recency,
     };
     mem.frame = frame;
     mem.last_topic = topic;
 
-    const avoidRefs = Array.isArray(mem.last_bible_refs)? mem.last_bible_refs.slice(-8):[];
-    const avoidQs   = Array.isArray(mem.last_questions)? mem.last_questions.slice(-10):[];
-    const avoidTech = Array.isArray(mem.last_techniques)? mem.last_techniques.slice(-6):[];
-    const avoidQStyles = Array.isArray(mem.last_q_styles)? mem.last_q_styles.slice(-6):[];
-    const shortHistory = compactHistory(history,10,240);
+    const avoidRefs = Array.isArray(mem.last_bible_refs) ? mem.last_bible_refs.slice(-8) : [];
+    const avoidQs = Array.isArray(mem.last_questions) ? mem.last_questions.slice(-10) : [];
+    const avoidTech = Array.isArray(mem.last_techniques) ? mem.last_techniques.slice(-6) : [];
+    const avoidQStyles = Array.isArray(mem.last_q_styles) ? mem.last_q_styles.slice(-6) : [];
+    const shortHistory = compactHistory(history, 10, 240);
 
     let MODE = "explore";
     if (isBye) MODE = "bye";
     else if (detectRequestExecute(userTxt) || saidYes) MODE = "execute";
-    else if (!detectVague(userTxt) && topic!=="general") MODE = "permiso";
-    if (saidNo && MODE!=="bye") MODE = "explore";
+    else if (!detectVague(userTxt) && topic !== "general") MODE = "permiso";
+    if (saidNo && MODE !== "bye") MODE = "explore";
 
-    // Declaración única — evitar preguntas genéricas
-    const BAD_GENERIC_Q = /(qué te aliviaría|que te aliviar[ií]a|qué pequeño paso|qué vas a|qué harás|qué plan|divide el problema|qué parte espec[ií]fica|qué parte de la situaci[oó]n)/i;
+    // ✅ Declaración ÚNICA — preguntas genéricas a evitar (incluye “divide el problema...” y variantes)
+    const BAD_GENERIC_Q =
+      /(qué te aliviaría|que te aliviar[ií]a|qué pequeño paso|qué vas a|qué harás|qué plan|divide el problema|qué parte espec[ií]fica|qué parte de la situaci[oó]n)/i;
 
-    const TOPIC_HINT = {
-      relationship: { es:"tu pareja", en:"your partner", pt:"sua parceria", it:"il tuo partner", de:"deinem Partner", ca:"la teva parella", fr:"ton/ta partenaire" },
-      separation:   { es:"esta separación", en:"this separation", pt:"esta separação", it:"questa separazione", de:"diese Trennung", ca:"aquesta separació", fr:"cette séparation" },
-      family_conflict: { es:"tu familia", en:"your family", pt:"sua família", it:"la tua famiglia", de:"deiner Familie", ca:"la teva família", fr:"ta famille" },
-      mood: { es:"tus emociones", en:"your emotions", pt:"suas emoções", it:"le tue emozioni", de:"deine Gefühle", ca:"les teves emocions", fr:"tes émotions" },
-      grief: { es:"tu duelo", en:"your grief", pt:"seu luto", it:"il tuo lutto", de:"deine Trauer", ca:"el teu dol", fr:"ton deuil" },
-      health: { es:"tu salud", en:"your health", pt:"sua saúde", it:"la tua salute", de:"deine Gesundheit", ca:"la teva salut", fr:"ta santé" },
-      work_finance: { es:"tu trabajo o finanzas", en:"your work or finances", pt:"seu trabalho ou finanças", it:"il tuo lavoro o finanze", de:"deine Arbeit oder Finanzen", ca:"la teva feina o finances", fr:"ton travail ou tes finances" },
-      addiction: { es:"tu proceso de recuperación", en:"your recovery process", pt:"seu processo de recuperação", it:"il tuo percorso di recupero", de:"deinen Genesungsweg", ca:"el teu procés de recuperació", fr:"ton chemin de rétablissement" },
-      faith: { es:"tu fe", en:"your faith", pt:"sua fé", it:"la tua fede", de:"deinen Glauben", ca:"la teva fe", fr:"ta foi" }
-    }[topic]?.[lang] || null;
+    const TOPIC_HINT =
+      {
+        relationship: {
+          es: "tu pareja",
+          en: "your partner",
+          pt: "sua parceria",
+          it: "il tuo partner",
+          de: "deinem Partner",
+          ca: "la teva parella",
+          fr: "ton/ta partenaire",
+        },
+        separation: {
+          es: "esta separación",
+          en: "this separation",
+          pt: "esta separação",
+          it: "questa separazione",
+          de: "diese Trennung",
+          ca: "aquesta separació",
+          fr: "cette séparation",
+        },
+        family_conflict: {
+          es: "tu familia",
+          en: "your family",
+          pt: "sua família",
+          it: "la tua famiglia",
+          de: "deiner Familie",
+          ca: "la teva família",
+          fr: "ta famille",
+        },
+        mood: {
+          es: "tus emociones",
+          en: "your emotions",
+          pt: "suas emoções",
+          it: "le tue emozioni",
+          de: "deine Gefühle",
+          ca: "les teves emocions",
+          fr: "tes émotions",
+        },
+        grief: {
+          es: "tu duelo",
+          en: "your grief",
+          pt: "seu luto",
+          it: "il tuo lutto",
+          de: "deine Trauer",
+          ca: "el teu dol",
+          fr: "ton deuil",
+        },
+        health: {
+          es: "tu salud",
+          en: "your health",
+          pt: "sua saúde",
+          it: "la tua salute",
+          de: "deine Gesundheit",
+          ca: "la teva salut",
+          fr: "ta santé",
+        },
+        work_finance: {
+          es: "tu trabajo o finanzas",
+          en: "your work or finances",
+          pt: "seu trabalho ou finanças",
+          it: "il tuo lavoro o finanze",
+          de: "deine Arbeit oder Finanzen",
+          ca: "la teva feina o finances",
+          fr: "ton travail ou tes finances",
+        },
+        addiction: {
+          es: "tu proceso de recuperación",
+          en: "your recovery process",
+          pt: "seu processo de recuperação",
+          it: "il tuo percorso de recupero",
+          de: "deinen Genesungsweg",
+          ca: "el teu procés de recuperació",
+          fr: "ton chemin de rétablissement",
+        },
+        faith: {
+          es: "tu fe",
+          en: "your faith",
+          pt: "sua fé",
+          it: "la tua fede",
+          de: "deinen Glauben",
+          ca: "la teva fe",
+          fr: "ta foi",
+        },
+      }[topic]?.[lang] || null;
 
     // ---------- PROMPT principal ----------
     const SYSTEM_PROMPT = `
 Hablas con serenidad, claridad y compasión. Evita metáforas largas; sé **concreto y clínico** en lenguaje simple.
-
-ÁMBITO: Solo espiritualidad cristiana/pastoral, autoayuda/psicología personal y temas de vida. 
-Fuera de ámbito (deportes, espectáculos, política partidaria, resultados, recetas, ciencia/matemáticas, geografía/historia no cristianas): **redirige** con respeto (di que estás para lo espiritual/personal), **no** des datos/opiniones externas, y vuelve con una pregunta sobre su estado interior o relación con Dios.
 
 MODO ACTUAL: ${MODE}; RECENCY: ${recency}
 
@@ -596,213 +743,269 @@ SALIDA SOLO JSON (en ${langLabel(lang)}):
 - "message": ≤75 palabras, **sin signos de pregunta**.
   * Si MODO=explore: 
       - 1–2 frases de validación **concreta** (no poética).
-      - **1 micro-acción inmediata** útil al tema (ej.: lugar tranquilo para hablar, **time_out_24h**, **no_escalar** en discusiones, **guion_dialogo_pareja** breve, **message_en_yo**, **oars_escucha** con un familiar, **behavioral_activation** leve, **opposite_action** ante rumiación, **cognitive_reframe** 1 pensamiento, **apoyo_red_social** hoy, **walk_10min**, **hydrate**, **grounding_5sentidos**, **prayer_short**).
-      - Evita “escritura/diario” salvo que el usuario lo pida explícito.
-      - Si en recientes aparece "walk_10min", prioriza otra micro-acción.
+      - **1 micro-acción inmediata** orientada a estabilizar o entender (ej.: lugar tranquilo para hablar, **time-out 24h** antes de reaccionar, **no_escalar** en discusiones, **guion_dialogo_pareja** breve, **oars_escucha** con un familiar, **behavioral_activation** leve, **opposite_action** ante rumiación, **cognitive_reframe** 1 pensamiento, **apoyo_red_social** hoy, **walk_10min**, **hydrate**). **Evita “escritura/diario”** salvo que el usuario lo pida.
       - 1 línea espiritual breve (sin cita en "message").
   * Si MODO=permiso: 
-      - 1–2 rumbos claros (ej.: “armamos un **guion** para hablar con ${TOPIC_HINT||"la otra persona"}” / “regulamos bronca y definimos **límites asertivos**”).
+      - 1–2 rumbos claros (ej.: “armamos un **guion** para hablar con ${TOPIC_HINT || "la otra persona"}” / “regulamos bronca y definimos **límites asertivos**”).
       - 1 línea espiritual; deja claro que podés guiar cuando el usuario quiera.
   * Si MODO=execute:
       - **Guía paso a paso** (1–3 min si aplica). 
       - Relación/separación: plan de conversación sincera: contexto, **mensajes en yo**, 2–3 frases modelo, **límite** y **cierre**.
       - Emoción intensa: protocolo breve (exhalación 4–6 **solo si no se usó en el turno anterior**, + pausa 90s + **reencuadre cognitivo**).
       - Evita “escritura/diario” si fue usada en el turno previo.
-- "bible": texto + ref, ajustada al contexto/tema. Evita repetir: ${avoidRefs.map(r=>`"${r}"`).join(", ")||"(ninguna)"} **y** evita Mateo/Matthew 11:28 en cualquier idioma/abreviatura.
-- "question": **UNA sola** y **simple** (anclada a evento/tiempo/lugar).
-  * explore → pregunta focal: qué ocurrió **hoy**, **desde cuándo** o **dónde impacta** (pareja, trabajo, salud…). Sin A/B ni dobles.
-  * permiso → pregunta de permiso específica (“¿Querés que te diga **qué decir y cómo**?” sobre ${TOPIC_HINT||"el tema"}).
-  * execute → pregunta de ajuste/check-in (¿adaptamos el guion?, ¿otra frase?, ¿siguiente micro-paso?).
+- "bible": texto + ref, ajustada al contexto/tema. Evita repetir: ${avoidRefs.map((r) => `"${r}"`).join(", ") ||
+      "(ninguna)"} **y** evita Mateo/Matthew 11:28 en cualquier idioma/abreviatura.
+- "question": **UNA sola**.
+  * explore → **pregunta focal** para entender: qué ocurrió, **desde cuándo** (respetando RECENCY: si es “today/hours/yesterday”, **prohibido** “últimas semanas/días”), y/o dónde impacta. Sin A/B ni dobles.
+  * permiso → **pregunta de permiso** específica (“¿Querés que te diga **qué decir y cómo**?” sobre ${TOPIC_HINT || "el tema"}).
+  * execute → **pregunta de ajuste/check-in** (¿adaptamos el guion?, ¿otra frase?, ¿siguiente micro-paso?).
   * bye → **omite** pregunta.
-  Debe terminar en "?" y evitar preguntas genéricas tipo (qué te aliviaría / cuál es el plan / dividir el problema / qué parte específica).
-- "techniques": etiquetas si sugieres técnicas (ej.: ["time_out_24h","no_escalar","guion_dialogo_pareja","message_en_yo","oars_escucha","behavioral_activation","opposite_action","cognitive_reframe","walk_10min","hydrate","grounding_5sentidos","prayer_short","limites_asertivos","apoyo_red_social","breathing_exhale46"]).
+  Debe terminar en "?" y evitar preguntas genéricas tipo (qué te aliviaría / qué plan / **divide el problema** / **qué parte específica**).
+- "techniques": etiquetas si sugieres técnicas (ej.: ["time_out_24h","no_escalar","guion_dialogo_pareja","message_en_yo","oars_escucha","behavioral_activation","opposite_action","cognitive_reframe","walk_10min","hydrate","breathing_exhale46","prayer_short","limites_asertivos","apoyo_red_social"]).
 - "q_style": etiqueta del estilo de pregunta (ej.: "explore_event","explore_since_now","explore_impact","permiso_guion","permiso_regulacion","execute_checkin","execute_adjust").
 
 PRIORIDADES:
 - **Autoayuda primero**: acciones concretas útiles al tema (no solo respiración).
-- Si en recientes hubo respiración o escritura (en: ${avoidTech.join(", ")||"(ninguna)"}), **no** repitas ahora.
-- Si en recientes hubo "walk_10min", prioriza otra micro-acción.
-- Varía el estilo de la **pregunta** y evita repetir estilos recientes: ${avoidQStyles.join(", ")||"(ninguno)"}.
+- Si la última técnica fue respiración o escritura (en recientes: ${avoidTech.join(", ") || "(ninguna)"}), **no** las repitas ahora.
+- Varía el estilo de la **pregunta** y evita repetir estilos recientes: ${avoidQStyles.join(", ") || "(ninguno)"}.
 No menciones IA/modelos.
 `;
 
     const header =
-      `Persona: ${persona}\n`+
-      `Lang: ${lang}\n`+
-      `Mensaje_usuario: ${userTxt}\n`+
-      (shortHistory.length?`Historial: ${shortHistory.join(" | ")}`:"Historial: (sin antecedentes)")+"\n"+
-      `Evitar_refs: ${[...avoidRefs, ...BANNED_REFS].join(" | ")||"(ninguna)"}\n`+
-      `Evitar_preguntas: ${avoidQs.join(" | ")||"(ninguna)"}\n`+
-      `Evitar_tecnicas: ${avoidTech.join(" | ")||"(ninguna)"}\n`+
-      `Evitar_q_styles: ${avoidQStyles.join(" | ")||"(ninguno)"}\n`+
+      `Persona: ${persona}\n` +
+      `Lang: ${lang}\n` +
+      `Mensaje_usuario: ${userTxt}\n` +
+      (shortHistory.length ? `Historial: ${shortHistory.join(" | ")}` : "Historial: (sin antecedentes)") +
+      "\n" +
+      `Evitar_refs: ${[...avoidRefs, ...BANNED_REFS].join(" | ") || "(ninguna)"}\n` +
+      `Evitar_preguntas: ${avoidQs.join(" | ") || "(ninguna)"}\n` +
+      `Evitar_tecnicas: ${avoidTech.join(" | ") || "(ninguna)"}\n` +
+      `Evitar_q_styles: ${avoidQStyles.join(" | ") || "(ninguno)"}\n` +
       `FRAME: ${JSON.stringify(frame)}\n`;
 
     // 1) Generación
     let r = await completionJson({
-      messages: [{role:"system",content:SYSTEM_PROMPT},{role:"user",content:header}],
-      temperature:0.6,
-      max_tokens:360,
-      response_format: FORMAT_ASK
+      messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: header }],
+      temperature: 0.6,
+      max_tokens: 360,
+      response_format: FORMAT_ASK,
     });
 
     const content = r?.choices?.[0]?.message?.content || "{}";
-    let data={}; try{ data=JSON.parse(content);}catch{ data={}; }
+    let data = {};
+    try {
+      data = JSON.parse(content);
+    } catch {
+      data = {};
+    }
 
-    let msg = limitWords(stripQuestionsFromMessage(removeBibleLike(String(data?.message||""))), 75);
-    let ref = cleanRef(String(data?.bible?.ref||""));
-    let text = String(data?.bible?.text||"").trim();
-    let questionRaw = String(data?.question||"").trim();
-    let techniques = Array.isArray(data?.techniques)? data.techniques.map(String) : [];
-    let q_style = String(data?.q_style||"").trim();
+    let msg = limitWords(stripQuestionsFromMessage(removeBibleLike(String(data?.message || ""))), 75);
+    let ref = cleanRef(String(data?.bible?.ref || ""));
+    let text = String(data?.bible?.text || "").trim();
+    let questionRaw = String(data?.question || "").trim();
+    let techniques = Array.isArray(data?.techniques) ? data.techniques.map(String) : [];
+    let q_style = String(data?.q_style || "").trim();
 
-    // 2) Ajuste de pregunta (simple)
+    // 2) Ajuste de pregunta: **una sola**, sin A/B ni dobles, con recencia
     let question = isBye ? "" : sanitizeSingleQuestion(questionRaw, lang, recency);
 
-    // 3) Guardas de calidad para pregunta
-    const BAD_GENERIC_Q = /(qué te aliviaría|que te aliviar[ií]a|qué pequeño paso|qué vas a|qué harás|qué plan|divide el problema|qué parte espec[ií]fica|qué parte de la situaci[oó]n)/i;
-    if (!isBye && (!question || BAD_GENERIC_Q.test(question))){
-      const SYS2 = SYSTEM_PROMPT + `\nAjusta la "question": **una sola**, natural, específica al tema, sin A/B ni dobles, temporalmente congruente con RECENCY=${recency}, y **simple** (evento/tiempo/lugar).`;
+    // 3) Guardas de calidad para pregunta (⚠️ usar la constante ya declarada)
+    if (!isBye && (!question || BAD_GENERIC_Q.test(question))) {
+      const SYS2 =
+        SYSTEM_PROMPT +
+        `\nAjusta la "question": una sola, natural, específica al tema, sin A/B ni dobles, temporalmente congruente con RECENCY=${recency}.`;
       const r2 = await completionJson({
-        messages: [{role:"system",content:SYS2},{role:"user",content:header}],
-        temperature:0.65,
-        max_tokens:340,
-        response_format: FORMAT_ASK
+        messages: [{ role: "system", content: SYS2 }, { role: "user", content: header }],
+        temperature: 0.65,
+        max_tokens: 340,
+        response_format: FORMAT_ASK,
       });
       const c2 = r2?.choices?.[0]?.message?.content || "{}";
-      let d2={}; try{ d2=JSON.parse(c2);}catch{ d2={}; }
-      msg = limitWords(stripQuestionsFromMessage(removeBibleLike(String(d2?.message||msg||""))), 75);
-      ref = cleanRef(String(d2?.bible?.ref||ref||""));
-      text = String(d2?.bible?.text||text||"").trim();
-      question = isBye ? "" : sanitizeSingleQuestion(String(d2?.question||question||"").trim(), lang, recency);
-      techniques = Array.isArray(d2?.techniques)? d2.techniques.map(String) : techniques;
-      q_style = String(d2?.q_style||q_style||"").trim();
+      let d2 = {};
+      try {
+        d2 = JSON.parse(c2);
+      } catch {
+        d2 = {};
+      }
+      msg = limitWords(stripQuestionsFromMessage(removeBibleLike(String(d2?.message || msg || ""))), 75);
+      ref = cleanRef(String(d2?.bible?.ref || ref || ""));
+      text = String(d2?.bible?.text || text || "").trim();
+      question = isBye ? "" : sanitizeSingleQuestion(String(d2?.question || question || "").trim(), lang, recency);
+      techniques = Array.isArray(d2?.techniques) ? d2.techniques.map(String) : techniques;
+      q_style = String(d2?.q_style || q_style || "").trim();
     }
 
-    // 4) Anti repetición técnicas (escritura/respiración/caminar)
+    // 4) Anti “escritura” y anti “respiración” consecutivas
     const lastTech = (mem.last_techniques || []).slice(-1)[0] || "";
-    const usedWriting = (t)=> t==="writing_optional" || /escrit|diario/i.test(t);
-    const usedBreath  = (t)=> t==="breathing_exhale46" || /breath|respir/i.test(t);
-    const usedWalk10  = (t)=> t==="walk_10min" || /walk_10min|caminar/i.test(t);
+    const usedWriting = (t) => t === "writing_optional" || /escrit|diario/i.test(t);
+    const usedBreath = (t) => t === "breathing_exhale46" || /breath|respir/i.test(t);
+    const thisHasWriting = (techniques || []).some(usedWriting) || /escrit|diario/i.test(msg);
+    const thisHasBreath = (techniques || []).some(usedBreath) || /respiraci[oó]n|inhala|exhala|breath/i.test(msg);
 
-    const thisHasWriting = (techniques||[]).some(usedWriting) || /escrit|diario/i.test(msg);
-    const thisHasBreath  = (techniques||[]).some(usedBreath)  || /respiraci[oó]n|inhala|exhala|breath/i.test(msg);
-    const thisHasWalk    = (techniques||[]).some(usedWalk10)  || /\b(camina(r)?\s*10|minutos?)\b/i.test(msg);
-
-    async function regenAvoiding(extraHint){
-      const SYSX = SYSTEM_PROMPT + "\n" + extraHint;
-      const rx = await completionJson({
-        messages: [{role:"system",content:SYSX},{role:"user",content:header}],
-        temperature:0.65,
-        max_tokens:340,
-        response_format: FORMAT_ASK
-      });
-      const cx = rx?.choices?.[0]?.message?.content || "{}";
-      let dx={}; try{ dx=JSON.parse(cx);}catch{ dx={}; }
-      msg = limitWords(stripQuestionsFromMessage(removeBibleLike(String(dx?.message||msg||""))), 75);
-      ref = cleanRef(String(dx?.bible?.ref||ref||""));
-      text = String(dx?.bible?.text||text||"").trim();
-      question = isBye ? "" : sanitizeSingleQuestion(String(dx?.question||question||"").trim(), lang, recency);
-      techniques = Array.isArray(dx?.techniques)? dx.techniques.map(String) : techniques;
-      q_style = String(dx?.q_style||q_style||"").trim();
-    }
-
-    if (!isBye && lastTech){
-      if (usedWriting(lastTech) && thisHasWriting){
-        await regenAvoiding(`Evita "escritura/diario" porque se usó recién; ofrece otra vía concreta (oars_escucha, guion_dialogo_pareja, time_out_24h, no_escalar, cognitive_reframe, behavioral_activation, apoyo_red_social, grounding_5sentidos, hydrate, prayer_short, walk_10min).`);
-      } else if (usedBreath(lastTech) && thisHasBreath){
-        await regenAvoiding(`Evita respiración porque se usó recién; prioriza otras técnicas (no_escalar, time_out_24h, oars_escucha, guion_dialogo_pareja, cognitive_reframe, opposite_action, behavioral_activation, apoyo_red_social, grounding_5sentidos, hydrate, prayer_short, walk_10min).`);
-      } else if (usedWalk10(lastTech) && thisHasWalk){
-        await regenAvoiding(`Evita "caminar 10 minutos" porque se usó recién; sugiere otra micro-acción (grounding_5sentidos, oars_escucha, cognitive_reframe, behavioral_activation, hydrate, prayer_short, time_out_24h, no_escalar, apoyo_red_social).`);
+    if (!isBye && lastTech) {
+      if (usedWriting(lastTech) && thisHasWriting) {
+        const SYS3 =
+          SYSTEM_PROMPT +
+          `\nEvita "escritura/diario" porque se usó recién; ofrece otra vía concreta (oars_escucha, guion_dialogo_pareja, time_out_24h, no_escalar, cognitive_reframe, behavioral_activation, apoyo_red_social, walk_10min, hydrate).`;
+        const r3 = await completionJson({
+          messages: [{ role: "system", content: SYS3 }, { role: "user", content: header }],
+          temperature: 0.65,
+          max_tokens: 340,
+          response_format: FORMAT_ASK,
+        });
+        const c3 = r3?.choices?.[0]?.message?.content || "{}";
+        let d3 = {};
+        try {
+          d3 = JSON.parse(c3);
+        } catch {
+          d3 = {};
+        }
+        msg = limitWords(stripQuestionsFromMessage(removeBibleLike(String(d3?.message || msg || ""))), 75);
+        ref = cleanRef(String(d3?.bible?.ref || ref || ""));
+        text = String(d3?.bible?.text || text || "").trim();
+        question = isBye ? "" : sanitizeSingleQuestion(String(d3?.question || question || "").trim(), lang, recency);
+        techniques = Array.isArray(d3?.techniques) ? d3.techniques.map(String) : techniques;
+        q_style = String(d3?.q_style || q_style || "").trim();
+      } else if (usedBreath(lastTech) && thisHasBreath) {
+        const SYS4 =
+          SYSTEM_PROMPT +
+          `\nEvita respiración porque se usó recién; prioriza otras técnicas (no_escalar, time_out_24h, oars_escucha, guion_dialogo_pareja, cognitive_reframe, opposite_action, behavioral_activation, apoyo_red_social, walk_10min, hydrate).`;
+        const r4 = await completionJson({
+          messages: [{ role: "system", content: SYS4 }, { role: "user", content: header }],
+          temperature: 0.65,
+          max_tokens: 340,
+          response_format: FORMAT_ASK,
+        });
+        const c4 = r4?.choices?.[0]?.message?.content || "{}";
+        let d4 = {};
+        try {
+          d4 = JSON.parse(c4);
+        } catch {
+          d4 = {};
+        }
+        msg = limitWords(stripQuestionsFromMessage(removeBibleLike(String(d4?.message || msg || ""))), 75);
+        ref = cleanRef(String(d4?.bible?.ref || ref || ""));
+        text = String(d4?.bible?.text || text || "").trim();
+        question = isBye ? "" : sanitizeSingleQuestion(String(d4?.question || question || "").trim(), lang, recency);
+        techniques = Array.isArray(d4?.techniques) ? d4.techniques.map(String) : techniques;
+        q_style = String(d4?.q_style || q_style || "").trim();
       }
     }
 
     // 5) Evitar cita repetida o vetada
-    const avoidSet = new Set((mem.last_bible_refs||[]).map(x=>NORM(cleanRef(x))));
-    if (!ref || avoidSet.has(NORM(ref)) || isRefMat11_28(ref)){
-      const alt = await regenerateBibleAvoiding({ lang, persona, message:userTxt, frame, bannedRefs: [...(mem.last_bible_refs||[]), ...BANNED_REFS], lastRef: mem.last_bible_refs?.slice(-1)[0]||"" });
-      if (alt){ ref = alt.ref; text = alt.text; }
+    const avoidSet = new Set((mem.last_bible_refs || []).map((x) => NORM(cleanRef(x))));
+    if (!ref || avoidSet.has(NORM(ref)) || isRefMat11_28(ref)) {
+      const alt = await regenerateBibleAvoiding({
+        lang,
+        persona,
+        message: userTxt,
+        frame,
+        bannedRefs: [...(mem.last_bible_refs || []), ...BANNED_REFS],
+        lastRef: mem.last_bible_refs?.slice(-1)[0] || "",
+      });
+      if (alt) {
+        ref = alt.ref;
+        text = alt.text;
+      }
     }
     if (isRefMat11_28(ref)) {
-      ref = (lang==="en"?"Psalm 34:18":"Salmos 34:18");
-      text = (lang==="en"?"The Lord is close to the brokenhearted.":"Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu.");
+      ref = lang === "en" ? "Psalm 34:18" : "Salmos 34:18";
+      text =
+        lang === "en"
+          ? "The Lord is close to the brokenhearted and saves those who are crushed in spirit."
+          : "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu.";
     }
 
     // 6) Persistencia
     const cleanedRef = cleanRef(ref);
-    if (cleanedRef){
-      mem.last_bible_refs = Array.isArray(mem.last_bible_refs)? mem.last_bible_refs : [];
+    if (cleanedRef) {
+      mem.last_bible_refs = Array.isArray(mem.last_bible_refs) ? mem.last_bible_refs : [];
       mem.last_bible_refs.push(cleanedRef);
-      while(mem.last_bible_refs.length>8) mem.last_bible_refs.shift();
+      while (mem.last_bible_refs.length > 8) mem.last_bible_refs.shift();
     }
-    if (!isBye && question){
-      mem.last_questions = Array.isArray(mem.last_questions)? mem.last_questions : [];
+    if (!isBye && question) {
+      mem.last_questions = Array.isArray(mem.last_questions) ? mem.last_questions : [];
       mem.last_questions.push(question);
-      while(mem.last_questions.length>10) mem.last_questions.shift();
+      while (mem.last_questions.length > 10) mem.last_questions.shift();
     }
-    if (Array.isArray(techniques) && techniques.length){
-      mem.last_techniques = Array.isArray(mem.last_techniques)? mem.last_techniques : [];
+    if (Array.isArray(techniques) && techniques.length) {
+      mem.last_techniques = Array.isArray(mem.last_techniques) ? mem.last_techniques : [];
       mem.last_techniques = [...mem.last_techniques, ...techniques].slice(-12);
     }
-    if (q_style){
-      mem.last_q_styles = Array.isArray(mem.last_q_styles)? mem.last_q_styles : [];
+    if (q_style) {
+      mem.last_q_styles = Array.isArray(mem.last_q_styles) ? mem.last_q_styles : [];
       mem.last_q_styles.push(q_style);
-      while(mem.last_q_styles.length>10) mem.last_q_styles.shift();
+      while (mem.last_q_styles.length > 10) mem.last_q_styles.shift();
     }
     await writeUserMemory(userId, mem);
 
     const out = {
-      message: msg || (lang==="en"?"I am with you. Let’s take one small and practical step.":"Estoy contigo. Demos un paso pequeño y práctico."),
-      bible: { text: text || (lang==="en"?"The Lord is close to the brokenhearted.":"Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu."), ref: cleanedRef || (lang==="en"?"Psalm 34:18":"Salmos 34:18") }
+      message:
+        msg ||
+        (lang === "en"
+          ? "I am with you. Let’s take one small and practical step."
+          : "Estoy contigo. Demos un paso pequeño y práctico."),
+      bible: {
+        text:
+          text ||
+          (lang === "en"
+            ? "The Lord is close to the brokenhearted."
+            : "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu."),
+        ref: cleanedRef || (lang === "en" ? "Psalm 34:18" : "Salmos 34:18"),
+      },
     };
     if (!isBye && question) out.question = question;
 
     res.status(200).json(out);
-  }catch(err){
+  } catch (err) {
     console.error("ASK ERROR:", err);
     res.status(200).json({
-      message:"La paz sea contigo. Contame en pocas palabras qué pasó hoy y seguimos paso a paso.",
-      bible:{ text:"Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu.", ref:"Salmos 34:18" }
+      message: "La paz sea contigo. Compárteme en pocas palabras lo esencial, y seguimos paso a paso.",
+      bible: {
+        text: "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu.",
+        ref: "Salmos 34:18",
+      },
     });
   }
 });
 
 // ---------- HeyGen ----------
-app.get("/api/heygen/token", async (_req,res)=>{
-  try{
+app.get("/api/heygen/token", async (_req, res) => {
+  try {
     const API_KEY = process.env.HEYGEN_API_KEY || process.env.HEYGEN_TOKEN || "";
-    if(!API_KEY) return res.status(500).json({error:"missing_HEYGEN_API_KEY"});
-    const r = await fetch("https://api.heygen.com/v1/streaming.create_token",{
-      method:"POST",
-      headers:{"x-api-key":API_KEY,"Content-Type":"application/json"},
-      body:"{}"
+    if (!API_KEY) return res.status(500).json({ error: "missing_HEYGEN_API_KEY" });
+    const r = await fetch("https://api.heygen.com/v1/streaming.create_token", {
+      method: "POST",
+      headers: { "x-api-key": API_KEY, "Content-Type": "application/json" },
+      body: "{}",
     });
-    const json = await r.json().catch(()=>({}));
+    const json = await r.json().catch(() => ({}));
     const token = json?.data?.token || json?.token || json?.access_token || "";
-    if(!r.ok || !token){
-      console.error("heygen_token_failed:",{status:r.status,json});
-      return res.status(r.status||500).json({error:"heygen_token_failed", detail:json});
+    if (!r.ok || !token) {
+      console.error("heygen_token_failed:", { status: r.status, json });
+      return res.status(r.status || 500).json({ error: "heygen_token_failed", detail: json });
     }
-    res.json({token});
-  }catch(e){
+    res.json({ token });
+  } catch (e) {
     console.error("heygen token exception:", e);
-    res.status(500).json({error:"heygen_token_error"});
+    res.status(500).json({ error: "heygen_token_error" });
   }
 });
 
-app.get("/api/heygen/config", (_req,res)=>{
-  const AV_LANGS=["es","en","pt","it","de","ca","fr"];
-  const avatars={};
-  for(const l of AV_LANGS){
-    const key=`HEYGEN_AVATAR_${l.toUpperCase()}`;
-    const val=(process.env[key]||"").trim();
-    if(val) avatars[l]=val;
+app.get("/api/heygen/config", (_req, res) => {
+  const AV_LANGS = ["es", "en", "pt", "it", "de", "ca", "fr"];
+  const avatars = {};
+  for (const l of AV_LANGS) {
+    const key = `HEYGEN_AVATAR_${l.toUpperCase()}`;
+    const val = (process.env[key] || "").trim();
+    if (val) avatars[l] = val;
   }
-  const voiceId=(process.env.HEYGEN_VOICE_ID||"").trim();
-  const defaultAvatar=(process.env.HEYGEN_DEFAULT_AVATAR||"").trim();
-  const version=process.env.HEYGEN_CFG_VERSION || Date.now();
-  res.json({voiceId, defaultAvatar, avatars, version});
+  const voiceId = (process.env.HEYGEN_VOICE_ID || "").trim();
+  const defaultAvatar = (process.env.HEYGEN_DEFAULT_AVATAR || "").trim();
+  const version = process.env.HEYGEN_CFG_VERSION || Date.now();
+  res.json({ voiceId, defaultAvatar, avatars, version });
 });
 
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, ()=> console.log(`Servidor listo en puerto ${PORT}`));
+app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
