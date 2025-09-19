@@ -1,115 +1,138 @@
 // routes/contact.js
-// Envía POST /contact a tu Web App de Google Apps Script.
-// Funciona con o sin clave compartida (APPS_SCRIPT_KEY).
+//
+// En producción NO expone /contact/debug ni /contact/selftest,
+// salvo que pongas ALLOW_CONTACT_DEBUG=true.
+// Aplica rate limit global al router (anti-spam).
+//
+// Env necesarios (Railway):
+// - APPS_SCRIPT_URL  -> URL de tu Google Apps Script (Deployment "web app")
+// - (opcional) MAIL_FROM_NAME, CONTACT_TO, REPLY_TO   // hoy los maneja el Script
+//
+// El asunto lleva prefijo "FORMULARIO:" para que tu regla de Gmail haga bypass de spam.
 
 const express = require("express");
 const rateLimit = require("express-rate-limit");
 
 const router = express.Router();
 
-// ------- Rate limit (anti-spam) -------
-router.use(rateLimit({ windowMs: 60_000, max: 20 }));
+// ---- Rate limit (anti-spam) ----
+// 20 solicitudes por minuto por IP. Cambia 'max' si querés más/menos.
+const limiter = rateLimit({
+  windowMs: 60_000, // 1 minuto
+  max: 20,          // 20 req/min/IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { ok: false, error: "rate_limited" },
+});
+router.use(limiter);
 
-// ------- Helpers -------
-const has = (v) => typeof v === "string" && v.trim().length > 0;
+// ---- Helpers ----
 const emailRx = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const isProd = process.env.NODE_ENV === "production";
+const allowDebug = process.env.ALLOW_CONTACT_DEBUG === "true";
 
-async function postJson(url, data, { timeoutMs = 12_000 } = {}) {
-  const ac = new AbortController();
-  const t = setTimeout(() => ac.abort(), timeoutMs);
-  try {
-    const r = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(data),
-      signal: ac.signal,
-    });
-    const text = await r.text();
-    let json; try { json = JSON.parse(text); } catch { json = { raw: text }; }
-    return { ok: r.ok, status: r.status, json };
-  } finally {
-    clearTimeout(t);
-  }
-}
-
-// ------- Debug -------
-router.get("/debug", (_req, res) => {
-  res.json({
-    ok: true,
-    env: {
-      APPS_SCRIPT_URL: !!process.env.APPS_SCRIPT_URL,
-      APPS_SCRIPT_KEY: has(process.env.APPS_SCRIPT_KEY),
-    },
-  });
-});
-
-// ------- Ping opcional -------
-router.get("/selftest", async (_req, res) => {
-  const url = process.env.APPS_SCRIPT_URL || "";
-  const key = process.env.APPS_SCRIPT_KEY || "";
-  if (!has(url)) return res.status(500).json({ ok: false, error: "missing_APPS_SCRIPT_URL" });
-
-  const payload = { name: "SelfTest", email: "noreply@example.com", message: "Ping" };
-  if (has(key)) payload.key = key;
-
-  try {
-    const r = await postJson(url, payload, { timeoutMs: 10_000 });
-    return res.status(r.ok ? 200 : 502).json({ ok: r.ok, status: r.status, script: r.json });
-  } catch (e) {
-    return res.status(500).json({ ok: false, error: "script_error", detail: String(e) });
-  }
-});
-
-// ------- POST /contact -------
+// ---- POST /contact ----
+// Reenvía al Apps Script vía fetch (Node 18+ trae fetch nativo)
 router.post("/", async (req, res) => {
   try {
-    const url = process.env.APPS_SCRIPT_URL || "";
-    const key = process.env.APPS_SCRIPT_KEY || "";
+    const { name, email, message, website } = req.body || {};
 
-    if (!has(url)) {
-      return res.status(500).json({ ok: false, error: "server_not_configured", detail: { APPS_SCRIPT_URL: !!url } });
+    // Honeypot: si "website" viene con valor, asumimos bot y respondemos OK silencioso.
+    if (website && String(website).trim() !== "") {
+      return res.json({ ok: true });
     }
-
-    const { name = "", email = "", message = "", website = "" } = req.body || {};
-
-    // Honeypot (si viene con algo, tratamos como OK silencioso)
-    if (has(website)) return res.json({ ok: true });
 
     // Validaciones mínimas
-    if (!has(name) || !has(email) || !has(message)) {
-      return res.status(400).json({ ok: false, error: "missing_fields" });
+    if (!name || !email || !message) {
+      return res.status(400).json({ ok: false, error: "Faltan campos" });
     }
     if (!emailRx.test(String(email))) {
-      return res.status(400).json({ ok: false, error: "invalid_email" });
+      return res.status(400).json({ ok: false, error: "Email inválido" });
     }
     if (String(message).length > 5000) {
-      return res.status(400).json({ ok: false, error: "message_too_long" });
+      return res.status(400).json({ ok: false, error: "Mensaje muy largo" });
     }
 
-    // Armo payload al Apps Script (agrego key solo si existe en env)
-    const payload = { name: String(name), email: String(email), message: String(message) };
-    if (has(key)) payload.key = key;
-
-    const scriptResp = await postJson(url, payload, { timeoutMs: 12_000 });
-
-    if (!scriptResp.ok) {
-      return res.status(502).json({
-        ok: false,
-        error: "apps_script_bad_status",
-        status: scriptResp.status,
-        script: scriptResp.json,
-      });
+    const APPS_SCRIPT_URL = process.env.APPS_SCRIPT_URL;
+    if (!APPS_SCRIPT_URL) {
+      return res.status(500).json({ ok: false, error: "APPS_SCRIPT_URL no configurada" });
     }
 
-    // Se espera { ok: true } en éxito
-    if (scriptResp.json && scriptResp.json.ok) {
+    // Armamos payload para el Script (incluye prefijo de asunto para bypass spam)
+    const payload = {
+      subject: `FORMULARIO: ${name}`, // <- mantiene el prefijo para tu regla de Gmail
+      name,
+      email,
+      message,
+    };
+
+    const r = await fetch(APPS_SCRIPT_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    const text = await r.text(); // Apps Script suele responder texto plano/JSON
+    if (!r.ok) {
+      return res
+        .status(500)
+        .json({ ok: false, error: "apps_script_bad_status", status: r.status, script: { raw: text.slice(0, 800) } });
+    }
+
+    // Si el Script responde JSON válido, lo parseamos; si no, devolvemos ok simple
+    try {
+      const json = JSON.parse(text);
+      return res.json(json.ok ? json : { ok: true, script: json });
+    } catch {
       return res.json({ ok: true });
-    } else {
-      return res.status(500).json({ ok: false, error: "apps_script_response", script: scriptResp.json });
     }
   } catch (err) {
-    return res.status(500).json({ ok: false, error: "server_exception", detail: String(err) });
+    console.error("[/contact] error:", err);
+    return res.status(500).json({ ok: false, error: "Error en servidor" });
   }
 });
+
+// ---- Endpoints de depuración (solo no-producción o si ALLOW_CONTACT_DEBUG=true) ----
+if (!isProd || allowDebug) {
+  // Ver variables clave (sin valores sensibles)
+  router.get("/debug", (_req, res) => {
+    res.json({
+      ok: true,
+      env: {
+        APPS_SCRIPT_URL: !!process.env.APPS_SCRIPT_URL,
+        MAIL_FROM_NAME: process.env.MAIL_FROM_NAME || null,
+        CONTACT_TO: process.env.CONTACT_TO || null,
+        REPLY_TO: process.env.REPLY_TO || null,
+        NODE_ENV: process.env.NODE_ENV || null,
+        ALLOW_CONTACT_DEBUG: process.env.ALLOW_CONTACT_DEBUG || "false",
+      },
+    });
+  });
+
+  // Auto-test rápido (envía un mensaje de prueba al Script)
+  router.get("/selftest", async (_req, res) => {
+    try {
+      const APPS_SCRIPT_URL = process.env.APPS_SCRIPT_URL;
+      if (!APPS_SCRIPT_URL) {
+        return res.status(500).json({ ok: false, error: "APPS_SCRIPT_URL no configurada" });
+      }
+      const payload = {
+        subject: `FORMULARIO: selftest ${new Date().toISOString()}`,
+        name: "SelfTest",
+        email: "no-reply@example.com",
+        message: "Mensaje de prueba desde /contact/selftest",
+      };
+      const r = await fetch(APPS_SCRIPT_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const text = await r.text();
+      return res.json({ ok: r.ok, status: r.status, script: text.slice(0, 200) });
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: "selftest_failed" });
+    }
+  });
+}
 
 module.exports = router;
