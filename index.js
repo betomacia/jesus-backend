@@ -3,6 +3,7 @@
 // - Bible SIEMPRE presente en /api/ask (anti-repetición + ban Mateo 11:28 + fallback por idioma)
 // - OFFTOPIC reforzado para gastronomía/comidas
 
+const contactRouter = require("./routes/contact");
 const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
@@ -452,3 +453,4 @@ app.get("/api/heygen/config", (_req, res) => {
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
+
