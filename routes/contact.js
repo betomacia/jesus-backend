@@ -21,7 +21,23 @@ const transporter = nodemailer.createTransport({
 // Validación básica de email
 const emailRx = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-// POST /contact
+// ⚙️ Helper: resuelve Reply-To (FORZADO por env si existe)
+function resolveReplyTo(name, userEmail) {
+  const fixedReplyTo = (process.env.REPLY_TO || "").trim();
+
+  if (fixedReplyTo && emailRx.test(fixedReplyTo)) {
+    // 🚩 Forzamos SIEMPRE el Reply-To desde Railway
+    return fixedReplyTo;
+  }
+  // Si no hay REPLY_TO válido, caemos al email del usuario (comportamiento anterior)
+  if (userEmail && emailRx.test(String(userEmail))) {
+    return { name, address: userEmail };
+  }
+  // Último recurso: sin Reply-To
+  return undefined;
+}
+
+// POST /contact  — envía el mail
 router.post("/", async (req, res) => {
   try {
     const { name, email, message, website } = req.body || {};
@@ -48,20 +64,18 @@ router.post("/", async (req, res) => {
       return res.json({ ok: true, note: "SMTP no configurado" });
     }
 
-    // Reply-To configurable por variable de entorno:
-    // - Si REPLY_TO existe y es válido -> usamos ese fijo (control total desde Railway).
-    // - Si NO está, usamos el email que envía el usuario (comportamiento anterior).
-    const fixedReplyTo = (process.env.REPLY_TO || "").trim();
-    const useFixedReplyTo = fixedReplyTo && emailRx.test(fixedReplyTo);
+    const replyTo = resolveReplyTo(name, email);
 
     const mailOptions = {
       from: `"${process.env.MAIL_FROM_NAME || "Contacto App"}" <${process.env.GMAIL_USER}>`,
       to: process.env.CONTACT_TO || process.env.GMAIL_USER,
       subject: `Nuevo contacto: ${name}`,
-      text: `Nombre: ${name}\nEmail: ${email}\n\n${message}`,
-      // Si definiste REPLY_TO en Railway y es válido, se usa ese. Sino, el del usuario.
-      replyTo: useFixedReplyTo ? fixedReplyTo : { name, address: email },
+      text: `Nombre: ${name}\nEmail (usuario): ${email}\n\n${message}`,
+      replyTo, // ← forzado por env si REPLY_TO está definido
     };
+
+    // Log simple para verificar qué está usando
+    console.log("[CONTACT] from:", mailOptions.from, "to:", mailOptions.to, "replyTo:", mailOptions.replyTo);
 
     await transporter.sendMail(mailOptions);
 
@@ -70,6 +84,20 @@ router.post("/", async (req, res) => {
     console.error(err);
     res.status(500).json({ ok: false, error: "Error en servidor" });
   }
+});
+
+// GET /contact/debug  — ver qué valores está leyendo el server (quitar luego si querés)
+router.get("/debug", (req, res) => {
+  res.json({
+    ok: true,
+    env: {
+      GMAIL_USER: !!process.env.GMAIL_USER,
+      GMAIL_APP_PASS: !!process.env.GMAIL_APP_PASS,
+      CONTACT_TO: process.env.CONTACT_TO || null,
+      MAIL_FROM_NAME: process.env.MAIL_FROM_NAME || null,
+      REPLY_TO: process.env.REPLY_TO || null,
+    },
+  });
 });
 
 module.exports = router;
