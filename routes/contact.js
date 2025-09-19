@@ -1,108 +1,33 @@
-// routes/contact.js — Envío por Gmail API (HTTPS) + rate limit
+// routes/contact.js — Relay a Google Apps Script (sin googleapis / nodemailer)
 const express = require("express");
 const rateLimit = require("express-rate-limit");
-const { google } = require("googleapis");
 
 const router = express.Router();
 
-// Anti-spam básico
+// Rate limit simple
 const limiter = rateLimit({ windowMs: 60_000, max: 20 });
 router.use(limiter);
 
-// Vars
-const hasGmailAPI =
-  !!process.env.GOOGLE_CLIENT_ID &&
-  !!process.env.GOOGLE_CLIENT_SECRET &&
-  !!process.env.GOOGLE_REFRESH_TOKEN;
-
+// Validación básica
 const emailRx = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-function base64Url(str) {
-  return Buffer.from(str)
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
-}
-
-function buildMime({ from, to, replyTo, subject, text }) {
-  const lines = [
-    `From: ${from}`,
-    `To: ${to}`,
-    replyTo ? `Reply-To: ${replyTo}` : null,
-    `Subject: ${subject}`,
-    "MIME-Version: 1.0",
-    "Content-Type: text/plain; charset=UTF-8",
-    "Content-Transfer-Encoding: 7bit",
-    "",
-    text || "",
-  ].filter(Boolean);
-  return base64Url(lines.join("\r\n"));
-}
-
-function getOAuthClient() {
-  const o = new google.auth.OAuth2(
-    process.env.GOOGLE_CLIENT_ID,
-    process.env.GOOGLE_CLIENT_SECRET
-  );
-  o.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
-  return o;
-}
-
-// ---- Debug de entorno (no expone secretos)
+// Debug rápido para ver variables en Railway
 router.get("/debug", (_req, res) => {
   res.json({
     ok: true,
     env: {
-      GMAIL_API: hasGmailAPI,
-      GMAIL_SENDER: process.env.GMAIL_SENDER || null,
-      MAIL_FROM_NAME: process.env.MAIL_FROM_NAME || null,
-      CONTACT_TO: process.env.CONTACT_TO || null,
-      REPLY_TO: process.env.REPLY_TO || null,
+      APPS_SCRIPT_URL: !!process.env.APPS_SCRIPT_URL,
+      APPS_SCRIPT_KEY: !!process.env.APPS_SCRIPT_KEY,
     },
   });
 });
 
-// Autotest (intenta enviar un correo simple)
-router.get("/selftest", async (_req, res) => {
-  try {
-    if (!hasGmailAPI) return res.json({ ok: false, error: "no_gmail_api" });
-    const to = process.env.CONTACT_TO || process.env.GMAIL_SENDER;
-    if (!to) return res.json({ ok: false, error: "CONTACT_TO missing" });
-
-    const fromAddr = process.env.GMAIL_SENDER || to;
-    const fromHdr = `${process.env.MAIL_FROM_NAME || "Contacto App"} <${fromAddr}>`;
-    const subject = `SELFTEST contacto ${new Date().toISOString()}`;
-    const text = "Autotest OK (Gmail API).";
-
-    const auth = getOAuthClient();
-    const gmail = google.gmail({ version: "v1", auth });
-    const raw = buildMime({
-      from: fromHdr,
-      to,
-      replyTo: process.env.REPLY_TO || null,
-      subject,
-      text,
-    });
-
-    const r = await gmail.users.messages.send({
-      userId: "me",
-      requestBody: { raw },
-    });
-
-    return res.json({ ok: true, id: r?.data?.id || null });
-  } catch (e) {
-    console.error("SELFTEST_FAIL:", e?.response?.data || e);
-    return res.status(500).json({ ok: false, error: "selftest_failed" });
-  }
-});
-
-// POST /contact (usa Gmail API por HTTPS)
+// POST /contact
 router.post("/", async (req, res) => {
   try {
     const { name, email, message, website } = req.body || {};
 
-    // Honeypot (bots)
+    // Honeypot anti-bot
     if (website && String(website).trim() !== "") {
       return res.json({ ok: true });
     }
@@ -118,40 +43,45 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ ok: false, error: "Mensaje muy largo" });
     }
 
-    if (!hasGmailAPI) {
-      console.log("[CONTACT][NO_GMAIL_API]", { name, email, message });
-      return res.json({ ok: true, note: "gmail_api_not_configured" });
+    const url = process.env.APPS_SCRIPT_URL;
+    if (!url) {
+      return res.status(500).json({ ok: false, error: "Falta APPS_SCRIPT_URL" });
     }
 
-    const to = process.env.CONTACT_TO || process.env.GMAIL_SENDER;
-    if (!to) return res.status(500).json({ ok: false, error: "CONTACT_TO no configurado" });
+    // Timeout con AbortController (10s)
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), 10_000);
 
-    const fromAddr = process.env.GMAIL_SENDER || to;
-    const fromHdr = `${process.env.MAIL_FROM_NAME || "Contacto App"} <${fromAddr}>`;
-    const replyTo = (process.env.REPLY_TO && process.env.REPLY_TO.trim()) || String(email).trim();
+    const payload = {
+      name,
+      email,        // el Apps Script puede usarlo como Reply-To o incluirlo en el cuerpo
+      message,
+      key: process.env.APPS_SCRIPT_KEY || undefined, // si configuraste clave compartida
+    };
 
-    const now = new Date().toISOString();
-    const subject = `Contacto ${now} — ${String(name).trim() || "Anónimo"}`;
-    const text =
-      `Nombre: ${name}\n` +
-      `Email (usuario): ${email}\n` +
-      `Reply-To (header): ${replyTo}\n\n` +
-      `${message}`;
-
-    // Enviar
-    const auth = getOAuthClient();
-    const gmail = google.gmail({ version: "v1", auth });
-    const raw = buildMime({ from: fromHdr, to, replyTo, subject, text });
-
-    const r = await gmail.users.messages.send({
-      userId: "me",
-      requestBody: { raw },
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: ac.signal,
+    }).catch((err) => {
+      // fetch puede tirar error distinto si aborta
+      throw new Error(`fetch_failed: ${err.message}`);
     });
+    clearTimeout(t);
 
-    return res.json({ ok: true, id: r?.data?.id || null });
+    const json = await r.json().catch(() => ({}));
+
+    if (!r.ok || json?.ok === false) {
+      return res
+        .status(500)
+        .json({ ok: false, error: "Apps Script error", detail: json });
+    }
+
+    return res.json({ ok: true });
   } catch (err) {
-    console.error("CONTACT_FAIL:", err?.response?.data || err);
-    res.status(500).json({ ok: false, error: "Error en servidor" });
+    const msg = err?.name === "AbortError" ? "timeout" : (err?.message || "server_error");
+    return res.status(500).json({ ok: false, error: msg });
   }
 });
 
