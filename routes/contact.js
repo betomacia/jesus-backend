@@ -13,7 +13,7 @@ router.use(limiter);
 const transporter = nodemailer.createTransport({
   service: "gmail",
   auth: {
-    user: process.env.GMAIL_USER,      // tu Gmail o Workspace
+    user: process.env.GMAIL_USER,      // la cuenta que ENVÍA
     pass: process.env.GMAIL_APP_PASS,  // App Password (no tu pass normal)
   },
 });
@@ -21,12 +21,12 @@ const transporter = nodemailer.createTransport({
 // Validación básica de email
 const emailRx = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-// POST /contact  (se montará como app.use("/contact", router))
+// POST /contact
 router.post("/", async (req, res) => {
   try {
     const { name, email, message, website } = req.body || {};
 
-    // Honeypot opcional: si llega con contenido, ignoramos (bot)
+    // Honeypot opcional: si viene con contenido, ignoramos (bot)
     if (website && String(website).trim() !== "") {
       return res.json({ ok: true });
     }
@@ -48,13 +48,22 @@ router.post("/", async (req, res) => {
       return res.json({ ok: true, note: "SMTP no configurado" });
     }
 
-    await transporter.sendMail({
-      from: `"${process.env.MAIL_FROM_NAME || "Contacto App"}" <${process.env.GMAIL_USER}>`, // SIEMPRE tu Gmail
-      to: process.env.CONTACT_TO || process.env.GMAIL_USER, // destino
-      replyTo: email,                                       // el usuario en reply-to
+    // Reply-To configurable por variable de entorno:
+    // - Si REPLY_TO existe y es válido -> usamos ese fijo (control total desde Railway).
+    // - Si NO está, usamos el email que envía el usuario (comportamiento anterior).
+    const fixedReplyTo = (process.env.REPLY_TO || "").trim();
+    const useFixedReplyTo = fixedReplyTo && emailRx.test(fixedReplyTo);
+
+    const mailOptions = {
+      from: `"${process.env.MAIL_FROM_NAME || "Contacto App"}" <${process.env.GMAIL_USER}>`,
+      to: process.env.CONTACT_TO || process.env.GMAIL_USER,
       subject: `Nuevo contacto: ${name}`,
       text: `Nombre: ${name}\nEmail: ${email}\n\n${message}`,
-    });
+      // Si definiste REPLY_TO en Railway y es válido, se usa ese. Sino, el del usuario.
+      replyTo: useFixedReplyTo ? fixedReplyTo : { name, address: email },
+    };
+
+    await transporter.sendMail(mailOptions);
 
     res.json({ ok: true });
   } catch (err) {
