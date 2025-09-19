@@ -9,25 +9,51 @@ const router = express.Router();
 const limiter = rateLimit({ windowMs: 60_000, max: 20 });
 router.use(limiter);
 
-// Gmail SMTP (App Password)
+// === SMTP Gmail explícito (evita ambigüedades de "service: gmail") ===
 const transporter = nodemailer.createTransport({
-  service: "gmail",
+  host: "smtp.gmail.com",
+  port: 465,           // 587 STARTTLS también sirve, pero 465+SSL suele ser más estable en cloud
+  secure: true,        // true = SSL
   auth: {
-    user: process.env.GMAIL_USER,      // quien ENVÍA (ej: info@movilive.com)
-    pass: process.env.GMAIL_APP_PASS,  // App Password
+    user: process.env.GMAIL_USER,      // ej: info@movilive.com (Workspace)
+    pass: process.env.GMAIL_APP_PASS,  // App Password (NO la contraseña normal)
   },
+  // Diagnóstico
+  logger: true,
+  debug: true,
 });
 
+// Validador de email
 const emailRx = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-// Helper fecha corta para subject único (evita threading)
+// Subject único (evita que Gmail “pegue” con hilos viejos)
 function stamp() {
   const d = new Date();
   const pad = (n) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
-// POST /contact — envía correo
+// ---------- DEBUG: probar login SMTP ----------
+// GET /contact/selftest → te dice si Gmail acepta el login SMTP
+router.get("/selftest", async (_req, res) => {
+  try {
+    await transporter.verify();   // intenta login/handshake
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("[CONTACT][SELFTEST] SMTP ERROR:", err);
+    res.status(500).json({
+      ok: false,
+      smtp: {
+        code: err.code || null,
+        command: err.command || null,
+        responseCode: err.responseCode || null,
+        response: err.response || String(err),
+      },
+    });
+  }
+});
+
+// ---------- POST /contact → envía el mail ----------
 router.post("/", async (req, res) => {
   try {
     const { name, email, message, website } = req.body || {};
@@ -37,6 +63,7 @@ router.post("/", async (req, res) => {
       return res.json({ ok: true });
     }
 
+    // Validaciones mínimas
     if (!name || !email || !message) {
       return res.status(400).json({ ok: false, error: "Faltan campos" });
     }
@@ -53,21 +80,19 @@ router.post("/", async (req, res) => {
       return res.json({ ok: true, note: "SMTP no configurado" });
     }
 
-    // Reply-To forzado por env (si existe y es válido)
+    // Reply-To fijo desde env (si existe y es válido). Evita “contaminación” de hilos.
     const fixedReplyTo = (process.env.REPLY_TO || "").trim();
     const useReplyTo = fixedReplyTo && emailRx.test(fixedReplyTo) ? fixedReplyTo : undefined;
 
-    // From “humano” + sender técnico
+    // Direcciones
     const fromName = process.env.MAIL_FROM_NAME || "Contacto App";
-    const fromAddr = process.env.GMAIL_USER; // debe ser tu cuenta Gmail/Workspace
-    const toAddr   = process.env.CONTACT_TO || process.env.GMAIL_USER;
-
-    const subject = `Nuevo contacto: ${name} — ${stamp()}`;
+    const fromAddr = process.env.GMAIL_USER;             // SIEMPRE tu cuenta auténtica
+    const toAddr   = process.env.CONTACT_TO || fromAddr; // destino
+    const subject  = `Nuevo contacto: ${name} — ${stamp()}`;
 
     const mailOptions = {
-      // Cabeceras visibles
-      from: `"${fromName}" <${fromAddr}>`,      // lo que ve el receptor
-      sender: fromAddr,                         // “Sender” explícito
+      from: `"${fromName}" <${fromAddr}>`,  // visible
+      sender: fromAddr,                      // “Sender” explícito
       to: toAddr,
       subject,
       text:
@@ -75,14 +100,11 @@ router.post("/", async (req, res) => {
         `Email (usuario): ${email}\n\n` +
         `${message}`,
 
-      // Forzamos Reply-To fijo si está configurado
+      // Forzar Reply-To si está configurado
       ...(useReplyTo ? { replyTo: useReplyTo, headers: { "Reply-To": useReplyTo } } : {}),
 
-      // Envelope SMTP (remitente real/bounce address)
-      envelope: {
-        from: fromAddr,
-        to: toAddr,
-      },
+      // Envelope SMTP (remitente real/bounce)
+      envelope: { from: fromAddr, to: toAddr },
     };
 
     console.log("[CONTACT] from:", mailOptions.from, "| sender:", mailOptions.sender, "| to:", mailOptions.to, "| replyTo:", useReplyTo || "(none)");
@@ -90,17 +112,28 @@ router.post("/", async (req, res) => {
     await transporter.sendMail(mailOptions);
     res.json({ ok: true });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ ok: false, error: "Error en servidor" });
+    console.error("[CONTACT][SEND] SMTP ERROR:", err);
+    // devolvemos pista concreta (sin datos sensibles)
+    res.status(500).json({
+      ok: false,
+      error: "Error en servidor",
+      smtp: {
+        code: err.code || null,
+        command: err.command || null,
+        responseCode: err.responseCode || null,
+        response: err.response || String(err),
+      },
+    });
   }
 });
 
-// GET /contact/debug — inspección rápida de variables
+// ---------- DEBUG vars ----------
 router.get("/debug", (_req, res) => {
   res.json({
     ok: true,
     env: {
       GMAIL_USER: !!process.env.GMAIL_USER,
+      GMAIL_APP_PASS: !!process.env.GMAIL_APP_PASS,
       CONTACT_TO: process.env.CONTACT_TO || null,
       MAIL_FROM_NAME: process.env.MAIL_FROM_NAME || null,
       REPLY_TO: process.env.REPLY_TO || null,
