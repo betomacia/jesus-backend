@@ -1,6 +1,6 @@
 // routes/contact.js
-// Enruta POST /contact hacia un Web App de Google Apps Script con clave compartida.
-// No requiere googleapis, ni SMTP. Railway solo necesita APPS_SCRIPT_URL y APPS_SCRIPT_KEY.
+// Envía POST /contact a tu Web App de Google Apps Script.
+// Funciona con o sin clave compartida (APPS_SCRIPT_KEY).
 
 const express = require("express");
 const rateLimit = require("express-rate-limit");
@@ -8,17 +8,12 @@ const rateLimit = require("express-rate-limit");
 const router = express.Router();
 
 // ------- Rate limit (anti-spam) -------
-const limiter = rateLimit({
-  windowMs: 60_000, // 1 minuto
-  max: 20,          // 20 req/min por IP
-});
-router.use(limiter);
+router.use(rateLimit({ windowMs: 60_000, max: 20 }));
 
 // ------- Helpers -------
 const has = (v) => typeof v === "string" && v.trim().length > 0;
 const emailRx = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-// fetch con timeout
 async function postJson(url, data, { timeoutMs = 12_000 } = {}) {
   const ac = new AbortController();
   const t = setTimeout(() => ac.abort(), timeoutMs);
@@ -30,38 +25,36 @@ async function postJson(url, data, { timeoutMs = 12_000 } = {}) {
       signal: ac.signal,
     });
     const text = await r.text();
-    let json;
-    try { json = JSON.parse(text); } catch { json = { raw: text }; }
+    let json; try { json = JSON.parse(text); } catch { json = { raw: text }; }
     return { ok: r.ok, status: r.status, json };
   } finally {
     clearTimeout(t);
   }
 }
 
-// ------- Debug env -------
+// ------- Debug -------
 router.get("/debug", (_req, res) => {
   res.json({
     ok: true,
     env: {
       APPS_SCRIPT_URL: !!process.env.APPS_SCRIPT_URL,
-      APPS_SCRIPT_KEY: !!process.env.APPS_SCRIPT_KEY,
+      APPS_SCRIPT_KEY: has(process.env.APPS_SCRIPT_KEY),
     },
   });
 });
 
-// ------- Ping rápido al Script (opcional) -------
+// ------- Ping opcional -------
 router.get("/selftest", async (_req, res) => {
   const url = process.env.APPS_SCRIPT_URL || "";
   const key = process.env.APPS_SCRIPT_KEY || "";
-  if (!has(url) || !has(key)) {
-    return res
-      .status(500)
-      .json({ ok: false, error: "missing_env", detail: { APPS_SCRIPT_URL: !!url, APPS_SCRIPT_KEY: !!key } });
-  }
+  if (!has(url)) return res.status(500).json({ ok: false, error: "missing_APPS_SCRIPT_URL" });
+
+  const payload = { name: "SelfTest", email: "noreply@example.com", message: "Ping" };
+  if (has(key)) payload.key = key;
+
   try {
-    const payload = { name: "SelfTest", email: "noreply@example.com", message: "Ping", key };
     const r = await postJson(url, payload, { timeoutMs: 10_000 });
-    return res.status(r.ok ? 200 : 500).json({ ok: r.ok, status: r.status, script: r.json });
+    return res.status(r.ok ? 200 : 502).json({ ok: r.ok, status: r.status, script: r.json });
   } catch (e) {
     return res.status(500).json({ ok: false, error: "script_error", detail: String(e) });
   }
@@ -73,15 +66,13 @@ router.post("/", async (req, res) => {
     const url = process.env.APPS_SCRIPT_URL || "";
     const key = process.env.APPS_SCRIPT_KEY || "";
 
-    if (!has(url) || !has(key)) {
-      return res
-        .status(500)
-        .json({ ok: false, error: "server_not_configured", detail: { APPS_SCRIPT_URL: !!url, APPS_SCRIPT_KEY: !!key } });
+    if (!has(url)) {
+      return res.status(500).json({ ok: false, error: "server_not_configured", detail: { APPS_SCRIPT_URL: !!url } });
     }
 
     const { name = "", email = "", message = "", website = "" } = req.body || {};
 
-    // Honeypot (campo oculto). Si viene con algo, lo ignoramos como OK.
+    // Honeypot (si viene con algo, tratamos como OK silencioso)
     if (has(website)) return res.json({ ok: true });
 
     // Validaciones mínimas
@@ -95,8 +86,9 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ ok: false, error: "message_too_long" });
     }
 
-    // Payload al Apps Script
-    const payload = { name: String(name), email: String(email), message: String(message), key };
+    // Armo payload al Apps Script (agrego key solo si existe en env)
+    const payload = { name: String(name), email: String(email), message: String(message) };
+    if (has(key)) payload.key = key;
 
     const scriptResp = await postJson(url, payload, { timeoutMs: 12_000 });
 
@@ -109,7 +101,7 @@ router.post("/", async (req, res) => {
       });
     }
 
-    // El script responde { ok: true } en éxito
+    // Se espera { ok: true } en éxito
     if (scriptResp.json && scriptResp.json.ok) {
       return res.json({ ok: true });
     } else {
