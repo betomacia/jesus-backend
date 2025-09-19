@@ -1,74 +1,108 @@
-// routes/contact.js
+// routes/contact.js — Envío por Gmail API (HTTPS) + rate limit
 const express = require("express");
 const rateLimit = require("express-rate-limit");
-const nodemailer = require("nodemailer");
+const { google } = require("googleapis");
 
 const router = express.Router();
 
-// ---------- Rate limit (anti-spam) ----------
+// Anti-spam básico
 const limiter = rateLimit({ windowMs: 60_000, max: 20 });
 router.use(limiter);
 
-// ---------- ENV ----------
-const {
-  GMAIL_USER,
-  GMAIL_APP_PASS,
-  CONTACT_TO,
-  MAIL_FROM_NAME,
-  REPLY_TO,           // si lo pones, fuerza Reply-To fijo
-  SMTP_HOST = "smtp.gmail.com",
-  SMTP_PORT = "587",              // 587 = STARTTLS
-  SMTP_SECURE = "false",          // false porque 587 usa STARTTLS
-  RESEND_API_KEY,                 // si existe, enviamos por Resend (HTTP)
-  RESEND_FROM,                    // ej: "Jesús <no-reply@tudominio.com>"
-} = process.env;
+// Vars
+const hasGmailAPI =
+  !!process.env.GOOGLE_CLIENT_ID &&
+  !!process.env.GOOGLE_CLIENT_SECRET &&
+  !!process.env.GOOGLE_REFRESH_TOKEN;
 
-// ---------- Validación básica ----------
 const emailRx = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-// ---------- Resend (HTTP) ----------
-async function sendViaResend({ from, to, replyTo, subject, text }) {
-  if (!RESEND_API_KEY) return { ok: false, why: "no_resend_key" };
-  const body = {
-    from: RESEND_FROM || from, // debe ser un remitente verificado en Resend
-    to: Array.isArray(to) ? to : [to],
-    subject,
-    text,
-  };
-  if (replyTo) body.reply_to = replyTo;
+function base64Url(str) {
+  return Buffer.from(str)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
 
-  const r = await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${RESEND_API_KEY}`,
-      "Content-Type": "application/json",
+function buildMime({ from, to, replyTo, subject, text }) {
+  const lines = [
+    `From: ${from}`,
+    `To: ${to}`,
+    replyTo ? `Reply-To: ${replyTo}` : null,
+    `Subject: ${subject}`,
+    "MIME-Version: 1.0",
+    "Content-Type: text/plain; charset=UTF-8",
+    "Content-Transfer-Encoding: 7bit",
+    "",
+    text || "",
+  ].filter(Boolean);
+  return base64Url(lines.join("\r\n"));
+}
+
+function getOAuthClient() {
+  const o = new google.auth.OAuth2(
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.GOOGLE_CLIENT_SECRET
+  );
+  o.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
+  return o;
+}
+
+// ---- Debug de entorno (no expone secretos)
+router.get("/debug", (_req, res) => {
+  res.json({
+    ok: true,
+    env: {
+      GMAIL_API: hasGmailAPI,
+      GMAIL_SENDER: process.env.GMAIL_SENDER || null,
+      MAIL_FROM_NAME: process.env.MAIL_FROM_NAME || null,
+      CONTACT_TO: process.env.CONTACT_TO || null,
+      REPLY_TO: process.env.REPLY_TO || null,
     },
-    body: JSON.stringify(body),
   });
+});
 
-  const json = await r.json().catch(() => ({}));
-  return { ok: r.ok, status: r.status, json };
-}
+// Autotest (intenta enviar un correo simple)
+router.get("/selftest", async (_req, res) => {
+  try {
+    if (!hasGmailAPI) return res.json({ ok: false, error: "no_gmail_api" });
+    const to = process.env.CONTACT_TO || process.env.GMAIL_SENDER;
+    if (!to) return res.json({ ok: false, error: "CONTACT_TO missing" });
 
-// ---------- Nodemailer (SMTP) ----------
-let transporter = null;
-if (GMAIL_USER && GMAIL_APP_PASS) {
-  transporter = nodemailer.createTransport({
-    host: SMTP_HOST,
-    port: Number(SMTP_PORT),
-    secure: String(SMTP_SECURE).toLowerCase() === "true", // 465=true, 587=false
-    auth: { user: GMAIL_USER, pass: GMAIL_APP_PASS },
-    connectionTimeout: 10_000,
-    socketTimeout: 15_000,
-  });
-}
+    const fromAddr = process.env.GMAIL_SENDER || to;
+    const fromHdr = `${process.env.MAIL_FROM_NAME || "Contacto App"} <${fromAddr}>`;
+    const subject = `SELFTEST contacto ${new Date().toISOString()}`;
+    const text = "Autotest OK (Gmail API).";
 
-// ---------- POST /contact ----------
+    const auth = getOAuthClient();
+    const gmail = google.gmail({ version: "v1", auth });
+    const raw = buildMime({
+      from: fromHdr,
+      to,
+      replyTo: process.env.REPLY_TO || null,
+      subject,
+      text,
+    });
+
+    const r = await gmail.users.messages.send({
+      userId: "me",
+      requestBody: { raw },
+    });
+
+    return res.json({ ok: true, id: r?.data?.id || null });
+  } catch (e) {
+    console.error("SELFTEST_FAIL:", e?.response?.data || e);
+    return res.status(500).json({ ok: false, error: "selftest_failed" });
+  }
+});
+
+// POST /contact (usa Gmail API por HTTPS)
 router.post("/", async (req, res) => {
   try {
     const { name, email, message, website } = req.body || {};
 
-    // Honeypot (bot)
+    // Honeypot (bots)
     if (website && String(website).trim() !== "") {
       return res.json({ ok: true });
     }
@@ -84,77 +118,40 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ ok: false, error: "Mensaje muy largo" });
     }
 
-    const to = CONTACT_TO || GMAIL_USER; // destino
-    const fromName = MAIL_FROM_NAME || "Contacto App";
-    const from = `"${fromName}" <${GMAIL_USER || "no-reply@localhost"}>`;
-    const replyToHeader = REPLY_TO || email; // si seteas REPLY_TO en env, se usa fijo
-
-    const subject = `Nuevo contacto: ${name} — ${new Date().toISOString()}`;
-    const text = `Nombre: ${name}\nEmail: ${email}\n\n${message}`;
-
-    // 1) Si hay RESEND_API_KEY, mandamos por Resend (HTTP, evita bloqueos SMTP)
-    if (RESEND_API_KEY) {
-      const r = await sendViaResend({
-        from,
-        to,
-        replyTo: replyToHeader,
-        subject,
-        text,
-      });
-      if (r.ok) return res.json({ ok: true, provider: "resend" });
-      console.error("[CONTACT][RESEND_FAIL]", r);
-      // si falla Resend y además tenemos SMTP, intentamos SMTP como fallback
+    if (!hasGmailAPI) {
+      console.log("[CONTACT][NO_GMAIL_API]", { name, email, message });
+      return res.json({ ok: true, note: "gmail_api_not_configured" });
     }
 
-    // 2) SMTP (Gmail)
-    if (transporter) {
-      await transporter.sendMail({
-        from,                // debe ser tu GMAIL_USER (el autenticado)
-        to,
-        replyTo: replyToHeader,
-        subject,
-        text,
-      });
-      return res.json({ ok: true, provider: "smtp" });
-    }
+    const to = process.env.CONTACT_TO || process.env.GMAIL_SENDER;
+    if (!to) return res.status(500).json({ ok: false, error: "CONTACT_TO no configurado" });
 
-    // 3) Sin provider: no rompemos UX
-    console.log("[CONTACT][NO PROVIDER] Log only:", { name, email, message });
-    return res.json({ ok: true, provider: "none" });
+    const fromAddr = process.env.GMAIL_SENDER || to;
+    const fromHdr = `${process.env.MAIL_FROM_NAME || "Contacto App"} <${fromAddr}>`;
+    const replyTo = (process.env.REPLY_TO && process.env.REPLY_TO.trim()) || String(email).trim();
+
+    const now = new Date().toISOString();
+    const subject = `Contacto ${now} — ${String(name).trim() || "Anónimo"}`;
+    const text =
+      `Nombre: ${name}\n` +
+      `Email (usuario): ${email}\n` +
+      `Reply-To (header): ${replyTo}\n\n` +
+      `${message}`;
+
+    // Enviar
+    const auth = getOAuthClient();
+    const gmail = google.gmail({ version: "v1", auth });
+    const raw = buildMime({ from: fromHdr, to, replyTo, subject, text });
+
+    const r = await gmail.users.messages.send({
+      userId: "me",
+      requestBody: { raw },
+    });
+
+    return res.json({ ok: true, id: r?.data?.id || null });
   } catch (err) {
-    console.error("[CONTACT][ERROR]", err);
-    // devolvemos error simplificado; el detalle queda en logs
-    return res.status(500).json({ ok: false, error: "Error en servidor" });
-  }
-});
-
-// ---------- DEBUG ----------
-router.get("/debug", (_req, res) => {
-  res.json({
-    ok: true,
-    env: {
-      GMAIL_USER: !!GMAIL_USER,
-      GMAIL_APP_PASS: !!GMAIL_APP_PASS,
-      CONTACT_TO: CONTACT_TO || null,
-      MAIL_FROM_NAME: MAIL_FROM_NAME || null,
-      REPLY_TO: REPLY_TO || null,
-      SMTP_HOST,
-      SMTP_PORT,
-      SMTP_SECURE,
-      RESEND: !!RESEND_API_KEY,
-      RESEND_FROM: RESEND_FROM || null,
-    },
-  });
-});
-
-// Verificación SMTP (opcional)
-router.get("/verify", async (_req, res) => {
-  if (!transporter) return res.json({ ok: false, error: "no_smtp_config" });
-  try {
-    await transporter.verify();
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: "smtp_verify_failed", detail: String(e && e.message) });
+    console.error("CONTACT_FAIL:", err?.response?.data || err);
+    res.status(500).json({ ok: false, error: "Error en servidor" });
   }
 });
 
