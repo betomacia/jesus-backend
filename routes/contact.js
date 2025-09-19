@@ -5,49 +5,38 @@ const nodemailer = require("nodemailer");
 
 const router = express.Router();
 
-// Rate limit simple (anti-spam)
+// Anti-spam simple
 const limiter = rateLimit({ windowMs: 60_000, max: 20 });
 router.use(limiter);
 
-// Transporter Gmail (usa App Password)
+// Gmail SMTP (App Password)
 const transporter = nodemailer.createTransport({
   service: "gmail",
   auth: {
-    user: process.env.GMAIL_USER,      // la cuenta que ENVÍA
-    pass: process.env.GMAIL_APP_PASS,  // App Password (no tu pass normal)
+    user: process.env.GMAIL_USER,      // quien ENVÍA (ej: info@movilive.com)
+    pass: process.env.GMAIL_APP_PASS,  // App Password
   },
 });
 
-// Validación básica de email
 const emailRx = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-// ⚙️ Helper: resuelve Reply-To (FORZADO por env si existe)
-function resolveReplyTo(name, userEmail) {
-  const fixedReplyTo = (process.env.REPLY_TO || "").trim();
-
-  if (fixedReplyTo && emailRx.test(fixedReplyTo)) {
-    // 🚩 Forzamos SIEMPRE el Reply-To desde Railway
-    return fixedReplyTo;
-  }
-  // Si no hay REPLY_TO válido, caemos al email del usuario (comportamiento anterior)
-  if (userEmail && emailRx.test(String(userEmail))) {
-    return { name, address: userEmail };
-  }
-  // Último recurso: sin Reply-To
-  return undefined;
+// Helper fecha corta para subject único (evita threading)
+function stamp() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
-// POST /contact  — envía el mail
+// POST /contact — envía correo
 router.post("/", async (req, res) => {
   try {
     const { name, email, message, website } = req.body || {};
 
-    // Honeypot opcional: si viene con contenido, ignoramos (bot)
+    // Honeypot (si viene con texto, ignoramos)
     if (website && String(website).trim() !== "") {
       return res.json({ ok: true });
     }
 
-    // Validaciones mínimas
     if (!name || !email || !message) {
       return res.status(400).json({ ok: false, error: "Faltan campos" });
     }
@@ -58,27 +47,47 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ ok: false, error: "Mensaje muy largo" });
     }
 
-    // Si falta config SMTP, no rompemos UX: log y OK
+    // Si falta SMTP, no rompemos UX
     if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASS) {
       console.log("[CONTACT][NO SMTP]", { name, email, message });
       return res.json({ ok: true, note: "SMTP no configurado" });
     }
 
-    const replyTo = resolveReplyTo(name, email);
+    // Reply-To forzado por env (si existe y es válido)
+    const fixedReplyTo = (process.env.REPLY_TO || "").trim();
+    const useReplyTo = fixedReplyTo && emailRx.test(fixedReplyTo) ? fixedReplyTo : undefined;
+
+    // From “humano” + sender técnico
+    const fromName = process.env.MAIL_FROM_NAME || "Contacto App";
+    const fromAddr = process.env.GMAIL_USER; // debe ser tu cuenta Gmail/Workspace
+    const toAddr   = process.env.CONTACT_TO || process.env.GMAIL_USER;
+
+    const subject = `Nuevo contacto: ${name} — ${stamp()}`;
 
     const mailOptions = {
-      from: `"${process.env.MAIL_FROM_NAME || "Contacto App"}" <${process.env.GMAIL_USER}>`,
-      to: process.env.CONTACT_TO || process.env.GMAIL_USER,
-      subject: `Nuevo contacto: ${name}`,
-      text: `Nombre: ${name}\nEmail (usuario): ${email}\n\n${message}`,
-      replyTo, // ← forzado por env si REPLY_TO está definido
+      // Cabeceras visibles
+      from: `"${fromName}" <${fromAddr}>`,      // lo que ve el receptor
+      sender: fromAddr,                         // “Sender” explícito
+      to: toAddr,
+      subject,
+      text:
+        `Nombre: ${name}\n` +
+        `Email (usuario): ${email}\n\n` +
+        `${message}`,
+
+      // Forzamos Reply-To fijo si está configurado
+      ...(useReplyTo ? { replyTo: useReplyTo, headers: { "Reply-To": useReplyTo } } : {}),
+
+      // Envelope SMTP (remitente real/bounce address)
+      envelope: {
+        from: fromAddr,
+        to: toAddr,
+      },
     };
 
-    // Log simple para verificar qué está usando
-    console.log("[CONTACT] from:", mailOptions.from, "to:", mailOptions.to, "replyTo:", mailOptions.replyTo);
+    console.log("[CONTACT] from:", mailOptions.from, "| sender:", mailOptions.sender, "| to:", mailOptions.to, "| replyTo:", useReplyTo || "(none)");
 
     await transporter.sendMail(mailOptions);
-
     res.json({ ok: true });
   } catch (err) {
     console.error(err);
@@ -86,13 +95,12 @@ router.post("/", async (req, res) => {
   }
 });
 
-// GET /contact/debug  — ver qué valores está leyendo el server (quitar luego si querés)
-router.get("/debug", (req, res) => {
+// GET /contact/debug — inspección rápida de variables
+router.get("/debug", (_req, res) => {
   res.json({
     ok: true,
     env: {
       GMAIL_USER: !!process.env.GMAIL_USER,
-      GMAIL_APP_PASS: !!process.env.GMAIL_APP_PASS,
       CONTACT_TO: process.env.CONTACT_TO || null,
       MAIL_FROM_NAME: process.env.MAIL_FROM_NAME || null,
       REPLY_TO: process.env.REPLY_TO || null,
