@@ -32,6 +32,22 @@ const {
 
 const router = express.Router();
 
+/* ====== CORS para TODO /users (incluye preflight) ====== */
+router.use((req, res, next) => {
+  const origin = req.headers.origin || "*";
+  res.header("Access-Control-Allow-Origin", origin);
+  res.header("Vary", "Origin");
+  res.header("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.header("Access-Control-Max-Age", "600"); // cachea preflight unos minutos
+
+  if (req.method === "OPTIONS") {
+    // Preflight: responder sin cuerpo JSON
+    return res.status(204).end();
+  }
+  next();
+});
+
 /* ====== Fuerza respuestas JSON en UTF-8 para TODO este router ====== */
 router.use((req, res, next) => {
   res.set("Content-Type", "application/json; charset=utf-8");
@@ -408,9 +424,9 @@ router.post("/push/send-simple", async (req, res) => {
       data = null,
       platform = null,     // 'web' | 'android' | 'ios' (opcional)
       lang = null,         // override opcional
-      device_id = null,    // << NUEVO: filtrar un device específico
-      fcm_token = null,    // << NUEVO: o filtrar por token exacto
-      webDataOnly = true,  // << por defecto evitar doble toast en Web
+      device_id = null,    // filtrar un device específico
+      fcm_token = null,    // o filtrar por token exacto
+      webDataOnly = true,  // por defecto evitar doble toast en Web
     } = req.body || {};
 
     // Resolver usuario
