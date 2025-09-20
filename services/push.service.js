@@ -77,11 +77,11 @@ async function sendToFcmV1({ token, title, body, data }) {
     const json = await r.json().catch(() => ({}));
     if (!r.ok) {
       const err = json?.error?.message || `fcm_v1_http_${r.status}`;
-      return { ok: false, error: err, detail: json };
+      return { ok: false, error: err, status: r.status, json };
     }
-    return { ok: true, messageId: json?.name || null };
+    return { ok: true, messageId: json?.name || null, status: r.status, json };
   } catch (e) {
-    return { ok: false, error: String(e && e.message || e) };
+    return { ok: false, error: String((e && e.message) || e) };
   }
 }
 
@@ -166,15 +166,27 @@ async function listDevicesByUser({ uid, platform = null }) {
   );
 }
 
-// ====== i18n helpers ======
-function pickLang({ overrideLang, deviceLang, userLang }) {
-  return (overrideLang || deviceLang || userLang || "es").slice(0, 5).toLowerCase();
+// ====== Limpieza de tokens inválidos ======
+function isInvalidTokenError(resp) {
+  // HTTP v1: status suele venir en json.error.status
+  const st = resp?.json?.error?.status;
+  if (st === 'NOT_FOUND' || st === 'UNREGISTERED' || st === 'INVALID_ARGUMENT') return true;
+
+  // Mensajes conocidos
+  const msg = (resp?.json?.error?.message || "").toString();
+  if (
+    /not a valid fcm registration token/i.test(msg) ||
+    /Requested entity was not found/i.test(msg) ||
+    /Requested entity has been deleted/i.test(msg) ||
+    /registration token.*is invalid/i.test(msg)
+  ) return true;
+
+  return false;
 }
 
-function i18nPick(map, lang) {
-  if (!map || typeof map !== "object") return null;
-  const l = (lang || "es").toLowerCase();
-  return map[l] || map[l.split("-")[0]] || map["es"] || map["en"] || null;
+async function deleteDeviceById(id) {
+  try { await query(`DELETE FROM devices WHERE id=$1`, [Number(id)]); } catch {}
+  return 1;
 }
 
 // ====== Envío “simple” a todos los devices de un usuario ======
@@ -207,14 +219,29 @@ async function sendSimpleToUser({
       sent++;
       results.push({ device_id: d.device_id, ok: true, messageId: r.messageId || null });
     } else {
+      // Auto-prune: si el token es inválido, borrar el dispositivo
+      if (isInvalidTokenError(r) && d?.id) {
+        await deleteDeviceById(d.id);
+        results.push({ device_id: d.device_id, ok: false, pruned: true, error: r.error });
+      } else {
+        results.push({ device_id: d.device_id, ok: false, error: r.error });
+      }
       failed++;
-      results.push({ device_id: d.device_id, ok: false, error: r.error });
-      // Limpieza opcional:
-      // if (/NotRegistered|InvalidRegistration/i.test(r.error)) { ... eliminar token ... }
     }
   }
 
   return { sent, failed, results };
+}
+
+// ====== i18n helpers ======
+function pickLang({ overrideLang, deviceLang, userLang }) {
+  return (overrideLang || deviceLang || userLang || "es").slice(0, 5).toLowerCase();
+}
+
+function i18nPick(map, lang) {
+  if (!map || typeof map !== "object") return null;
+  const l = (lang || "es").toLowerCase();
+  return map[l] || map[l.split("-")[0]] || map["es"] || map["en"] || null;
 }
 
 module.exports = {
@@ -222,4 +249,5 @@ module.exports = {
   registerDevice,
   listDevicesByUser,
   sendSimpleToUser,
+  deleteDeviceById,
 };
