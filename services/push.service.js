@@ -1,18 +1,11 @@
-// services/push.service.js
 // Envío de notificaciones por Firebase Cloud Messaging (HTTP v1, OAuth2)
-// Requiere ENV:
-//   FIREBASE_PROJECT_ID
-//   FIREBASE_CLIENT_EMAIL
-//   FIREBASE_PRIVATE_KEY  (con saltos de línea escapados: \n)
-// Node 18+ trae fetch global.
-
+// ENV requeridas: FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY (\n escapados)
+// Node 18+ = fetch global
 const { query } = require("../routes/db");
 const { JWT } = require("google-auth-library");
 
-// ====== Config HTTP v1 (OAuth2) ======
 const FB_PROJECT_ID   = process.env.FIREBASE_PROJECT_ID || "";
 const FB_CLIENT_EMAIL = process.env.FIREBASE_CLIENT_EMAIL || "";
-// Reconvertimos \n a saltos reales por si vienen escapados desde Railway
 const FB_PRIVATE_KEY  = (process.env.FIREBASE_PRIVATE_KEY || "").replace(/\\n/g, "\n");
 
 const SCOPES = ["https://www.googleapis.com/auth/firebase.messaging"];
@@ -22,12 +15,7 @@ async function getAccessToken() {
   const now = Math.floor(Date.now() / 1000);
   if (cachedToken.token && cachedToken.exp - 60 > now) return cachedToken.token;
 
-  const jwt = new JWT({
-    email: FB_CLIENT_EMAIL,
-    key: FB_PRIVATE_KEY,
-    scopes: SCOPES,
-  });
-
+  const jwt = new JWT({ email: FB_CLIENT_EMAIL, key: FB_PRIVATE_KEY, scopes: SCOPES });
   const { access_token, expiry_date } = await jwt.authorize();
   cachedToken.token = access_token;
   cachedToken.exp   = Math.floor((expiry_date || (Date.now() + 55 * 60 * 1000)) / 1000);
@@ -35,7 +23,6 @@ async function getAccessToken() {
 }
 
 function normalizeData(data) {
-  // En HTTP v1, TODOS los valores en "data" deben ser string.
   if (!data) return undefined;
   const out = {};
   for (const [k, v] of Object.entries(data)) {
@@ -45,51 +32,34 @@ function normalizeData(data) {
   return Object.keys(out).length ? out : undefined;
 }
 
-async function sendToFcmV1({ token, title, body, data }) {
+/**
+ * webDataOnly=true  => NO manda "notification" en el payload (solo data)
+ *                      y deja que el SW muestre el toast (más confiable en Android Chrome).
+ */
+async function sendToFcmV1({ token, title, body, data, webDataOnly = false }) {
   if (!FB_PROJECT_ID || !FB_CLIENT_EMAIL || !FB_PRIVATE_KEY) {
     return { ok: false, error: "missing_firebase_service_account_envs" };
   }
-
   try {
     const accessToken = await getAccessToken();
     const url = `https://fcm.googleapis.com/v1/projects/${FB_PROJECT_ID}/messages:send`;
 
-    // ⚠️ Para Web (Chrome Android y Desktop) es clave el bloque "webpush"
-    const payload = {
-      message: {
-        token,
-        // Se mantiene notification (algunos agentes lo usan) pero webpush manda.
-        notification: { title, body },
-        data: normalizeData(data),
+    const msgData = normalizeData({
+      ...(data || {}),
+      // Pasamos title/body también por data, por si el SW los necesita
+      __title: title || "Notificación",
+      __body:  body  || "",
+    });
 
-        webpush: {
-          headers: {
-            Urgency: "high",
-          },
-          notification: {
-            title,
-            body,
-            icon: "/icon-192.png",   // Asegúrate de tenerlo en /public
-            // badge: "/badge-72.png", // Opcional: comenta si no existe
-            vibrate: [100, 50, 100],
-            requireInteraction: false
-          },
-          fcm_options: {
-            link: "/" // Al tocar la notificación, abre tu app web
-          }
-        },
+    const message = { token, data: msgData };
+    if (!webDataOnly) {
+      message.notification = { title: title || "Notificación", body: body || "" };
+    }
 
-        // Overrides Android nativo (no afecta Web), por si luego usas tokens Android nativos:
-        // android: { priority: "HIGH" },
-      },
-    };
-
+    const payload = { message };
     const r = await fetch(url, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json",
-      },
+      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
 
@@ -104,18 +74,16 @@ async function sendToFcmV1({ token, title, body, data }) {
   }
 }
 
-// ====== Dispositivos ======
 async function ensureDevicesTable() {
-  // Tabla y índices (incluye índices únicos útiles para upsert)
   await query(`
     CREATE TABLE IF NOT EXISTS devices (
       id                 BIGSERIAL PRIMARY KEY,
       user_id            BIGINT REFERENCES users(id) ON DELETE CASCADE,
-      platform           TEXT,       -- 'android' | 'ios' | 'web'
+      platform           TEXT,
       fcm_token          TEXT NOT NULL,
-      device_id          TEXT,       -- identificador estable del dispositivo si lo tenés
-      lang               TEXT,       -- preferencia del dispositivo
-      tz_offset_minutes  INTEGER,    -- minutos vs UTC (cliente)
+      device_id          TEXT,
+      lang               TEXT,
+      tz_offset_minutes  INTEGER,
       app_version        TEXT,
       os_version         TEXT,
       model              TEXT,
@@ -125,7 +93,6 @@ async function ensureDevicesTable() {
   `);
   await query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_devices_token ON devices(fcm_token);`);
   await query(`CREATE INDEX IF NOT EXISTS idx_devices_user ON devices(user_id);`);
-  // índice único parcial por (user_id, device_id) si device_id no es null
   await query(`
     DO $$
     BEGIN
@@ -139,17 +106,9 @@ async function ensureDevicesTable() {
 }
 
 async function registerDevice({
-  uid,
-  platform = null,
-  fcm_token,
-  device_id = null,
-  lang = null,
-  tz_offset_minutes = null,
-  app_version = null,
-  os_version = null,
-  model = null,
+  uid, platform = null, fcm_token, device_id = null, lang = null,
+  tz_offset_minutes = null, app_version = null, os_version = null, model = null,
 }) {
-  // Upsert por fcm_token (si cambia device_id, se actualiza)
   const r = await query(
     `
     INSERT INTO devices (user_id, platform, fcm_token, device_id, lang, tz_offset_minutes, app_version, os_version, model, last_seen)
@@ -185,13 +144,9 @@ async function listDevicesByUser({ uid, platform = null }) {
   );
 }
 
-// ====== Limpieza de tokens inválidos ======
 function isInvalidTokenError(resp) {
-  // HTTP v1: status suele venir en json.error.status
   const st = resp?.json?.error?.status;
   if (st === 'NOT_FOUND' || st === 'UNREGISTERED' || st === 'INVALID_ARGUMENT') return true;
-
-  // Mensajes conocidos
   const msg = (resp?.json?.error?.message || "").toString();
   if (
     /not a valid fcm registration token/i.test(msg) ||
@@ -199,7 +154,6 @@ function isInvalidTokenError(resp) {
     /Requested entity has been deleted/i.test(msg) ||
     /registration token.*is invalid/i.test(msg)
   ) return true;
-
   return false;
 }
 
@@ -208,16 +162,10 @@ async function deleteDeviceById(id) {
   return 1;
 }
 
-// ====== Envío “simple” a todos los devices de un usuario ======
+/** Envío simple a devices seleccionados */
 async function sendSimpleToUser({
-  user,
-  devices,
-  title = null,
-  body = null,
-  title_i18n = null,
-  body_i18n = null,
-  data = null,
-  overrideLang = null,
+  user, devices, title = null, body = null, title_i18n = null, body_i18n = null,
+  data = null, overrideLang = null, webDataOnly = false,
 }) {
   let sent = 0, failed = 0;
   const results = [];
@@ -232,13 +180,13 @@ async function sendSimpleToUser({
       title: t,
       body: b,
       data,
+      webDataOnly: !!webDataOnly && (d.platform === 'web'), // sólo aplica a web
     });
 
     if (r.ok) {
       sent++;
       results.push({ device_id: d.device_id, ok: true, messageId: r.messageId || null });
     } else {
-      // Auto-prune: si el token es inválido, borrar el dispositivo
       if (isInvalidTokenError(r) && d?.id) {
         await deleteDeviceById(d.id);
         results.push({ device_id: d.device_id, ok: false, pruned: true, error: r.error });
@@ -252,11 +200,9 @@ async function sendSimpleToUser({
   return { sent, failed, results };
 }
 
-// ====== i18n helpers ======
 function pickLang({ overrideLang, deviceLang, userLang }) {
   return (overrideLang || deviceLang || userLang || "es").slice(0, 5).toLowerCase();
 }
-
 function i18nPick(map, lang) {
   if (!map || typeof map !== "object") return null;
   const l = (lang || "es").toLowerCase();
