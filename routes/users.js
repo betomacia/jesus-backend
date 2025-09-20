@@ -54,7 +54,7 @@ router.post("/register", async (req, res) => {
     const normEmail = String(email || "").trim().toLowerCase();
     if (!normEmail) return res.status(400).json({ ok: false, error: "email_required" });
 
-    const user = await upsertUser(normEmail, lang, platform);
+    const user = await upsertUser(normEmail, lang, platform ? String(platform).trim().toLowerCase() : null);
     res.json({ ok: true, user });
   } catch (e) {
     res.status(500).json({ ok: false, error: "users_register_failed", detail: e.message || String(e) });
@@ -73,7 +73,12 @@ router.post("/credit/add", async (req, res) => {
       platform = null,
     } = req.body || {};
 
-    const uid = await ensureUserId({ user_id, email, lang, platform });
+    const uid = await ensureUserId({
+      user_id,
+      email: email ? String(email).trim().toLowerCase() : null,
+      lang,
+      platform: platform ? String(platform).trim().toLowerCase() : null,
+    });
     const amount = Number.parseInt(delta, 10) || 0;
 
     const balance = await addCredit({ uid, delta: amount, reason: reason || null });
@@ -113,7 +118,12 @@ router.post("/credit/spend", async (req, res) => {
       platform = null,
     } = req.body || {};
 
-    const uid = await ensureUserId({ user_id, email, lang, platform });
+    const uid = await ensureUserId({
+      user_id,
+      email: email ? String(email).trim().toLowerCase() : null,
+      lang,
+      platform: platform ? String(platform).trim().toLowerCase() : null,
+    });
     const amt = Math.max(1, Number.parseInt(amount, 10) || 1);
     const r = await spend({ uid, amount: amt, reason: String(reason || "spend") });
 
@@ -140,7 +150,10 @@ router.post("/message/add", async (req, res) => {
       client_ts = null,
     } = req.body || {};
 
-    const uid = await ensureUserId({ user_id, email });
+    const uid = await ensureUserId({
+      user_id,
+      email: email ? String(email).trim().toLowerCase() : null,
+    });
 
     // Prioriza strings reales; si no, convierte una sola vez al final
     let msgText;
@@ -160,7 +173,7 @@ router.post("/message/add", async (req, res) => {
     const r = await addMessage({
       uid,
       role: (role || "user").toString(),
-      text: msgText,          // <- guardar TAL CUAL, sin Buffer/decoding extra
+      text: msgText,          // guardar TAL CUAL
       lang: lang || null,
       client_ts: client_ts || null, // ISO opcional, si viene del dispositivo
     });
@@ -262,10 +275,16 @@ router.post("/push/register", async (req, res) => {
       return res.status(400).json({ ok: false, error: "fcm_token_required" });
     }
 
-    const uid = await ensureUserId({ user_id, email, lang, platform });
+    const uid = await ensureUserId({
+      user_id,
+      email: email ? String(email).trim().toLowerCase() : null,
+      lang,
+      platform: platform ? String(platform).trim().toLowerCase() : null,
+    });
+
     const device = await registerDevice({
       uid,
-      platform: platform || null,
+      platform: platform ? String(platform).trim().toLowerCase() : null,
       fcm_token: String(fcm_token),
       device_id: device_id || null,
       lang: lang || null,
@@ -291,9 +310,10 @@ router.get("/push/devices", async (req, res) => {
       email: email ? String(email).trim().toLowerCase() : null,
     });
 
+    const plat = platform ? String(platform).trim().toLowerCase() : null;
     const devs = await listDevicesByUser({
       uid,
-      platform: platform || null,
+      platform: plat || null,
     });
 
     res.json({ ok: true, user_id: uid, devices: devs });
@@ -314,8 +334,8 @@ router.post("/push/send-simple", async (req, res) => {
       title_i18n = null,
       body_i18n = null,
       data = null,
-      platform = null,
-      lang = null, // override opcional
+      platform = null,  // filtro opcional: 'web' | 'android' | 'ios'
+      lang = null,      // override opcional
     } = req.body || {};
 
     // Resolver usuario
@@ -325,13 +345,19 @@ router.post("/push/send-simple", async (req, res) => {
     });
 
     const user = (await query(`SELECT id, lang FROM users WHERE id=$1`, [uid]))[0] || {};
-    const devices = await listDevicesByUser({ uid, platform: platform || null });
+
+    // Normalizar platform si viene
+    const plat = platform ? String(platform).trim().toLowerCase() : null;
+    const allowed = new Set(["web", "android", "ios"]);
+    const platFilter = plat && allowed.has(plat) ? plat : null;
+
+    const devices = await listDevicesByUser({ uid, platform: platFilter });
 
     if (!devices.length) {
       return res.status(404).json({ ok: false, error: "no_devices_for_user" });
     }
 
-    // Envio simple con localización: title/body o sus variantes i18n
+    // Envío simple con localización: title/body o sus variantes i18n
     const report = await sendSimpleToUser({
       user,
       devices,
