@@ -62,12 +62,10 @@ router.post("/init", async (_req, res) => {
         updated_at  TIMESTAMPTZ DEFAULT NOW()
       );
     `);
-    // Asegurar columnas si la tabla existía de antes
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at  TIMESTAMPTZ DEFAULT NOW();`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at  TIMESTAMPTZ DEFAULT NOW();`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS lang       TEXT;`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS platform   TEXT;`);
-    // Índice único requerido por ON CONFLICT (email)
     await client.query(`DROP INDEX IF EXISTS idx_users_email;`);
     await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_users_email ON users(email);`);
 
@@ -110,16 +108,18 @@ router.post("/init", async (_req, res) => {
         created_at  TIMESTAMPTZ DEFAULT NOW()
       );
     `);
-    // Compatibilidad/esquemas viejos: asegurar columnas
+    // Asegurar columnas presentes
     await client.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS role TEXT;`);
     await client.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS content TEXT;`);
     await client.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS lang TEXT;`);
     await client.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_messages_user ON messages(user_id);`);
-    // Renombrar "message" -> "content" si existía
+
+    // Migraciones de columnas legadas: "message" o "text" -> "content"
     await client.query(`
       DO $$
       BEGIN
+        -- message -> content
         IF EXISTS (
           SELECT 1 FROM information_schema.columns
           WHERE table_name='messages' AND column_name='message'
@@ -128,6 +128,30 @@ router.post("/init", async (_req, res) => {
           WHERE table_name='messages' AND column_name='content'
         ) THEN
           EXECUTE 'ALTER TABLE messages RENAME COLUMN message TO content';
+        END IF;
+
+        -- text -> content
+        IF EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name='messages' AND column_name='text'
+        ) AND NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name='messages' AND column_name='content'
+        ) THEN
+          EXECUTE 'ALTER TABLE messages RENAME COLUMN text TO content';
+        END IF;
+
+        -- Si existen ambas (text y content), elimina la heredada "text"
+        IF EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name='messages' AND column_name='text'
+        ) AND EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name='messages' AND column_name='content'
+        ) THEN
+          -- por si tenía NOT NULL
+          EXECUTE 'ALTER TABLE messages ALTER COLUMN text DROP NOT NULL';
+          EXECUTE 'ALTER TABLE messages DROP COLUMN text';
         END IF;
       END $$;
     `);
