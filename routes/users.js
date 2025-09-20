@@ -32,6 +32,12 @@ const {
 
 const router = express.Router();
 
+/* ====== Fuerza respuestas JSON en UTF-8 para TODO este router ====== */
+router.use((req, res, next) => {
+  res.set("Content-Type", "application/json; charset=utf-8");
+  next();
+});
+
 /* ============== Health & Register ============== */
 router.get("/health", async (_req, res) => {
   try {
@@ -136,7 +142,16 @@ router.post("/message/add", async (req, res) => {
 
     const uid = await ensureUserId({ user_id, email });
 
-    const msgText = (text ?? content ?? "").toString();
+    // Prioriza strings reales; si no, convierte una sola vez al final
+    let msgText;
+    if (typeof text === "string") {
+      msgText = text;
+    } else if (typeof content === "string") {
+      msgText = content;
+    } else {
+      msgText = String(text ?? content ?? "");
+    }
+
     if (!msgText.trim()) {
       return res.status(400).json({ ok: false, error: "message_text_required" });
     }
@@ -145,7 +160,7 @@ router.post("/message/add", async (req, res) => {
     const r = await addMessage({
       uid,
       role: (role || "user").toString(),
-      text: msgText,
+      text: msgText,          // <- guardar TAL CUAL, sin Buffer/decoding extra
       lang: lang || null,
       client_ts: client_ts || null, // ISO opcional, si viene del dispositivo
     });
