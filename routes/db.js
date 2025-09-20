@@ -45,7 +45,7 @@ router.get("/health", async (_req, res) => {
   }
 });
 
-// ---------- Init (crear/ajustar tablas) ----------
+// ---------- Init (crear/ajustar tablas + migraciones) ----------
 router.post("/init", async (_req, res) => {
   const client = await pool.connect();
   try {
@@ -66,6 +66,7 @@ router.post("/init", async (_req, res) => {
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at  TIMESTAMPTZ DEFAULT NOW();`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS lang       TEXT;`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS platform   TEXT;`);
+    // índice único para ON CONFLICT(email)
     await client.query(`DROP INDEX IF EXISTS idx_users_email;`);
     await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_users_email ON users(email);`);
 
@@ -97,64 +98,39 @@ router.post("/init", async (_req, res) => {
     await client.query(`ALTER TABLE credits ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_credits_user ON credits(user_id);`);
 
-    // messages
+    // messages (nueva columna 'text', migración desde 'content' si existe)
     await client.query(`
       CREATE TABLE IF NOT EXISTS messages (
         id          BIGSERIAL PRIMARY KEY,
         user_id     BIGINT REFERENCES users(id) ON DELETE CASCADE,
         role        TEXT,
-        content     TEXT,
+        text        TEXT,
         lang        TEXT,
         created_at  TIMESTAMPTZ DEFAULT NOW()
       );
     `);
-    // Asegurar columnas presentes
-    await client.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS role TEXT;`);
-    await client.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS content TEXT;`);
-    await client.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS lang TEXT;`);
     await client.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_messages_user ON messages(user_id);`);
+    await client.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS lang TEXT;`);
+    await client.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS text TEXT;`);
 
-    // Migraciones de columnas legadas: "message" o "text" -> "content"
+    // Copiar content -> text si 'content' existe y 'text' está vacío
     await client.query(`
       DO $$
       BEGIN
-        -- message -> content
         IF EXISTS (
           SELECT 1 FROM information_schema.columns
-          WHERE table_name='messages' AND column_name='message'
-        ) AND NOT EXISTS (
-          SELECT 1 FROM information_schema.columns
-          WHERE table_name='messages' AND column_name='content'
+           WHERE table_name='messages' AND column_name='content'
         ) THEN
-          EXECUTE 'ALTER TABLE messages RENAME COLUMN message TO content';
+          EXECUTE 'UPDATE messages SET text = COALESCE(text, content) WHERE text IS NULL';
         END IF;
-
-        -- text -> content
-        IF EXISTS (
-          SELECT 1 FROM information_schema.columns
-          WHERE table_name='messages' AND column_name='text'
-        ) AND NOT EXISTS (
-          SELECT 1 FROM information_schema.columns
-          WHERE table_name='messages' AND column_name='content'
-        ) THEN
-          EXECUTE 'ALTER TABLE messages RENAME COLUMN text TO content';
-        END IF;
-
-        -- Si existen ambas (text y content), elimina la heredada "text"
-        IF EXISTS (
-          SELECT 1 FROM information_schema.columns
-          WHERE table_name='messages' AND column_name='text'
-        ) AND EXISTS (
-          SELECT 1 FROM information_schema.columns
-          WHERE table_name='messages' AND column_name='content'
-        ) THEN
-          -- por si tenía NOT NULL
-          EXECUTE 'ALTER TABLE messages ALTER COLUMN text DROP NOT NULL';
-          EXECUTE 'ALTER TABLE messages DROP COLUMN text';
-        END IF;
-      END $$;
+      END
+      $$;
     `);
+
+    // Quitar la vieja columna 'content' si existiera
+    await client.query(`ALTER TABLE messages DROP COLUMN IF EXISTS content;`);
+
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_messages_user ON messages(user_id);`);
 
     await client.query("COMMIT");
     res.json({ ok: true, created: true });
