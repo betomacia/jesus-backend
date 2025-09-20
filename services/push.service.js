@@ -54,14 +54,33 @@ async function sendToFcmV1({ token, title, body, data }) {
     const accessToken = await getAccessToken();
     const url = `https://fcm.googleapis.com/v1/projects/${FB_PROJECT_ID}/messages:send`;
 
+    // ⚠️ Para Web (Chrome Android y Desktop) es clave el bloque "webpush"
     const payload = {
       message: {
         token,
+        // Se mantiene notification (algunos agentes lo usan) pero webpush manda.
         notification: { title, body },
         data: normalizeData(data),
-        // Overrides por plataforma si los necesitás:
-        // android: { notification: { click_action: "OPEN_APP" } },
-        // apns: { payload: { aps: { category: "OPEN_APP" } } },
+
+        webpush: {
+          headers: {
+            Urgency: "high",
+          },
+          notification: {
+            title,
+            body,
+            icon: "/icon-192.png",   // Asegúrate de tenerlo en /public
+            // badge: "/badge-72.png", // Opcional: comenta si no existe
+            vibrate: [100, 50, 100],
+            requireInteraction: false
+          },
+          fcm_options: {
+            link: "/" // Al tocar la notificación, abre tu app web
+          }
+        },
+
+        // Overrides Android nativo (no afecta Web), por si luego usas tokens Android nativos:
+        // android: { priority: "HIGH" },
       },
     };
 
