@@ -47,7 +47,7 @@ async function sendToFcmV1({ token, title, body, data, webDataOnly = false }) {
 
     const msgData = normalizeData({
       ...(data || {}),
-      // Pasamos title/body también por data, por si el SW los necesita
+      // También pasamos title/body por data para que el SW los pueda usar
       __title: title || "Notificación",
       __body:  body  || "",
     });
@@ -94,6 +94,7 @@ async function ensureDevicesTable() {
   `);
   await query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_devices_token ON devices(fcm_token);`);
   await query(`CREATE INDEX IF NOT EXISTS idx_devices_user ON devices(user_id);`);
+  // índice único parcial (user_id, device_id) para device_id NO NULL — permite upsert por device
   await query(`
     DO $$
     BEGIN
