@@ -1,26 +1,107 @@
 // services/push.service.js
-// Requiere ENV FCM_SERVER_KEY (Firebase Legacy HTTP)
-// En Node 18+ tenemos fetch global.
+// Envío de notificaciones por Firebase Cloud Messaging (HTTP v1, OAuth2)
+// Requiere ENV:
+//   FIREBASE_PROJECT_ID
+//   FIREBASE_CLIENT_EMAIL
+//   FIREBASE_PRIVATE_KEY  (con saltos de línea escapados: \n)
+// Node 18+ trae fetch global.
+
 const { query } = require("../routes/db");
+const { JWT } = require("google-auth-library");
 
-const FCM_URL = "https://fcm.googleapis.com/fcm/send";
+// ====== Config HTTP v1 (OAuth2) ======
+const FB_PROJECT_ID   = process.env.FIREBASE_PROJECT_ID || "";
+const FB_CLIENT_EMAIL = process.env.FIREBASE_CLIENT_EMAIL || "";
+// Reconvertimos \n a saltos reales por si vienen escapados desde Railway
+const FB_PRIVATE_KEY  = (process.env.FIREBASE_PRIVATE_KEY || "").replace(/\\n/g, "\n");
 
+const SCOPES = ["https://www.googleapis.com/auth/firebase.messaging"];
+let cachedToken = { token: null, exp: 0 };
+
+async function getAccessToken() {
+  const now = Math.floor(Date.now() / 1000);
+  if (cachedToken.token && cachedToken.exp - 60 > now) return cachedToken.token;
+
+  const jwt = new JWT({
+    email: FB_CLIENT_EMAIL,
+    key: FB_PRIVATE_KEY,
+    scopes: SCOPES,
+  });
+
+  const { access_token, expiry_date } = await jwt.authorize();
+  cachedToken.token = access_token;
+  cachedToken.exp   = Math.floor((expiry_date || (Date.now() + 55 * 60 * 1000)) / 1000);
+  return access_token;
+}
+
+function normalizeData(data) {
+  // En HTTP v1, TODOS los valores en "data" deben ser string.
+  if (!data) return undefined;
+  const out = {};
+  for (const [k, v] of Object.entries(data)) {
+    if (v === null || v === undefined) continue;
+    out[k] = typeof v === "object" ? JSON.stringify(v) : String(v);
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+async function sendToFcmV1({ token, title, body, data }) {
+  if (!FB_PROJECT_ID || !FB_CLIENT_EMAIL || !FB_PRIVATE_KEY) {
+    return { ok: false, error: "missing_firebase_service_account_envs" };
+  }
+
+  try {
+    const accessToken = await getAccessToken();
+    const url = `https://fcm.googleapis.com/v1/projects/${FB_PROJECT_ID}/messages:send`;
+
+    const payload = {
+      message: {
+        token,
+        notification: { title, body },
+        data: normalizeData(data),
+        // Overrides por plataforma si los necesitás:
+        // android: { notification: { click_action: "OPEN_APP" } },
+        // apns: { payload: { aps: { category: "OPEN_APP" } } },
+      },
+    };
+
+    const r = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const json = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      const err = json?.error?.message || `fcm_v1_http_${r.status}`;
+      return { ok: false, error: err, detail: json };
+    }
+    return { ok: true, messageId: json?.name || null };
+  } catch (e) {
+    return { ok: false, error: String(e && e.message || e) };
+  }
+}
+
+// ====== Dispositivos ======
 async function ensureDevicesTable() {
   // Tabla y índices (incluye índices únicos útiles para upsert)
   await query(`
     CREATE TABLE IF NOT EXISTS devices (
-      id               BIGSERIAL PRIMARY KEY,
-      user_id          BIGINT REFERENCES users(id) ON DELETE CASCADE,
-      platform         TEXT,       -- 'android' | 'ios' | 'web'
-      fcm_token        TEXT NOT NULL,
-      device_id        TEXT,       -- identificador estable del dispositivo si lo tenés
-      lang             TEXT,       -- preferencia del dispositivo
-      tz_offset_minutes INTEGER,   -- minutos vs UTC (cliente)
-      app_version      TEXT,
-      os_version       TEXT,
-      model            TEXT,
-      last_seen        TIMESTAMPTZ DEFAULT NOW(),
-      created_at       TIMESTAMPTZ DEFAULT NOW()
+      id                 BIGSERIAL PRIMARY KEY,
+      user_id            BIGINT REFERENCES users(id) ON DELETE CASCADE,
+      platform           TEXT,       -- 'android' | 'ios' | 'web'
+      fcm_token          TEXT NOT NULL,
+      device_id          TEXT,       -- identificador estable del dispositivo si lo tenés
+      lang               TEXT,       -- preferencia del dispositivo
+      tz_offset_minutes  INTEGER,    -- minutos vs UTC (cliente)
+      app_version        TEXT,
+      os_version         TEXT,
+      model              TEXT,
+      last_seen          TIMESTAMPTZ DEFAULT NOW(),
+      created_at         TIMESTAMPTZ DEFAULT NOW()
     );
   `);
   await query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_devices_token ON devices(fcm_token);`);
@@ -39,8 +120,15 @@ async function ensureDevicesTable() {
 }
 
 async function registerDevice({
-  uid, platform = null, fcm_token, device_id = null,
-  lang = null, tz_offset_minutes = null, app_version = null, os_version = null, model = null
+  uid,
+  platform = null,
+  fcm_token,
+  device_id = null,
+  lang = null,
+  tz_offset_minutes = null,
+  app_version = null,
+  os_version = null,
+  model = null,
 }) {
   // Upsert por fcm_token (si cambia device_id, se actualiza)
   const r = await query(
@@ -60,7 +148,7 @@ async function registerDevice({
       last_seen = NOW()
     RETURNING id, user_id, platform, fcm_token, device_id, lang, tz_offset_minutes, app_version, os_version, model, last_seen, created_at
     `,
-    [uid, platform, fcm_token, device_id, lang, tz_offset_minutes, app_version, os_version, model]
+    [uid, platform, String(fcm_token), device_id, lang, tz_offset_minutes, app_version, os_version, model]
   );
   return r?.[0];
 }
@@ -78,6 +166,7 @@ async function listDevicesByUser({ uid, platform = null }) {
   );
 }
 
+// ====== i18n helpers ======
 function pickLang({ overrideLang, deviceLang, userLang }) {
   return (overrideLang || deviceLang || userLang || "es").slice(0, 5).toLowerCase();
 }
@@ -88,53 +177,43 @@ function i18nPick(map, lang) {
   return map[l] || map[l.split("-")[0]] || map["es"] || map["en"] || null;
 }
 
-async function sendFCMToToken({ token, title, body, data }) {
-  const key = process.env.FCM_SERVER_KEY || "";
-  if (!key) throw new Error("missing_FCM_SERVER_KEY");
-
-  const payload = {
-    to: token,
-    notification: { title, body },
-    data: data || {},
-    android: { priority: "high" },
-    apns: { headers: { "apns-priority": "10" } }
-  };
-
-  const r = await fetch(FCM_URL, {
-    method: "POST",
-    headers: {
-      "Authorization": `key=${key}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(payload),
-  });
-
-  const json = await r.json().catch(() => ({}));
-  return { ok: r.ok, status: r.status, json };
-}
-
-/**
- * Envía notificaciones a todos los dispositivos del usuario.
- * - Si title/body están dados, se usan tal cual.
- * - Si vienen title_i18n/body_i18n, se eligen según overrideLang > device.lang > user.lang.
- */
+// ====== Envío “simple” a todos los devices de un usuario ======
 async function sendSimpleToUser({
-  user, devices, title = null, body = null, title_i18n = null, body_i18n = null, data = null, overrideLang = null
+  user,
+  devices,
+  title = null,
+  body = null,
+  title_i18n = null,
+  body_i18n = null,
+  data = null,
+  overrideLang = null,
 }) {
+  let sent = 0, failed = 0;
   const results = [];
+
   for (const d of devices) {
     const lang = pickLang({ overrideLang, deviceLang: d.lang, userLang: user?.lang });
     const t = title ?? i18nPick(title_i18n, lang) ?? "Notificación";
     const b = body  ?? i18nPick(body_i18n,  lang) ?? "Tienes un mensaje.";
-    try {
-      const resp = await sendFCMToToken({ token: d.fcm_token, title: t, body: b, data });
-      results.push({ device_id: d.device_id, ok: resp.ok, status: resp.status, resp: resp.json });
-    } catch (e) {
-      results.push({ device_id: d.device_id, ok: false, error: String(e) });
+
+    const r = await sendToFcmV1({
+      token: d.fcm_token,
+      title: t,
+      body: b,
+      data,
+    });
+
+    if (r.ok) {
+      sent++;
+      results.push({ device_id: d.device_id, ok: true, messageId: r.messageId || null });
+    } else {
+      failed++;
+      results.push({ device_id: d.device_id, ok: false, error: r.error });
+      // Limpieza opcional:
+      // if (/NotRegistered|InvalidRegistration/i.test(r.error)) { ... eliminar token ... }
     }
   }
-  const sent = results.filter(x => x.ok).length;
-  const failed = results.length - sent;
+
   return { sent, failed, results };
 }
 
