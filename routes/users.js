@@ -1,6 +1,6 @@
 // routes/users.js
 const express = require("express");
-const { query } = require("./db"); // helper query del pool PG
+const { query, pool } = require("./db"); // usamos también pool para la transacción de "spend"
 
 const router = express.Router();
 
@@ -102,6 +102,61 @@ router.get("/credit/balance", async (req, res) => {
     res.json({ ok: true, user_id: uid, balance: b?.[0]?.balance ?? 0 });
   } catch (e) {
     res.status(500).json({ ok: false, error: "credit_balance_failed", detail: e.message || String(e) });
+  }
+});
+
+// ---------- Créditos: spend (gastar) ----------
+router.post("/credit/spend", async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const {
+      user_id = null,
+      email = null,
+      amount = 1,           // cuánto gastar (entero positivo)
+      reason = "spend",     // p.ej.: 'ask', 'audio_min', etc.
+      lang = null,
+      platform = null,
+    } = req.body || {};
+
+    const uid = await ensureUserId({ user_id, email, lang, platform });
+    const amt = Math.max(1, parseInt(amount, 10) || 1);
+
+    await client.query("BEGIN");
+
+    const b1 = await client.query(
+      `SELECT COALESCE(SUM(delta),0)::int AS balance FROM credits WHERE user_id=$1`,
+      [uid]
+    );
+    const balance = b1.rows?.[0]?.balance ?? 0;
+
+    if (balance < amt) {
+      await client.query("ROLLBACK");
+      return res.json({ ok: false, error: "insufficient_credits", balance, need: amt });
+    }
+
+    await client.query(
+      `INSERT INTO credits (user_id, delta, reason) VALUES ($1, $2, $3)`,
+      [uid, -amt, reason || "spend"]
+    );
+
+    const b2 = await client.query(
+      `SELECT COALESCE(SUM(delta),0)::int AS balance FROM credits WHERE user_id=$1`,
+      [uid]
+    );
+    await client.query("COMMIT");
+
+    res.json({
+      ok: true,
+      user_id: uid,
+      spent: amt,
+      reason: reason || "spend",
+      balance: b2.rows?.[0]?.balance ?? 0,
+    });
+  } catch (e) {
+    try { await client.query("ROLLBACK"); } catch {}
+    res.status(500).json({ ok: false, error: "credit_spend_failed", detail: e.message || String(e) });
+  } finally {
+    client.release();
   }
 });
 
