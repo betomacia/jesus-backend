@@ -1,63 +1,47 @@
 // routes/users.js
 const express = require("express");
+const emailRx = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-let query;
-// Intento 1: reutilizar el `query` exportado por routes/db
-try {
-  ({ query } = require("./db"));
-} catch (e) {
-  query = null;
-}
-
-if (!query) {
-  // Fallback (solo por si acaso): crea su propio cliente si no vino de ./db
-  // Asume que ya tenés instalado `postgres` y que DATABASE_URL existe (como en /db).
-  const postgres = require("postgres");
-  const cs = process.env.DATABASE_URL;
-  if (!cs) throw new Error("DATABASE_URL missing");
-  const ssl =
-    (process.env.PGSSL || "").toLowerCase() === "true"
-      ? { rejectUnauthorized: false }
-      : undefined;
-  const sql = postgres(cs, { ssl, max: 5, idle_timeout: 30 });
-  query = sql;
-}
+// Tomamos el pool SQL exportado por routes/db.js
+const { query: sql } = require("./db");
 
 const router = express.Router();
 
-// Health simple
+// -------- Health simple
 router.get("/health", async (_req, res) => {
   try {
-    const rs = await query`SELECT NOW() AS now`;
-    return res.json({ ok: true, db_now: rs?.[0]?.now || null });
+    const r = await sql`select 1 as ok`;
+    res.json({ ok: true, db: r?.[0]?.ok === 1 });
   } catch (e) {
-    return res
-      .status(500)
-      .json({ ok: false, error: "db_error", detail: e?.message || String(e) });
+    res.status(500).json({ ok: false, error: "db_error", detail: e.message || String(e) });
   }
 });
 
-// Registrar/actualizar (upsert) usuario por email
+// -------- Registrar / actualizar usuario por email (UPSERT)
 router.post("/register", async (req, res) => {
   try {
-    const { email, lang = "es", platform = "web" } = req.body || {};
-    if (!email) return res.status(400).json({ ok: false, error: "missing_email" });
+    const { email, lang = null, platform = null } = req.body || {};
 
-    const rs = await query`
+    if (!email || !emailRx.test(String(email))) {
+      return res.status(400).json({ ok: false, error: "email_invalido" });
+    }
+
+    const r = await sql`
       INSERT INTO users (email, lang, platform)
       VALUES (${email}, ${lang}, ${platform})
       ON CONFLICT (email) DO UPDATE
-      SET lang = EXCLUDED.lang,
-          platform = EXCLUDED.platform,
-          updated_at = NOW()
+        SET lang = EXCLUDED.lang,
+            platform = EXCLUDED.platform,
+            updated_at = NOW()
       RETURNING id, email, lang, platform, created_at, updated_at
     `;
 
-    return res.json({ ok: true, user: rs?.[0] || null });
+    const user = r?.[0] || null;
+    if (!user) return res.status(500).json({ ok: false, error: "users_register_failed" });
+
+    res.json({ ok: true, user });
   } catch (e) {
-    return res
-      .status(500)
-      .json({ ok: false, error: "users_register_failed", detail: e?.message || String(e) });
+    res.status(500).json({ ok: false, error: "users_register_failed", detail: e.message || String(e) });
   }
 });
 
