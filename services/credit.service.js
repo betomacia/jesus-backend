@@ -25,8 +25,8 @@ async function spend({ uid, amount = 1, reason = "spend" }) {
   const client = await pool.connect();
   try {
     const amt = Math.max(1, parseInt(amount, 10) || 1);
-
     await client.query("BEGIN");
+
     const b1 = await client.query(
       `SELECT COALESCE(SUM(delta),0)::int AS balance FROM credits WHERE user_id=$1`,
       [uid]
@@ -42,6 +42,7 @@ async function spend({ uid, amount = 1, reason = "spend" }) {
       `INSERT INTO credits (user_id, delta, reason) VALUES ($1, $2, $3)`,
       [uid, -amt, reason || "spend"]
     );
+
     const b2 = await client.query(
       `SELECT COALESCE(SUM(delta),0)::int AS balance FROM credits WHERE user_id=$1`,
       [uid]
