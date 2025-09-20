@@ -1,59 +1,42 @@
 // routes/users.js
 const express = require("express");
-const router = express.Router();
-
-// Importa el helper de consultas desde routes/db.js
 const { query } = require("./db");
 
-// Salud de la ruta + DB
+const router = express.Router();
+
+// Health: comprobar conexión a DB
 router.get("/health", async (_req, res) => {
   try {
-    const r = await query("SELECT now()");
-    res.json({ ok: true, now: r.rows[0].now });
+    const { rows } = await query`SELECT NOW() AS now`;
+    return res.json({ ok: true, db_now: rows?.[0]?.now || null });
   } catch (e) {
-    res.status(500).json({ ok: false, error: "db_error", detail: e.message });
+    return res
+      .status(500)
+      .json({ ok: false, error: "db_error", detail: e?.message || String(e) });
   }
 });
 
-// Registrar (upsert) por email y devolver user_id
+// Registrar/actualizar (upsert) usuario por email
 router.post("/register", async (req, res) => {
   try {
     const { email, lang = "es", platform = "web" } = req.body || {};
-    if (!email) {
-      return res.status(400).json({ ok: false, error: "email_required" });
-    }
+    if (!email) return res.status(400).json({ ok: false, error: "missing_email" });
 
-    // Inserta o actualiza y devuelve el user_id
-    const sql = `
+    const { rows } = await query`
       INSERT INTO users (email, lang, platform)
-      VALUES ($1, $2, $3)
-      ON CONFLICT (email)
-      DO UPDATE SET lang = EXCLUDED.lang, platform = EXCLUDED.platform
-      RETURNING user_id;
+      VALUES (${email}, ${lang}, ${platform})
+      ON CONFLICT (email) DO UPDATE
+      SET lang = EXCLUDED.lang,
+          platform = EXCLUDED.platform,
+          updated_at = NOW()
+      RETURNING id, email, lang, platform, created_at, updated_at
     `;
-    const r = await query(sql, [email, lang, platform]);
-    res.json({ ok: true, user_id: r.rows[0].user_id });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: "users_register_failed", detail: e.message });
-  }
-});
 
-// Obtener un usuario por id
-router.get("/:id", async (req, res) => {
-  try {
-    const { id } = req.params;
-    const r = await query(
-      `SELECT user_id, email, lang, platform, created_at
-         FROM users
-        WHERE user_id = $1`,
-      [id]
-    );
-    if (r.rowCount === 0) {
-      return res.status(404).json({ ok: false, error: "not_found" });
-    }
-    res.json({ ok: true, user: r.rows[0] });
+    return res.json({ ok: true, user: rows[0] });
   } catch (e) {
-    res.status(500).json({ ok: false, error: "users_get_failed", detail: e.message });
+    return res
+      .status(500)
+      .json({ ok: false, error: "users_register_failed", detail: e?.message || String(e) });
   }
 });
 
