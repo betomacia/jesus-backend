@@ -1,10 +1,12 @@
 // routes/users.js
 const express = require("express");
-const { query, pool } = require("./db"); // usamos también pool para la transacción de "spend"
+const { query, pool } = require("./db"); // helper PG + pool para transacciones
 
 const router = express.Router();
 
-// ---------- Helpers ----------
+/* =========================
+   Utils básicos
+========================= */
 async function findUserByEmail(email) {
   if (!email) return null;
   const r = await query(
@@ -48,7 +50,9 @@ async function purgeOldMessages(userId) {
   );
 }
 
-// ---------- Health ----------
+/* =========================
+   Health & registro usuario
+========================= */
 router.get("/health", async (_req, res) => {
   try {
     const r = await query(`SELECT NOW() AS now`);
@@ -58,7 +62,6 @@ router.get("/health", async (_req, res) => {
   }
 });
 
-// ---------- Register / Upsert ----------
 router.post("/register", async (req, res) => {
   try {
     const { email, lang = null, platform = null } = req.body || {};
@@ -69,7 +72,9 @@ router.post("/register", async (req, res) => {
   }
 });
 
-// ---------- Créditos: add ----------
+/* =========================
+   Créditos
+========================= */
 router.post("/credit/add", async (req, res) => {
   try {
     const { user_id = null, email = null, delta = 0, reason = null, lang = null, platform = null } = req.body || {};
@@ -90,7 +95,6 @@ router.post("/credit/add", async (req, res) => {
   }
 });
 
-// ---------- Créditos: balance ----------
 router.get("/credit/balance", async (req, res) => {
   try {
     const { user_id = null, email = null } = req.query || {};
@@ -113,15 +117,14 @@ router.get("/credit/balance", async (req, res) => {
   }
 });
 
-// ---------- Créditos: spend (gastar) ----------
 router.post("/credit/spend", async (req, res) => {
   const client = await pool.connect();
   try {
     const {
       user_id = null,
       email = null,
-      amount = 1,           // cuánto gastar (entero positivo)
-      reason = "spend",     // p.ej.: 'ask', 'audio_min', etc.
+      amount = 1,
+      reason = "spend",
       lang = null,
       platform = null,
     } = req.body || {};
@@ -151,8 +154,8 @@ router.post("/credit/spend", async (req, res) => {
       `SELECT COALESCE(SUM(delta),0)::int AS balance FROM credits WHERE user_id=$1`,
       [uid]
     );
-    await client.query("COMMIT");
 
+    await client.query("COMMIT");
     res.json({
       ok: true,
       user_id: uid,
@@ -168,13 +171,15 @@ router.post("/credit/spend", async (req, res) => {
   }
 });
 
-// ---------- Mensajes: add ----------
+/* =========================
+   Mensajes (con purga 90 días)
+========================= */
 router.post("/message/add", async (req, res) => {
   try {
     const { user_id = null, email = null, role, content, text, lang = null, client_ts = null } = req.body || {};
     const uid = await ensureUserId({ user_id, email });
 
-    // Purga 90 días para este usuario
+    // Purga 90 días para este usuario (calendario, no "días de uso")
     await purgeOldMessages(uid);
 
     const msgText = (text ?? content ?? "").toString();
@@ -195,7 +200,6 @@ router.post("/message/add", async (req, res) => {
   }
 });
 
-// ---------- Mensajes: history ----------
 router.get("/message/history", async (req, res) => {
   try {
     const { user_id = null, email = null } = req.query || {};
@@ -230,7 +234,6 @@ router.get("/message/history", async (req, res) => {
   }
 });
 
-// ---------- Mensajes: delete (id | ids | before) ----------
 router.post("/message/delete", async (req, res) => {
   try {
     const { email = null, user_id = null, id = null, ids = null, before = null } = req.body || {};
@@ -282,6 +285,209 @@ router.post("/message/delete", async (req, res) => {
     return res.status(400).json({ ok: false, error: "missing_params" });
   } catch (e) {
     res.status(500).json({ ok: false, error: "message_delete_failed", detail: e.message || String(e) });
+  }
+});
+
+/* =========================
+   Dispositivos & Push (FCM)
+========================= */
+
+// Creamos/ajustamos tabla devices on-demand por si no existe
+let devicesEnsured = false;
+async function ensureDevicesTable() {
+  if (devicesEnsured) return;
+  await query(`
+    CREATE TABLE IF NOT EXISTS devices (
+      id                BIGSERIAL PRIMARY KEY,
+      user_id           BIGINT REFERENCES users(id) ON DELETE CASCADE,
+      platform          TEXT,                    -- 'ios' | 'android' | 'web'
+      device_id         TEXT,                    -- opcional: identificador local del dispositivo
+      fcm_token         TEXT UNIQUE,             -- token FCM
+      lang              TEXT,                    -- preferencia de idioma del device
+      tz_offset_minutes INTEGER,                 -- offset de zona horaria (minutos)
+      app_version       TEXT,
+      os_version        TEXT,
+      model             TEXT,
+      last_seen_at      TIMESTAMPTZ,
+      created_at        TIMESTAMPTZ DEFAULT NOW(),
+      updated_at        TIMESTAMPTZ DEFAULT NOW()
+    );
+  `);
+  // índices de apoyo
+  await query(`CREATE INDEX IF NOT EXISTS idx_devices_user ON devices(user_id);`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_devices_platform ON devices(platform);`);
+  devicesEnsured = true;
+}
+
+function normPlatform(p) {
+  const v = (p || "").toString().toLowerCase();
+  if (["ios", "android", "web"].includes(v)) return v;
+  return v || null;
+}
+
+function pickLangPref({ override, deviceLang, userLang }) {
+  const norm = (v) => (v || "").toString().trim().slice(0, 2).toLowerCase();
+  return norm(override) || norm(deviceLang) || norm(userLang) || "es";
+}
+
+function resolveLocalized(mapOrStr, lang) {
+  if (!mapOrStr) return null;
+  if (typeof mapOrStr === "string") return mapOrStr;
+  const m = mapOrStr || {};
+  return m[lang] || m[lang?.slice(0, 2)] || m["es"] || m["en"] || Object.values(m)[0] || "";
+}
+
+async function sendFcmLegacy(toToken, payload) {
+  const key = process.env.FCM_SERVER_KEY;
+  if (!key) throw new Error("missing_FCM_SERVER_KEY");
+  const r = await fetch("https://fcm.googleapis.com/fcm/send", {
+    method: "POST",
+    headers: {
+      "Authorization": `key=${key}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ to: toToken, ...payload }),
+  });
+  const json = await r.json().catch(() => ({}));
+  return { ok: r.ok, status: r.status, json };
+}
+
+// Registrar/actualizar un dispositivo y su token
+router.post("/push/register", async (req, res) => {
+  try {
+    await ensureDevicesTable();
+
+    const {
+      user_id = null,
+      email = null,
+      platform = null,       // ios|android|web
+      fcm_token = null,
+      device_id = null,
+      lang = null,           // idioma preferido de ese device (ej: 'es-AR')
+      tz_offset_minutes = null,
+      app_version = null,
+      os_version = null,
+      model = null,
+    } = req.body || {};
+
+    if (!fcm_token) return res.status(400).json({ ok: false, error: "fcm_token_required" });
+
+    const uid = await ensureUserId({ user_id, email });
+
+    const p = normPlatform(platform);
+
+    // UPSERT por fcm_token (único)
+    const r = await query(
+      `
+      INSERT INTO devices (user_id, platform, device_id, fcm_token, lang, tz_offset_minutes, app_version, os_version, model, last_seen_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())
+      ON CONFLICT (fcm_token)
+      DO UPDATE SET user_id = EXCLUDED.user_id,
+                    platform = EXCLUDED.platform,
+                    device_id = EXCLUDED.device_id,
+                    lang = COALESCE(EXCLUDED.lang, devices.lang),
+                    tz_offset_minutes = COALESCE(EXCLUDED.tz_offset_minutes, devices.tz_offset_minutes),
+                    app_version = COALESCE(EXCLUDED.app_version, devices.app_version),
+                    os_version = COALESCE(EXCLUDED.os_version, devices.os_version),
+                    model = COALESCE(EXCLUDED.model, devices.model),
+                    last_seen_at = NOW(),
+                    updated_at = NOW()
+      RETURNING id, user_id, platform, lang, tz_offset_minutes, last_seen_at
+      `,
+      [uid, p, device_id || null, String(fcm_token), lang || null, tz_offset_minutes ?? null, app_version || null, os_version || null, model || null]
+    );
+
+    res.json({ ok: true, device: r?.[0] || null });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: "push_register_failed", detail: e.message || String(e) });
+  }
+});
+
+// Lista de dispositivos de un usuario (debug)
+router.get("/push/devices", async (req, res) => {
+  try {
+    await ensureDevicesTable();
+    const { user_id = null, email = null } = req.query || {};
+    const uid = await ensureUserId({ user_id, email });
+    const devs = await query(
+      `
+      SELECT id, platform, lang, tz_offset_minutes, app_version, os_version, model, last_seen_at
+      FROM devices
+      WHERE user_id=$1
+      ORDER BY last_seen_at DESC NULLS LAST, id DESC
+      `,
+      [uid]
+    );
+    res.json({ ok: true, user_id: uid, devices: devs });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: "push_devices_failed", detail: e.message || String(e) });
+  }
+});
+
+// Envío simple i18n por usuario (prioridad idioma: lang override > device.lang > user.lang > 'es')
+router.post("/push/send-simple", async (req, res) => {
+  try {
+    await ensureDevicesTable();
+    const {
+      user_id = null,
+      email = null,
+      title = null,
+      body = null,
+      title_i18n = null,
+      body_i18n = null,
+      data = null,
+      platform = null,  // opcional: ios|android|web
+      lang = null,      // override opcional
+    } = req.body || {};
+
+    const uid = await ensureUserId({ user_id, email });
+    const userRow = (await query(`SELECT id, lang FROM users WHERE id=$1`, [uid]))[0] || {};
+    const devs = await query(
+      `
+      SELECT id, platform, fcm_token, lang, last_seen_at
+      FROM devices
+      WHERE user_id=$1
+      ${platform ? `AND platform = $2` : ``}
+      ORDER BY last_seen_at DESC NULLS LAST, id DESC
+      `,
+      platform ? [uid, normPlatform(platform)] : [uid]
+    );
+
+    if (!devs.length) {
+      return res.status(404).json({ ok: false, error: "no_devices_for_user" });
+    }
+
+    const results = [];
+    let sent = 0, failed = 0;
+
+    for (const d of devs) {
+      const langChosen = pickLangPref({
+        override: lang,
+        deviceLang: d.lang,
+        userLang: userRow.lang,
+      });
+
+      const t = resolveLocalized(title_i18n || title, langChosen) || "Notificación";
+      const b = resolveLocalized(body_i18n || body, langChosen) || "Tienes un aviso nuevo.";
+
+      const payload = {
+        notification: { title: t, body: b },
+        data: { lang: langChosen, ...(data || {}) },
+      };
+
+      try {
+        const r = await sendFcmLegacy(d.fcm_token, payload);
+        results.push({ device_id: d.id, platform: d.platform, lang: langChosen, status: r.status, ok: r.ok });
+        if (r.ok) sent++; else failed++;
+      } catch (e) {
+        results.push({ device_id: d.id, platform: d.platform, lang: langChosen, ok: false, error: String(e) });
+        failed++;
+      }
+    }
+
+    res.json({ ok: true, user_id: uid, total: devs.length, sent, failed, results });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: "push_send_failed", detail: e.message || String(e) });
   }
 });
 
