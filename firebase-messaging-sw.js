@@ -1,9 +1,14 @@
 // public/firebase-messaging-sw.js
-// Usa compat en el Service Worker (recomendado)
+// v3 — evita duplicados, fuerza activación inmediata y colapsa stacking
 importScripts('https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js');
 importScripts('https://www.gstatic.com/firebasejs/10.12.2/firebase-messaging-compat.js');
 
-// ✅ Config EXACTA como en tu app web (usar appspot.com en storageBucket)
+// Forzar que este SW reemplace al anterior sin esperar
+self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', (evt) => {
+  evt.waitUntil(self.clients.claim());
+});
+
 firebase.initializeApp({
   apiKey: "AIzaSyCWIev2L18k_TugAAIDEYREwsfFn0chdpQ",
   authDomain: "jesus-e7711.firebaseapp.com",
@@ -17,47 +22,45 @@ firebase.initializeApp({
 const messaging = firebase.messaging();
 
 /**
- * ✅ Solo mostrar notificación si el payload es data-only.
- * Si viene payload.notification, el navegador ya dibuja la notificación,
- * así que no hacemos nada para evitar duplicados.
+ * ✅ Solo mostramos si el payload es data-only.
+ * Si viene payload.notification, el navegador ya muestra el toast -> no hacemos nada.
  */
 messaging.onBackgroundMessage((payload) => {
-  // Si llega con notification -> la muestra el navegador; evitamos duplicado
-  if (payload && payload.notification) return;
+  if (payload && payload.notification) return; // evitar duplicado
 
-  // Data-only: tomar título/cuerpo desde data (compat con backend que envía __title/__body)
-  const title = payload?.data?.__title || 'Notificación';
-  const body  = payload?.data?.__body  || '';
-  const icon  = payload?.data?.icon    || '/icon-192.png';
-  const data  = payload?.data || {};
+  const d = payload?.data || {};
+  const title = d.__title || d.title || 'Notificación';
+  const body  = d.__body  || d.body  || '';
+  const icon  = d.__icon  || d.icon  || '/icon-192.png';
 
   self.registration.showNotification(title, {
     body,
     icon,
-    data,
-    // tag: 'push', // opcional si querés evitar stacking
+    data: d,
+    tag: 'global-push',   // colapsa múltiples en una sola
+    renotify: true,       // vuelve a notificar si llega otra con mismo tag
+    // Opcionales útiles en Android:
+    // badge: '/badge-72.png',
+    // vibrate: [80, 40, 80],
+    // timestamp: Date.now(),
   });
 });
 
-// Al hacer clic en la notificación: enfocar/abrir la app
+// Click: enfocar o abrir app (misma origin)
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-
-  // Podemos enviar una URL en data.url (debe ser mismo origen)
   const rawUrl = event?.notification?.data?.url || '/';
 
   event.waitUntil((async () => {
     try {
-      // Normalizamos/validamos la URL respecto al origen del SW
       let targetUrl = '/';
       try {
         const u = new URL(rawUrl, self.location.origin);
         if (u.origin === self.location.origin) {
           targetUrl = u.pathname + u.search + u.hash;
         }
-      } catch { /* si falla, queda '/' */ }
+      } catch {}
 
-      // ¿Ya hay una pestaña de este origen abierta?
       const clientList = await clients.matchAll({ type: 'window', includeUncontrolled: true });
       for (const client of clientList) {
         try {
@@ -71,11 +74,7 @@ self.addEventListener('notificationclick', (event) => {
           }
         } catch {}
       }
-
-      // Si no había pestaña, abrimos una nueva
-      if (clients.openWindow) {
-        await clients.openWindow(targetUrl);
-      }
+      if (clients.openWindow) await clients.openWindow(targetUrl);
     } catch {
       if (clients.openWindow) await clients.openWindow('/');
     }
