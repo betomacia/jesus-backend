@@ -1,7 +1,4 @@
 // services/push.service.js
-// Envío de notificaciones por Firebase Cloud Messaging (HTTP v1, OAuth2)
-// ENV requeridas: FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY (\n escapados)
-// Node 18+ = fetch global
 const { query } = require("../routes/db");
 const { JWT } = require("google-auth-library");
 
@@ -15,7 +12,6 @@ let cachedToken = { token: null, exp: 0 };
 async function getAccessToken() {
   const now = Math.floor(Date.now() / 1000);
   if (cachedToken.token && cachedToken.exp - 60 > now) return cachedToken.token;
-
   const jwt = new JWT({ email: FB_CLIENT_EMAIL, key: FB_PRIVATE_KEY, scopes: SCOPES });
   const { access_token, expiry_date } = await jwt.authorize();
   cachedToken.token = access_token;
@@ -33,10 +29,6 @@ function normalizeData(data) {
   return Object.keys(out).length ? out : undefined;
 }
 
-/**
- * webDataOnly=true  => NO manda "notification" en el payload (solo data)
- *                      y deja que el SW muestre el toast (más confiable en Android Chrome).
- */
 async function sendToFcmV1({ token, title, body, data, webDataOnly = false }) {
   if (!FB_PROJECT_ID || !FB_CLIENT_EMAIL || !FB_PRIVATE_KEY) {
     return { ok: false, error: "missing_firebase_service_account_envs" };
@@ -47,7 +39,6 @@ async function sendToFcmV1({ token, title, body, data, webDataOnly = false }) {
 
     const msgData = normalizeData({
       ...(data || {}),
-      // También pasamos title/body por data para que el SW los pueda usar
       __title: title || "Notificación",
       __body:  body  || "",
     });
@@ -57,11 +48,10 @@ async function sendToFcmV1({ token, title, body, data, webDataOnly = false }) {
       message.notification = { title: title || "Notificación", body: body || "" };
     }
 
-    const payload = { message };
     const r = await fetch(url, {
       method: "POST",
       headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ message }),
     });
 
     const json = await r.json().catch(() => ({}));
@@ -94,7 +84,6 @@ async function ensureDevicesTable() {
   `);
   await query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_devices_token ON devices(fcm_token);`);
   await query(`CREATE INDEX IF NOT EXISTS idx_devices_user ON devices(user_id);`);
-  // índice único parcial (user_id, device_id) para device_id NO NULL — permite upsert por device
   await query(`
     DO $$
     BEGIN
@@ -107,10 +96,7 @@ async function ensureDevicesTable() {
   `);
 }
 
-/**
- * ✅ Upsert por (user_id, device_id) si viene device_id (token-rotación robusta)
- *    Fallback: upsert por fcm_token cuando no tenemos device_id.
- */
+/** ✅ Upsert robusto por (user_id, device_id). Fallback: por fcm_token si no hay device_id. */
 async function registerDevice({
   uid, platform = null, fcm_token, device_id = null, lang = null,
   tz_offset_minutes = null, app_version = null, os_version = null, model = null,
@@ -122,7 +108,7 @@ async function registerDevice({
       `
       INSERT INTO devices (user_id, platform, fcm_token, device_id, lang, tz_offset_minutes, app_version, os_version, model, last_seen)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())
-      ON CONFLICT (user_id, device_id) WHERE device_id IS NOT NULL
+      ON CONFLICT ON CONSTRAINT uq_devices_user_device_nonnull
       DO UPDATE SET
         platform = COALESCE(EXCLUDED.platform, devices.platform),
         fcm_token = EXCLUDED.fcm_token,
@@ -193,20 +179,17 @@ async function deleteDeviceById(id) {
   return 1;
 }
 
-/** Envío simple a devices seleccionados */
 async function sendSimpleToUser({
   user, devices, title = null, body = null, title_i18n = null, body_i18n = null,
   data = null, overrideLang = null, webDataOnly = false,
 }) {
   let sent = 0, failed = 0;
   const results = [];
-
   for (const d of devices) {
-    const lang = pickLang({ overrideLang, deviceLang: d.lang, userLang: user?.lang });
-    const t = title ?? i18nPick(title_i18n, lang) ?? "Notificación";
-    const b = body  ?? i18nPick(body_i18n,  lang) ?? "Tienes un mensaje.";
+    const lang = (overrideLang || d.lang || user?.lang || "es").slice(0, 5).toLowerCase();
+    const t = title ?? (title_i18n?.[lang] || title_i18n?.[lang.split("-")[0]] || "Notificación");
+    const b = body  ?? (body_i18n?.[lang]  || body_i18n?.[lang.split("-")[0]]  || "Tienes un mensaje.");
 
-    // ✅ Para plataforma 'web' forzamos data-only para evitar duplicados en Chrome/Android.
     const isWeb = String(d.platform || "").toLowerCase() === "web";
     const useWebDataOnly = isWeb ? true : !!webDataOnly;
 
@@ -231,17 +214,7 @@ async function sendSimpleToUser({
       failed++;
     }
   }
-
   return { sent, failed, results };
-}
-
-function pickLang({ overrideLang, deviceLang, userLang }) {
-  return (overrideLang || deviceLang || userLang || "es").slice(0, 5).toLowerCase();
-}
-function i18nPick(map, lang) {
-  if (!map || typeof map !== "object") return null;
-  const l = (lang || "es").toLowerCase();
-  return map[l] || map[l.split("-")[0]] || map["es"] || map["en"] || null;
 }
 
 module.exports = {
