@@ -1,28 +1,14 @@
-// db.js — conexión única a Postgres (Railway)
+// db.js
 const { Pool } = require("pg");
 
-// Prioriza DATABASE_URL (Railway/Render/Heroku). También acepta RAILWAY_DATABASE_URL.
-const URL =
-  process.env.DATABASE_URL ||
-  process.env.RAILWAY_DATABASE_URL ||
-  null;
+// Si la URL es externa (proxy), activamos SSL; si es interna de Railway, sin SSL.
+const isExternal = /proxy\.rlwy\.net|amazonaws|heroku|render|fly\.io|azure|googleapis/.test(
+  process.env.DATABASE_URL || ""
+);
 
-const pool = URL
-  ? new Pool({
-      connectionString: URL,
-      // Railway suele requerir SSL; si el URL ya trae ?sslmode=require, igual vale.
-      ssl: { rejectUnauthorized: false },
-    })
-  : new Pool({
-      host: process.env.PGHOST || "localhost",
-      port: Number(process.env.PGPORT || 5432),
-      user: process.env.PGUSER || "postgres",
-      password: process.env.PGPASSWORD || "",
-      database: process.env.PGDATABASE || "postgres",
-      ssl: process.env.PGSSL === "true" ? { rejectUnauthorized: false } : false,
-    });
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: isExternal ? { rejectUnauthorized: false } : false
+});
 
-module.exports = {
-  query: (text, params) => pool.query(text, params),
-  pool,
-};
+module.exports = { pool };
