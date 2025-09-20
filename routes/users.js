@@ -385,7 +385,7 @@ router.post("/push/unregister", async (req, res) => {
         user_id: r.user_id,
         platform: r.platform,
         device_id: r.device_id,
-        fcm_token: r.fcm_token, // quita esto si no quieres devolverlo
+        fcm_token: r.fcm_token,
       })),
     });
   } catch (e) {
@@ -393,6 +393,7 @@ router.post("/push/unregister", async (req, res) => {
   }
 });
 
+/* ============== Envío simple (con filtros) ============== */
 router.post("/push/send-simple", async (req, res) => {
   try {
     await ensureDevicesTable();
@@ -405,10 +406,14 @@ router.post("/push/send-simple", async (req, res) => {
       title_i18n = null,
       body_i18n = null,
       data = null,
-      platform = null,  // filtro opcional: 'web' | 'android' | 'ios'
-      lang = null,      // override opcional
+      platform = null,     // 'web' | 'android' | 'ios' (opcional)
+      lang = null,         // override opcional
+      device_id = null,    // << NUEVO: filtrar un device específico
+      fcm_token = null,    // << NUEVO: o filtrar por token exacto
+      webDataOnly = true,  // << por defecto evitar doble toast en Web
     } = req.body || {};
 
+    // Resolver usuario
     const uid = await ensureUserId({
       user_id,
       email: email ? String(email).trim().toLowerCase() : null,
@@ -416,11 +421,23 @@ router.post("/push/send-simple", async (req, res) => {
 
     const user = (await query(`SELECT id, lang FROM users WHERE id=$1`, [uid]))[0] || {};
 
+    // Normalizar platform si viene
     const plat = platform ? String(platform).trim().toLowerCase() : null;
     const allowed = new Set(["web", "android", "ios"]);
     const platFilter = plat && allowed.has(plat) ? plat : null;
 
-    const devices = await listDevicesByUser({ uid, platform: platFilter });
+    // Traer devices base
+    let devices = await listDevicesByUser({ uid, platform: platFilter });
+
+    // Filtros finos
+    if (device_id) {
+      const did = String(device_id).trim();
+      devices = devices.filter(d => String(d.device_id || "") === did);
+    }
+    if (fcm_token) {
+      const tok = String(fcm_token).trim();
+      devices = devices.filter(d => String(d.fcm_token) === tok);
+    }
 
     if (!devices.length) {
       return res.status(404).json({ ok: false, error: "no_devices_for_user" });
@@ -435,9 +452,10 @@ router.post("/push/send-simple", async (req, res) => {
       body_i18n: body_i18n || null,
       data: data || null,
       overrideLang: lang || null,
+      webDataOnly: !!webDataOnly,
     });
 
-    res.json({ ok: true, user_id: uid, ...report });
+    res.json({ ok: true, user_id: uid, targeted: devices.length, ...report });
   } catch (e) {
     res.status(500).json({ ok: false, error: "push_send_failed", detail: e.message || String(e) });
   }
