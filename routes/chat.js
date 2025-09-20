@@ -36,12 +36,11 @@ router.post("/", async (req, res) => {
     // 3) Guardar mensaje user
     await addMessage({ uid, role: "user", text: String(message), lang });
 
-    // 4) Llamar a OpenAI (sin cita bíblica)
+    // 4) Llamar a OpenAI
     const SYS = `
 Eres cercano, claro y compasivo, desde una voz cristiana (católica).
-Alcance: espiritualidad/fe católica, apoyo emocional/autoayuda personal, relaciones y emociones. Evita lo demás.
-Responde de forma breve, concreta y práctica. Cierra con **una sola pregunta breve** útil para avanzar.
-Evita repetir muletillas y evita cuestionarios largos.
+Alcance: espiritualidad/fe católica, psicología/autoayuda personal, relaciones y emociones. Evita lo demás.
+Formato: respuesta breve y concreta, con una **pregunta final** útil y una **cita bíblica** pertinente (una sola línea, sin repetir Mateo 11:28).
 `.trim();
 
     const chat = await openai.chat.completions.create({
@@ -54,9 +53,7 @@ Evita repetir muletillas y evita cuestionarios largos.
       ],
     });
 
-    const reply =
-      chat?.choices?.[0]?.message?.content?.trim() ||
-      (lang === "en" ? "I'm with you. How can I help you right now?" : "Estoy contigo. ¿Qué te ayudaría ahora mismo?");
+    const reply = chat?.choices?.[0]?.message?.content?.trim() || (lang === "en" ? "I'm with you." : "Estoy contigo.");
 
     // 5) Guardar mensaje assistant
     await addMessage({ uid, role: "assistant", text: reply, lang });
