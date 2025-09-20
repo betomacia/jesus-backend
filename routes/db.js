@@ -14,7 +14,7 @@ function buildPool() {
 
   const pool = new Pool({
     connectionString: cs,
-    ssl: needsSSL ? { rejectUnauthorized: false } : false,
+   ssl: needsSSL ? { rejectUnauthorized: false } : undefined
     max: 8,
     idleTimeoutMillis: 30_000,
   });
