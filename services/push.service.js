@@ -104,11 +104,12 @@ async function registerDevice({
   const plat = platform ? String(platform).trim().toLowerCase() : null;
 
   if (device_id) {
+    // 👇 IMPORTANTE: inferencia por columnas + WHERE (índice único parcial)
     const r = await query(
       `
       INSERT INTO devices (user_id, platform, fcm_token, device_id, lang, tz_offset_minutes, app_version, os_version, model, last_seen)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())
-      ON CONFLICT ON CONSTRAINT uq_devices_user_device_nonnull
+      ON CONFLICT (user_id, device_id) WHERE device_id IS NOT NULL
       DO UPDATE SET
         platform = COALESCE(EXCLUDED.platform, devices.platform),
         fcm_token = EXCLUDED.fcm_token,
@@ -190,6 +191,8 @@ async function sendSimpleToUser({
     const t = title ?? (title_i18n?.[lang] || title_i18n?.[lang.split("-")[0]] || "Notificación");
     const b = body  ?? (body_i18n?.[lang]  || body_i18n?.[lang.split("-")[0]]  || "Tienes un mensaje.");
 
+    // 💡 Android Chrome (PWA/Web) cuenta como "web". Para evitar duplicados,
+    // a Web le mandamos "data-only" y muestra el SW.
     const isWeb = String(d.platform || "").toLowerCase() === "web";
     const useWebDataOnly = isWeb ? true : !!webDataOnly;
 
