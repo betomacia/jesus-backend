@@ -14,7 +14,7 @@ function buildPool() {
 
   const pool = new Pool({
     connectionString: cs,
-   ssl: needsSSL ? { rejectUnauthorized: false } : undefined,
+    ssl: needsSSL ? { rejectUnauthorized: false } : false,
     max: 8,
     idleTimeoutMillis: 30_000,
   });
@@ -55,7 +55,7 @@ router.post("/init", async (_req, res) => {
     await client.query(`
       CREATE TABLE IF NOT EXISTS users (
         id          BIGSERIAL PRIMARY KEY,
-        email       TEXT UNIQUE NOT NULL,
+        email       TEXT NOT NULL,
         lang        TEXT,
         platform    TEXT,
         created_at  TIMESTAMPTZ DEFAULT NOW(),
@@ -67,7 +67,10 @@ router.post("/init", async (_req, res) => {
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at  TIMESTAMPTZ DEFAULT NOW();`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS lang       TEXT;`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS platform   TEXT;`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);`);
+
+    // Limpiar índice no-único viejo y crear **índice único** requerido por ON CONFLICT (email)
+    await client.query(`DROP INDEX IF EXISTS idx_users_email;`);
+    await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_users_email ON users(email);`);
 
     // purchases
     await client.query(`
