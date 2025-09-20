@@ -27,6 +27,9 @@ app.use((req, res, next) => {
 app.use("/db", dbRouter);
 app.use("/contact", contactRouter);
 app.use("/users", usersRouter);
+const chatRouter = require("./routes/chat");
+app.use("/chat", chatRouter);
+
 
 // ---------- OpenAI ----------
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -465,6 +468,7 @@ app.get("/api/heygen/config", (_req, res) => {
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
+
 
 
 
