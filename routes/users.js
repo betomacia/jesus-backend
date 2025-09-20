@@ -4,7 +4,7 @@ const { query } = require("./db");
 
 const router = express.Router();
 
-// Health: comprobar conexión a DB
+// Health: simple ping a la DB
 router.get("/health", async (_req, res) => {
   try {
     const { rows } = await query`SELECT NOW() AS now`;
