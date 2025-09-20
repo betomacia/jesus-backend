@@ -151,5 +151,35 @@ router.get("/message/history", async (req, res) => {
     res.status(500).json({ ok: false, error: "message_history_failed", detail: e.message || String(e) });
   }
 });
+// --- BORRAR 1 mensaje por id (validando email) ---
+router.post("/message/delete", async (req, res) => {
+  try {
+    const { email, id } = req.body || {};
+    const msgId = Number(id);
+    if (!email || !msgId) {
+      return res.status(400).json({ ok: false, error: "missing_params" });
+    }
+
+    // Buscar user_id por email
+    const u = await query(`SELECT id FROM users WHERE email=$1`, [email]);
+    if (!u?.[0]) return res.status(404).json({ ok: false, error: "user_not_found" });
+    const userId = u[0].id;
+
+    // Borrar solo si el mensaje es del user
+    const r = await query(
+      `DELETE FROM messages WHERE id=$1 AND user_id=$2 RETURNING id`,
+      [msgId, userId]
+    );
+
+    if (r.length === 0) {
+      return res.status(404).json({ ok: false, error: "not_found_or_not_owned" });
+    }
+
+    res.json({ ok: true, deleted_id: msgId });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: "message_delete_failed", detail: e.message || String(e) });
+  }
+});
+
 
 module.exports = router;
