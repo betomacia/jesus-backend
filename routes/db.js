@@ -67,8 +67,7 @@ router.post("/init", async (_req, res) => {
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at  TIMESTAMPTZ DEFAULT NOW();`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS lang       TEXT;`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS platform   TEXT;`);
-
-    // Limpiar índice no-único viejo y crear **índice único** requerido por ON CONFLICT (email)
+    // Índice único requerido por ON CONFLICT (email)
     await client.query(`DROP INDEX IF EXISTS idx_users_email;`);
     await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_users_email ON users(email);`);
 
@@ -111,9 +110,27 @@ router.post("/init", async (_req, res) => {
         created_at  TIMESTAMPTZ DEFAULT NOW()
       );
     `);
-    await client.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();`);
+    // Compatibilidad/esquemas viejos: asegurar columnas
+    await client.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS role TEXT;`);
+    await client.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS content TEXT;`);
     await client.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS lang TEXT;`);
+    await client.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_messages_user ON messages(user_id);`);
+    // Renombrar "message" -> "content" si existía
+    await client.query(`
+      DO $$
+      BEGIN
+        IF EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name='messages' AND column_name='message'
+        ) AND NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name='messages' AND column_name='content'
+        ) THEN
+          EXECUTE 'ALTER TABLE messages RENAME COLUMN message TO content';
+        END IF;
+      END $$;
+    `);
 
     await client.query("COMMIT");
     res.json({ ok: true, created: true });
