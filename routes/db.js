@@ -1,97 +1,134 @@
 // routes/db.js
 const express = require("express");
-const postgres = require("postgres");
+const { Pool } = require("pg");
 
-// Crea el pool a partir de DATABASE_URL
+/** Construye el Pool desde DATABASE_URL */
 function buildPool() {
   const cs = process.env.DATABASE_URL;
   if (!cs) throw new Error("Falta DATABASE_URL en variables de entorno.");
 
-  // SSL solo si es proxy público (Railway proxy) o fuerzas PGSSL=true
+  // SSL solo si es proxy público o fuerzas PGSSL=true
   const needsSSL =
     /proxy\.rlwy\.net|neon\.tech|render\.com|amazonaws\.com/i.test(cs) ||
     (process.env.PGSSL || "").toLowerCase() === "true";
 
-  const sql = postgres(cs, {
-    ssl: needsSSL ? { rejectUnauthorized: false } : undefined,
-    max: 5,
-    idle_timeout: 30,
+  const pool = new Pool({
+    connectionString: cs,
+    ssl: needsSSL ? { rejectUnauthorized: false } : false,
+    max: 8,
+    idleTimeoutMillis: 30_000,
   });
-  return sql;
+
+  pool.on("error", (err) => {
+    console.error("[PG] error en cliente/pool:", err);
+  });
+
+  return pool;
 }
 
-const sql = buildPool();
+const pool = buildPool();
 const router = express.Router();
+
+/** Helper: query(text, params) => rows */
+async function query(text, params = []) {
+  const r = await pool.query(text, params);
+  return r.rows;
+}
 
 // ---------- Health ----------
 router.get("/health", async (_req, res) => {
   try {
-    const r = await sql`SELECT NOW() AS now`;
-    res.json({ ok: true, db_now: r?.[0]?.now ?? null });
+    const r = await query("SELECT NOW() AS now");
+    res.json({ ok: true, db_now: r?.[0]?.now ?? null, server_now: new Date().toISOString() });
   } catch (e) {
     res.status(500).json({ ok: false, error: "db_error", detail: e.message || String(e) });
   }
 });
 
-// ---------- Init (crear tablas si no existen) ----------
+// ---------- Init (crear/ajustar tablas) ----------
 router.post("/init", async (_req, res) => {
+  const client = await pool.connect();
   try {
-    await sql.begin(async (tx) => {
-      await tx`
-        CREATE TABLE IF NOT EXISTS users (
-          id          BIGSERIAL PRIMARY KEY,
-          email       TEXT UNIQUE NOT NULL,
-          lang        TEXT,
-          platform    TEXT,
-          created_at  TIMESTAMPTZ DEFAULT NOW(),
-          updated_at  TIMESTAMPTZ DEFAULT NOW()
-        );
-      `;
-      await tx`
-        CREATE TABLE IF NOT EXISTS purchases (
-          id          BIGSERIAL PRIMARY KEY,
-          user_id     BIGINT REFERENCES users(id) ON DELETE CASCADE,
-          provider    TEXT,            -- 'apple' | 'google' | 'stripe' | etc.
-          external_id TEXT,            -- id de recibo/orden
-          amount_cents INTEGER,
-          currency    TEXT,
-          created_at  TIMESTAMPTZ DEFAULT NOW()
-        );
-      `;
-      await tx`
-        CREATE TABLE IF NOT EXISTS credits (
-          id          BIGSERIAL PRIMARY KEY,
-          user_id     BIGINT REFERENCES users(id) ON DELETE CASCADE,
-          delta       INTEGER NOT NULL,    -- +carga / -consumo
-          reason      TEXT,                -- 'purchase' | 'chat' | 'audio' | etc.
-          created_at  TIMESTAMPTZ DEFAULT NOW()
-        );
-      `;
-      await tx`
-        CREATE TABLE IF NOT EXISTS messages (
-          id          BIGSERIAL PRIMARY KEY,
-          user_id     BIGINT REFERENCES users(id) ON DELETE CASCADE,
-          role        TEXT,                -- 'user' | 'assistant'
-          content     TEXT,
-          lang        TEXT,
-          created_at  TIMESTAMPTZ DEFAULT NOW()
-        );
-      `;
-    });
+    await client.query("BEGIN");
 
+    // users
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id          BIGSERIAL PRIMARY KEY,
+        email       TEXT UNIQUE NOT NULL,
+        lang        TEXT,
+        platform    TEXT,
+        created_at  TIMESTAMPTZ DEFAULT NOW(),
+        updated_at  TIMESTAMPTZ DEFAULT NOW()
+      );
+    `);
+    // Asegurar columnas si la tabla existía de antes
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at  TIMESTAMPTZ DEFAULT NOW();`);
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at  TIMESTAMPTZ DEFAULT NOW();`);
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS lang       TEXT;`);
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS platform   TEXT;`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);`);
+
+    // purchases
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS purchases (
+        id            BIGSERIAL PRIMARY KEY,
+        user_id       BIGINT REFERENCES users(id) ON DELETE CASCADE,
+        provider      TEXT,
+        external_id   TEXT,
+        amount_cents  INTEGER,
+        currency      TEXT,
+        created_at    TIMESTAMPTZ DEFAULT NOW()
+      );
+    `);
+    await client.query(`ALTER TABLE purchases ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_purchases_user ON purchases(user_id);`);
+
+    // credits
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS credits (
+        id          BIGSERIAL PRIMARY KEY,
+        user_id     BIGINT REFERENCES users(id) ON DELETE CASCADE,
+        delta       INTEGER NOT NULL,
+        reason      TEXT,
+        created_at  TIMESTAMPTZ DEFAULT NOW()
+      );
+    `);
+    await client.query(`ALTER TABLE credits ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_credits_user ON credits(user_id);`);
+
+    // messages
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS messages (
+        id          BIGSERIAL PRIMARY KEY,
+        user_id     BIGINT REFERENCES users(id) ON DELETE CASCADE,
+        role        TEXT,
+        content     TEXT,
+        lang        TEXT,
+        created_at  TIMESTAMPTZ DEFAULT NOW()
+      );
+    `);
+    await client.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();`);
+    await client.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS lang TEXT;`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_messages_user ON messages(user_id);`);
+
+    await client.query("COMMIT");
     res.json({ ok: true, created: true });
   } catch (e) {
+    try { await client.query("ROLLBACK"); } catch {}
     res.status(500).json({ ok: false, error: "db_init_failed", detail: e.message || String(e) });
+  } finally {
+    client.release();
   }
 });
 
 // ---------- Stats simples ----------
 router.get("/stats", async (_req, res) => {
   try {
-    const u = await sql`SELECT COUNT(*)::int AS c FROM users`;
-    const p = await sql`SELECT COUNT(*)::int AS c FROM purchases`;
-    const c = await sql`SELECT COALESCE(SUM(delta),0)::int AS s FROM credits`;
-    const m = await sql`SELECT COUNT(*)::int AS c FROM messages`;
+    const u = await query(`SELECT COUNT(*)::int AS c FROM users`);
+    const p = await query(`SELECT COUNT(*)::int AS c FROM purchases`);
+    const c = await query(`SELECT COALESCE(SUM(delta),0)::int AS s FROM credits`);
+    const m = await query(`SELECT COUNT(*)::int AS c FROM messages`);
     res.json({
       ok: true,
       users: u?.[0]?.c ?? 0,
@@ -104,5 +141,4 @@ router.get("/stats", async (_req, res) => {
   }
 });
 
-// Exportamos **objeto** con router y query
-module.exports = { router, query: sql };
+module.exports = { router, query, pool };
