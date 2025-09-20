@@ -1,3 +1,4 @@
+// services/push.service.js
 // Envío de notificaciones por Firebase Cloud Messaging (HTTP v1, OAuth2)
 // ENV requeridas: FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY (\n escapados)
 // Node 18+ = fetch global
