@@ -106,10 +106,39 @@ async function ensureDevicesTable() {
   `);
 }
 
+/**
+ * ✅ Upsert por (user_id, device_id) si viene device_id (token-rotación robusta)
+ *    Fallback: upsert por fcm_token cuando no tenemos device_id.
+ */
 async function registerDevice({
   uid, platform = null, fcm_token, device_id = null, lang = null,
   tz_offset_minutes = null, app_version = null, os_version = null, model = null,
 }) {
+  const plat = platform ? String(platform).trim().toLowerCase() : null;
+
+  if (device_id) {
+    const r = await query(
+      `
+      INSERT INTO devices (user_id, platform, fcm_token, device_id, lang, tz_offset_minutes, app_version, os_version, model, last_seen)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())
+      ON CONFLICT (user_id, device_id) WHERE device_id IS NOT NULL
+      DO UPDATE SET
+        platform = COALESCE(EXCLUDED.platform, devices.platform),
+        fcm_token = EXCLUDED.fcm_token,
+        lang = COALESCE(EXCLUDED.lang, devices.lang),
+        tz_offset_minutes = COALESCE(EXCLUDED.tz_offset_minutes, devices.tz_offset_minutes),
+        app_version = COALESCE(EXCLUDED.app_version, devices.app_version),
+        os_version = COALESCE(EXCLUDED.os_version, devices.os_version),
+        model = COALESCE(EXCLUDED.model, devices.model),
+        last_seen = NOW()
+      RETURNING id, user_id, platform, fcm_token, device_id, lang, tz_offset_minutes, app_version, os_version, model, last_seen, created_at
+      `,
+      [uid, plat, String(fcm_token), String(device_id), lang, tz_offset_minutes, app_version, os_version, model]
+    );
+    return r?.[0];
+  }
+
+  // Fallback: upsert por token
   const r = await query(
     `
     INSERT INTO devices (user_id, platform, fcm_token, device_id, lang, tz_offset_minutes, app_version, os_version, model, last_seen)
@@ -127,7 +156,7 @@ async function registerDevice({
       last_seen = NOW()
     RETURNING id, user_id, platform, fcm_token, device_id, lang, tz_offset_minutes, app_version, os_version, model, last_seen, created_at
     `,
-    [uid, platform, String(fcm_token), device_id, lang, tz_offset_minutes, app_version, os_version, model]
+    [uid, plat, String(fcm_token), device_id, lang, tz_offset_minutes, app_version, os_version, model]
   );
   return r?.[0];
 }
@@ -176,12 +205,16 @@ async function sendSimpleToUser({
     const t = title ?? i18nPick(title_i18n, lang) ?? "Notificación";
     const b = body  ?? i18nPick(body_i18n,  lang) ?? "Tienes un mensaje.";
 
+    // ✅ Para plataforma 'web' forzamos data-only para evitar duplicados en Chrome/Android.
+    const isWeb = String(d.platform || "").toLowerCase() === "web";
+    const useWebDataOnly = isWeb ? true : !!webDataOnly;
+
     const r = await sendToFcmV1({
       token: d.fcm_token,
       title: t,
       body: b,
       data,
-      webDataOnly: !!webDataOnly && (d.platform === 'web'), // sólo aplica a web
+      webDataOnly: useWebDataOnly,
     });
 
     if (r.ok) {
