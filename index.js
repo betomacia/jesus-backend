@@ -5,7 +5,7 @@
 
 const contactRouter = require("./routes/contact");
 const usersRouter = require("./routes/users");
-const dbRouter = require("./routes/db");
+const { router: dbRouter } = require("./routes/db");
 const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
@@ -458,6 +458,7 @@ app.get("/api/heygen/config", (_req, res) => {
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
+
 
 
 
