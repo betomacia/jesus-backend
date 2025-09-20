@@ -40,6 +40,14 @@ async function ensureUserId({ user_id, email, lang = null, platform = null }) {
   throw new Error("user_id_or_email_required");
 }
 
+// Purga: borra mensajes anteriores a 90 días (calendario)
+async function purgeOldMessages(userId) {
+  await query(
+    `DELETE FROM messages WHERE user_id=$1 AND created_at < NOW() - INTERVAL '90 days'`,
+    [userId]
+  );
+}
+
 // ---------- Health ----------
 router.get("/health", async (_req, res) => {
   try {
@@ -166,6 +174,9 @@ router.post("/message/add", async (req, res) => {
     const { user_id = null, email = null, role, content, text, lang = null, client_ts = null } = req.body || {};
     const uid = await ensureUserId({ user_id, email });
 
+    // Purga 90 días para este usuario
+    await purgeOldMessages(uid);
+
     const msgText = (text ?? content ?? "").toString();
     if (!msgText.trim()) return res.status(400).json({ ok: false, error: "message_text_required" });
 
@@ -196,6 +207,9 @@ router.get("/message/history", async (req, res) => {
       uid = u.id;
     }
     if (!uid) return res.status(400).json({ ok: false, error: "user_id_or_email_required" });
+
+    // Purga 90 días (por si no hubo escrituras recientes)
+    await purgeOldMessages(uid);
 
     const limit = Math.min(Math.max(parseInt(req.query.limit || "50", 10) || 50, 1), 200);
 
