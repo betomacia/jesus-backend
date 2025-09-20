@@ -16,18 +16,26 @@ firebase.initializeApp({
 
 const messaging = firebase.messaging();
 
-// Mostrar notificaciones cuando la página está en 2º plano
+/**
+ * ✅ Solo mostrar notificación si el payload es data-only.
+ * Si viene payload.notification, el navegador ya dibuja la notificación,
+ * así que no hacemos nada para evitar duplicados.
+ */
 messaging.onBackgroundMessage((payload) => {
-  const title = payload?.notification?.title || 'Notificación';
-  const body  = payload?.notification?.body  || '';
-  const icon  = payload?.notification?.icon  || '/icon-192.png'; // opcional
+  // Si llega con notification -> la muestra el navegador; evitamos duplicado
+  if (payload && payload.notification) return;
+
+  // Data-only: tomar título/cuerpo desde data (compat con backend que envía __title/__body)
+  const title = payload?.data?.__title || 'Notificación';
+  const body  = payload?.data?.__body  || '';
+  const icon  = payload?.data?.icon    || '/icon-192.png';
   const data  = payload?.data || {};
 
   self.registration.showNotification(title, {
     body,
     icon,
-    data,            // guardamos la data para usarla al click
-    // tag: 'push',  // opcional (evita stacking)
+    data,
+    // tag: 'push', // opcional si querés evitar stacking
   });
 });
 
@@ -44,8 +52,9 @@ self.addEventListener('notificationclick', (event) => {
       let targetUrl = '/';
       try {
         const u = new URL(rawUrl, self.location.origin);
-        // Solo navegamos si es el mismo origen por seguridad
-        if (u.origin === self.location.origin) targetUrl = u.pathname + u.search + u.hash;
+        if (u.origin === self.location.origin) {
+          targetUrl = u.pathname + u.search + u.hash;
+        }
       } catch { /* si falla, queda '/' */ }
 
       // ¿Ya hay una pestaña de este origen abierta?
@@ -54,7 +63,6 @@ self.addEventListener('notificationclick', (event) => {
         try {
           const cu = new URL(client.url);
           if (cu.origin === self.location.origin) {
-            // Si ya está en otra ruta, navegamos; luego enfocamos
             if (targetUrl && (cu.pathname + cu.search + cu.hash) !== targetUrl && 'navigate' in client) {
               await client.navigate(targetUrl);
             }
@@ -68,8 +76,7 @@ self.addEventListener('notificationclick', (event) => {
       if (clients.openWindow) {
         await clients.openWindow(targetUrl);
       }
-    } catch (e) {
-      // En caso de error, al menos intentamos abrir la home
+    } catch {
       if (clients.openWindow) await clients.openWindow('/');
     }
   })());
