@@ -128,7 +128,6 @@ router.post("/credit/spend", async (req, res) => {
     const r = await spend({ uid, amount: amt, reason: String(reason || "spend") });
 
     if (r && r.ok === false) {
-      // Mantener semántica previa: 200 con { ok:false, error:"insufficient_credits", ... }
       return res.json(r);
     }
     res.json({ ok: true, user_id: uid, spent: r.spent, reason: String(reason || "spend"), balance: r.balance });
@@ -155,27 +154,21 @@ router.post("/message/add", async (req, res) => {
       email: email ? String(email).trim().toLowerCase() : null,
     });
 
-    // Prioriza strings reales; si no, convierte una sola vez al final
     let msgText;
-    if (typeof text === "string") {
-      msgText = text;
-    } else if (typeof content === "string") {
-      msgText = content;
-    } else {
-      msgText = String(text ?? content ?? "");
-    }
+    if (typeof text === "string") msgText = text;
+    else if (typeof content === "string") msgText = content;
+    else msgText = String(text ?? content ?? "");
 
     if (!msgText.trim()) {
       return res.status(400).json({ ok: false, error: "message_text_required" });
     }
 
-    // La purga de >90 días se hace dentro de addMessage (service) para garantizar consistencia
     const r = await addMessage({
       uid,
       role: (role || "user").toString(),
-      text: msgText,          // guardar TAL CUAL
+      text: msgText,
       lang: lang || null,
-      client_ts: client_ts || null, // ISO opcional, si viene del dispositivo
+      client_ts: client_ts || null,
     });
 
     res.json({ ok: true, id: r?.id ?? null, created_at: r?.created_at ?? null });
@@ -199,7 +192,6 @@ router.get("/message/history", async (req, res) => {
     const rawLimit = Number.parseInt(req.query.limit, 10);
     const limit = Math.min(Math.max(Number.isFinite(rawLimit) ? rawLimit : 50, 1), 200);
 
-    // La purga de >90 días también se garantiza en getHistory
     const items = await getHistory({ uid, limit });
     res.json({ ok: true, user_id: uid, items });
   } catch (e) {
@@ -225,13 +217,11 @@ router.post("/message/delete", async (req, res) => {
     }
     if (!uid) return res.status(400).json({ ok: false, error: "user_id_or_email_required" });
 
-    // A) un solo id
     if (id) {
       const deleted_id = await deleteById({ uid, id: Number(id) });
       return res.json({ ok: true, deleted_id });
     }
 
-    // B) varios ids
     if (Array.isArray(ids) && ids.length > 0) {
       const arr = ids.map((n) => Number(n)).filter((n) => Number.isInteger(n));
       if (!arr.length) return res.status(400).json({ ok: false, error: "bad_ids" });
@@ -239,7 +229,6 @@ router.post("/message/delete", async (req, res) => {
       return res.json({ ok: true, deleted, deleted_ids });
     }
 
-    // C) antes de una fecha/hora
     if (before) {
       const ts = new Date(before);
       if (isNaN(ts)) return res.status(400).json({ ok: false, error: "bad_before" });
@@ -322,6 +311,88 @@ router.get("/push/devices", async (req, res) => {
   }
 });
 
+/* === NUEVO: Desregistrar token/dispositivo ===
+   POST /users/push/unregister
+   Body: { email|user_id (opcional), platform (opcional), fcm_token | device_id (obligatorio uno) }
+*/
+router.post("/push/unregister", async (req, res) => {
+  try {
+    await ensureDevicesTable();
+
+    const {
+      user_id = null,
+      email = null,
+      platform = null,   // opcional: 'web' | 'android' | 'ios'
+      fcm_token = null,  // opción A (recomendada)
+      device_id = null,  // opción B (si no tienes el token)
+    } = req.body || {};
+
+    // uid es opcional para borrar por token, pero lo aceptamos para acotar
+    let uid = null;
+    if (user_id || email) {
+      uid = await ensureUserId({
+        user_id,
+        email: email ? String(email).trim().toLowerCase() : null,
+      });
+    }
+
+    let deletedRows = [];
+    if (fcm_token) {
+      const params = [String(fcm_token)];
+      let where = `fcm_token = $1`;
+
+      if (uid) {
+        params.push(uid);
+        where += ` AND user_id = $2`;
+      }
+      if (platform) {
+        const plat = String(platform).trim().toLowerCase();
+        params.push(plat);
+        where += ` AND platform = $${params.length}`;
+      }
+
+      deletedRows = await query(
+        `DELETE FROM devices WHERE ${where}
+         RETURNING id, user_id, platform, device_id, fcm_token`,
+        params
+      );
+    } else if (device_id) {
+      if (!uid) {
+        return res.status(400).json({ ok: false, error: "user_id_or_email_required_for_device_id" });
+      }
+      const params = [uid, String(device_id)];
+      let where = `user_id = $1 AND device_id = $2`;
+      if (platform) {
+        const plat = String(platform).trim().toLowerCase();
+        params.push(plat);
+        where += ` AND platform = $${params.length}`;
+      }
+
+      deletedRows = await query(
+        `DELETE FROM devices WHERE ${where}
+         RETURNING id, user_id, platform, device_id, fcm_token`,
+        params
+      );
+    } else {
+      return res.status(400).json({ ok: false, error: "fcm_token_or_device_id_required" });
+    }
+
+    res.json({
+      ok: true,
+      deleted: deletedRows.length,
+      devices: deletedRows.map((r) => ({
+        id: r.id,
+        user_id: r.user_id,
+        platform: r.platform,
+        device_id: r.device_id,
+        fcm_token: r.fcm_token, // quita esto si no quieres devolverlo
+      })),
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: "push_unregister_failed", detail: e.message || String(e) });
+  }
+});
+
 router.post("/push/send-simple", async (req, res) => {
   try {
     await ensureDevicesTable();
@@ -338,7 +409,6 @@ router.post("/push/send-simple", async (req, res) => {
       lang = null,      // override opcional
     } = req.body || {};
 
-    // Resolver usuario
     const uid = await ensureUserId({
       user_id,
       email: email ? String(email).trim().toLowerCase() : null,
@@ -346,7 +416,6 @@ router.post("/push/send-simple", async (req, res) => {
 
     const user = (await query(`SELECT id, lang FROM users WHERE id=$1`, [uid]))[0] || {};
 
-    // Normalizar platform si viene
     const plat = platform ? String(platform).trim().toLowerCase() : null;
     const allowed = new Set(["web", "android", "ios"]);
     const platFilter = plat && allowed.has(plat) ? plat : null;
@@ -357,7 +426,6 @@ router.post("/push/send-simple", async (req, res) => {
       return res.status(404).json({ ok: false, error: "no_devices_for_user" });
     }
 
-    // Envío simple con localización: title/body o sus variantes i18n
     const report = await sendSimpleToUser({
       user,
       devices,
