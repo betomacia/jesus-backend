@@ -16,8 +16,8 @@ require("dotenv").config();
 
 const app = express();
 app.use(cors({ origin: true })); // CORS permisivo
-app.use("/db", dbRouter);
 app.use(bodyParser.json());
+app.use("/db", dbRouter);
 app.use("/contact", contactRouter);
 app.use("/users", usersRouter);
 
@@ -458,6 +458,7 @@ app.get("/api/heygen/config", (_req, res) => {
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
+
 
 
 
