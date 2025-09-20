@@ -1,13 +1,16 @@
 // routes/users.js
 const express = require("express");
-const { query } = require("./db"); // usamos el helper query del pool PG
+const { query } = require("./db"); // helper query del pool PG
 
 const router = express.Router();
 
 // ---------- Helpers ----------
 async function findUserByEmail(email) {
   if (!email) return null;
-  const r = await query(`SELECT id, email, lang, platform FROM users WHERE email=$1`, [email]);
+  const r = await query(
+    `SELECT id, email, lang, platform FROM users WHERE email=$1`,
+    [String(email).trim().toLowerCase()]
+  );
   return r[0] || null;
 }
 
@@ -23,7 +26,7 @@ async function upsertUser(email, lang = null, platform = null) {
                   updated_at = NOW()
     RETURNING id, email, lang, platform, created_at, updated_at
     `,
-    [email, lang, platform]
+    [String(email).trim().toLowerCase(), lang, platform]
   );
   return r[0];
 }
@@ -69,7 +72,10 @@ router.post("/credit/add", async (req, res) => {
       [uid, Number(delta) || 0, reason || null]
     );
 
-    const b = await query(`SELECT COALESCE(SUM(delta),0)::int AS balance FROM credits WHERE user_id=$1`, [uid]);
+    const b = await query(
+      `SELECT COALESCE(SUM(delta),0)::int AS balance FROM credits WHERE user_id=$1`,
+      [uid]
+    );
     res.json({ ok: true, user_id: uid, balance: b?.[0]?.balance ?? 0 });
   } catch (e) {
     res.status(500).json({ ok: false, error: "credit_add_failed", detail: e.message || String(e) });
@@ -89,7 +95,10 @@ router.get("/credit/balance", async (req, res) => {
     }
     if (!uid) return res.status(400).json({ ok: false, error: "user_id_or_email_required" });
 
-    const b = await query(`SELECT COALESCE(SUM(delta),0)::int AS balance FROM credits WHERE user_id=$1`, [uid]);
+    const b = await query(
+      `SELECT COALESCE(SUM(delta),0)::int AS balance FROM credits WHERE user_id=$1`,
+      [uid]
+    );
     res.json({ ok: true, user_id: uid, balance: b?.[0]?.balance ?? 0 });
   } catch (e) {
     res.status(500).json({ ok: false, error: "credit_balance_failed", detail: e.message || String(e) });
@@ -151,35 +160,60 @@ router.get("/message/history", async (req, res) => {
     res.status(500).json({ ok: false, error: "message_history_failed", detail: e.message || String(e) });
   }
 });
-// --- BORRAR 1 mensaje por id (validando email) ---
+
+// ---------- Mensajes: delete (id | ids | before) ----------
 router.post("/message/delete", async (req, res) => {
   try {
-    const { email, id } = req.body || {};
-    const msgId = Number(id);
-    if (!email || !msgId) {
-      return res.status(400).json({ ok: false, error: "missing_params" });
+    const { email = null, user_id = null, id = null, ids = null, before = null } = req.body || {};
+
+    // Resolver user_id SIN crear usuarios nuevos
+    let uid = user_id ? Number(user_id) : null;
+    if (!uid && email) {
+      const u = await findUserByEmail(email);
+      if (!u) return res.status(404).json({ ok: false, error: "user_not_found" });
+      uid = u.id;
+    }
+    if (!uid) return res.status(400).json({ ok: false, error: "user_id_or_email_required" });
+
+    // A) un solo id
+    if (id) {
+      const del = await query(
+        `DELETE FROM messages WHERE user_id=$1 AND id=$2 RETURNING id`,
+        [uid, Number(id)]
+      );
+      return res.json({ ok: true, deleted_id: del?.[0]?.id ?? null });
     }
 
-    // Buscar user_id por email
-    const u = await query(`SELECT id FROM users WHERE email=$1`, [email]);
-    if (!u?.[0]) return res.status(404).json({ ok: false, error: "user_not_found" });
-    const userId = u[0].id;
-
-    // Borrar solo si el mensaje es del user
-    const r = await query(
-      `DELETE FROM messages WHERE id=$1 AND user_id=$2 RETURNING id`,
-      [msgId, userId]
-    );
-
-    if (r.length === 0) {
-      return res.status(404).json({ ok: false, error: "not_found_or_not_owned" });
+    // B) varios ids
+    if (Array.isArray(ids) && ids.length > 0) {
+      const arr = ids.map(Number).filter((n) => Number.isInteger(n));
+      if (!arr.length) return res.status(400).json({ ok: false, error: "bad_ids" });
+      const del = await query(
+        `DELETE FROM messages WHERE user_id=$1 AND id = ANY($2::bigint[]) RETURNING id`,
+        [uid, arr]
+      );
+      return res.json({
+        ok: true,
+        deleted: del.length,
+        deleted_ids: del.map((r) => r.id),
+      });
     }
 
-    res.json({ ok: true, deleted_id: msgId });
+    // C) antes de una fecha/hora
+    if (before) {
+      const ts = new Date(before);
+      if (isNaN(ts)) return res.status(400).json({ ok: false, error: "bad_before" });
+      const del = await query(
+        `DELETE FROM messages WHERE user_id=$1 AND created_at < $2 RETURNING id`,
+        [uid, ts.toISOString()]
+      );
+      return res.json({ ok: true, deleted: del.length });
+    }
+
+    return res.status(400).json({ ok: false, error: "missing_params" });
   } catch (e) {
     res.status(500).json({ ok: false, error: "message_delete_failed", detail: e.message || String(e) });
   }
 });
-
 
 module.exports = router;
