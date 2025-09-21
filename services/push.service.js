@@ -2,25 +2,36 @@
 const { query } = require("../routes/db");
 const { JWT } = require("google-auth-library");
 
+// --- ENV FIREBASE (Service Account) ---
 const FB_PROJECT_ID   = process.env.FIREBASE_PROJECT_ID || "";
 const FB_CLIENT_EMAIL = process.env.FIREBASE_CLIENT_EMAIL || "";
 const FB_PRIVATE_KEY  = (process.env.FIREBASE_PRIVATE_KEY || "").replace(/\\n/g, "\n");
 
 const SCOPES = ["https://www.googleapis.com/auth/firebase.messaging"];
+
+// Cache de token IAM
 let cachedToken = { token: null, exp: 0 };
 
+// ============================
+// IAM Access Token para FCM v1
+// ============================
 async function getAccessToken() {
   const now = Math.floor(Date.now() / 1000);
   if (cachedToken.token && cachedToken.exp - 60 > now) return cachedToken.token;
+
   const jwt = new JWT({ email: FB_CLIENT_EMAIL, key: FB_PRIVATE_KEY, scopes: SCOPES });
   const a = await jwt.authorize();
   const access_token = a && a.access_token ? a.access_token : null;
   const expiry_date  = a && a.expiry_date ? a.expiry_date : (Date.now() + 55 * 60 * 1000);
+
   cachedToken.token = access_token;
   cachedToken.exp   = Math.floor(expiry_date / 1000);
   return access_token;
 }
 
+// ============================
+// Normaliza data a strings
+// ============================
 function normalizeData(data) {
   if (!data) return undefined;
   const out = {};
@@ -33,26 +44,28 @@ function normalizeData(data) {
 }
 
 /**
- * No inventa textos por defecto. Si no mandas title/body quedan "".
- * En webDataOnly=false se adjunta message.notification para Android (sistémico).
+ * Envía por FCM v1.
+ * - NO inventa títulos/cuerpos por defecto. Si no se pasan, van "".
+ * - Si webDataOnly=false adjunta message.notification (Android sistema).
  */
 async function sendToFcmV1(params) {
   const token = params && params.token ? params.token : null;
-  const title = params && typeof params.title !== "undefined" ? String(params.title || "") : "";
-  const body  = params && typeof params.body  !== "undefined" ? String(params.body  || "") : "";
+  const title = (typeof (params && params.title) !== "undefined") ? String(params.title || "") : "";
+  const body  = (typeof (params && params.body)  !== "undefined") ? String(params.body  || "") : "";
   const data  = params && params.data ? params.data : null;
   const webDataOnly = !!(params && params.webDataOnly);
 
   if (!FB_PROJECT_ID || !FB_CLIENT_EMAIL || !FB_PRIVATE_KEY) {
     return { ok: false, error: "missing_firebase_service_account_envs" };
   }
+
   try {
     const accessToken = await getAccessToken();
     const url = "https://fcm.googleapis.com/v1/projects/" + FB_PROJECT_ID + "/messages:send";
 
     const msgData = normalizeData({
-      __title: title,     // ← sin defaults “Notificación”
-      __body:  body,      // ← sin defaults
+      __title: title,   // ← sin defaults
+      __body:  body,    // ← sin defaults
       ...(data || {})
     });
 
@@ -84,6 +97,9 @@ async function sendToFcmV1(params) {
   }
 }
 
+// ============================
+// Esquema devices
+// ============================
 async function ensureDevicesTable() {
   await query(
     "CREATE TABLE IF NOT EXISTS devices (" +
@@ -120,7 +136,7 @@ async function ensureDevicesTable() {
     "END$$;"
   );
 
-  // Limpiar índice parcial viejo si existiera
+  // Limpia índice parcial viejo si existiera
   await query("DROP INDEX IF EXISTS uq_devices_user_device_nonnull;");
 }
 
@@ -220,6 +236,9 @@ async function registerDevice(params) {
   }
 }
 
+// ============================
+// Listados de devices
+// ============================
 async function listDevicesByUser(params) {
   const uid = params && params.uid ? params.uid : null;
   const platform = params && params.platform ? params.platform : null;
@@ -288,6 +307,9 @@ async function listDevicesForBroadcast(params) {
   }
 }
 
+// ============================
+// Helpers envío / errores
+// ============================
 function isInvalidTokenError(resp) {
   const st = resp && resp.json && resp.json.error ? resp.json.error.status : null;
   if (st === "NOT_FOUND" || st === "UNREGISTERED" || st === "INVALID_ARGUMENT") return true;
@@ -335,7 +357,7 @@ function dedupeDevices(devices) {
     if (id.indexOf("ANDROID_CHROME") === 0) return "android";
     if (id.indexOf("WEB_DESKTOP") === 0) return "desktop";
     return "other";
-    }
+  }
 
   const all = [].concat(Array.from(byToken.values()), Array.from(byPair.values()));
   for (let i = 0; i < all.length; i++) {
@@ -351,9 +373,12 @@ function dedupeDevices(devices) {
   return Array.from(merged.values());
 }
 
+// ============================
+// Envío a usuario (filtra WEB_BOLT, dedupe, respeta títulos)
+// ============================
 async function sendSimpleToUser(params) {
   const user = params && params.user ? params.user : {};
-  const devices = Array.isArray(params && params.devices) ? params.devices : [];
+  const devicesIn = Array.isArray(params && params.devices) ? params.devices : [];
   const title = (typeof (params && params.title) !== "undefined") ? params.title : null;
   const body  = (typeof (params && params.body)  !== "undefined") ? params.body  : null;
   const title_i18n = params && params.title_i18n ? params.title_i18n : null;
@@ -362,30 +387,45 @@ async function sendSimpleToUser(params) {
   const overrideLang = params && params.overrideLang ? params.overrideLang : null;
   const webDataOnly  = !!(params && params.webDataOnly);
 
+  // 0) Filtro: fuera WEB_BOLT + duplicados exactos (platform|device_id|token)
+  const filtered = [];
+  const seen = new Set();
+  for (let i = 0; i < devicesIn.length; i++) {
+    const d = devicesIn[i];
+    const did = String(d.device_id || "");
+    if (/^WEB_BOLT/i.test(did)) continue; // descarta Bolt
+    const key = [String(d.platform || "").toLowerCase(), did, String(d.fcm_token || "")].join("|");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    filtered.push(d);
+  }
+
+  // 1) Dedupe: deja 1 android + 1 desktop por usuario (más recientes)
+  const deduped = dedupeDevices(filtered);
+
   let sent = 0, failed = 0;
   const results = [];
 
-  const safeDevices = dedupeDevices(devices);
-
-  for (let i = 0; i < safeDevices.length; i++) {
-    const d = safeDevices[i];
+  for (let i = 0; i < deduped.length; i++) {
+    const d = deduped[i];
     const rawLang = overrideLang || d.lang || user.lang || "es";
     const lang = String(rawLang || "es").slice(0, 5).toLowerCase();
 
-    var t;
+    // Usa exactamente lo que llega del admin (sin textos de prueba)
+    let t = "";
     if (title !== null) t = String(title);
     else if (title_i18n && (title_i18n[lang] || title_i18n[lang.split("-")[0]])) {
       t = String(title_i18n[lang] || title_i18n[lang.split("-")[0]]);
-    } else t = "";
+    }
 
-    var b;
+    let b = "";
     if (body !== null) b = String(body);
     else if (body_i18n && (body_i18n[lang] || body_i18n[lang.split("-")[0]])) {
       b = String(body_i18n[lang] || body_i18n[lang.split("-")[0]]);
-    } else b = "";
+    }
 
     const isWeb = String(d.platform || "").toLowerCase() === "web";
-    const useWebDataOnly = isWeb ? true : !!webDataOnly;
+    const useWebDataOnly = isWeb ? true : !!(webDataOnly);
 
     const r = await sendToFcmV1({
       token: d.fcm_token,
@@ -397,17 +437,18 @@ async function sendSimpleToUser(params) {
 
     if (r && r.ok) {
       sent++;
-      results.push({ device_id: d.device_id, ok: true, messageId: (r.messageId || null) });
+      results.push({ user_id: d.user_id, device_id: d.device_id, ok: true, messageId: r.messageId || null });
     } else {
       if (isInvalidTokenError(r) && d && d.id) {
         await deleteDeviceById(d.id);
-        results.push({ device_id: d.device_id, ok: false, pruned: true, error: (r && r.error) || "send_error" });
+        results.push({ user_id: d.user_id, device_id: d.device_id, ok: false, pruned: true, error: (r && r.error) || "send_error" });
       } else {
-        results.push({ device_id: d.device_id, ok: false, error: (r && r.error) || "send_error" });
+        results.push({ user_id: d.user_id, device_id: d.device_id, ok: false, error: (r && r.error) || "send_error" });
       }
       failed++;
     }
   }
+
   return { sent: sent, failed: failed, results: results };
 }
 
