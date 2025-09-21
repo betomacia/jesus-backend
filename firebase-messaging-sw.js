@@ -1,12 +1,8 @@
-/* public/firebase-messaging-sw.js */
-// Versión para forzar actualización de SW
-const SW_VERSION = "v4";
+// public/firebase-messaging-sw.js
+// v3: data-only + fallback al evento 'push'
+importScripts('https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js');
+importScripts('https://www.gstatic.com/firebasejs/10.12.2/firebase-messaging-compat.js');
 
-// Compat
-importScripts("https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js");
-importScripts("https://www.gstatic.com/firebasejs/10.12.2/firebase-messaging-compat.js");
-
-// INIT (igual a tu app)
 firebase.initializeApp({
   apiKey: "AIzaSyCWIev2L18k_TugAAIDEYREwsfFn0chdpQ",
   authDomain: "jesus-e7711.firebaseapp.com",
@@ -14,80 +10,56 @@ firebase.initializeApp({
   storageBucket: "jesus-e7711.appspot.com",
   messagingSenderId: "228736362294",
   appId: "1:228736362294:web:d34485861f9daccb9cf597",
-  measurementId: "G-9QVKVW3YVD",
+  measurementId: "G-9QVKVW3YVD"
 });
 
 const messaging = firebase.messaging();
 
-// Garantizar que el SW nuevo tome control ya
-self.addEventListener("install", (e) => {
-  // console.log("[SW]", SW_VERSION, "install");
-  self.skipWaiting();
-});
-self.addEventListener("activate", (e) => {
-  // console.log("[SW]", SW_VERSION, "activate");
-  e.waitUntil(self.clients.claim());
-});
-
-// Evita duplicados si dos listeners llegaran a disparar casi a la vez
-let __lastShown = { ts: 0, title: "", body: "" };
-function showToastSafe(title, body, data) {
-  const now = Date.now();
-  const dup =
-    __lastShown.title === title &&
-    __lastShown.body === body &&
-    now - __lastShown.ts < 1500; // 1.5s
-  if (dup) return;
-
-  __lastShown = { ts: now, title, body };
-  return self.registration.showNotification(title, {
-    body,
-    icon: "/icon-192.png",
-    data,
-  });
-}
-
 /**
- * Handler oficial de FCM para 2º plano.
- * Solo mostramos si es data-only (sin payload.notification).
+ * Firebase handler — SOLO para payloads data-only
+ * (si viene payload.notification, deja que el navegador lo dibuje solo).
  */
 messaging.onBackgroundMessage((payload) => {
-  // console.log("[SW:bg] payload", payload);
-  if (payload && payload.notification) return; // el navegador mostraría su propia notificación
-  const data = payload?.data || {};
-  const title = data.__title || "Notificación";
-  const body = data.__body || "";
-  showToastSafe(title, body, data);
+  if (payload && payload.notification) return;
+
+  const data  = payload?.data || {};
+  const title = data.__title || 'Notificación';
+  const body  = data.__body  || '';
+  const icon  = data.icon    || '/icon-192.png';
+
+  self.registration.showNotification(title, { body, icon, data });
 });
 
 /**
- * Fallback: por si onBackgroundMessage no se dispara en ciertos entornos.
- * Solo actuamos si es data-only (sin notification) para no duplicar.
+ * Fallback robusto: si por algún motivo el handler de Firebase no corre,
+ * capturamos el 'push' crudo y mostramos la notificación para payloads data-only.
  */
-self.addEventListener("push", (event) => {
-  try {
-    const payload = event?.data ? event.data.json() : {};
-    // console.log("[SW:push] raw", payload);
-    if (payload && payload.notification) return; // evitar duplicado
+self.addEventListener('push', (event) => {
+  if (!event.data) return;
+  let raw = {};
+  try { raw = event.data.json() || {}; } catch {}
 
-    const data = payload?.data || {};
-    const title = data.__title || "Notificación";
-    const body = data.__body || "";
+  // FCM v1 suele venir como { data: {...}, notification?: {...} }
+  if (raw.notification) return;      // si trae notification, deja al navegador
+  const d = raw.data || raw || {};
 
-    event.waitUntil(showToastSafe(title, body, data));
-  } catch (e) {
-    // console.log("[SW:push] parse error", e);
-  }
-});
-
-// Click: abrir/enfocar la app
-self.addEventListener("notificationclick", (event) => {
-  event.notification.close();
-  const rawUrl = event?.notification?.data?.url || "/";
+  const title = d.__title || 'Notificación';
+  const body  = d.__body  || '';
+  const icon  = d.icon    || '/icon-192.png';
 
   event.waitUntil(
-    (async () => {
-      let targetUrl = "/";
+    self.registration.showNotification(title, { body, icon, data: d })
+  );
+});
+
+// Click: enfocar/abrir la app (misma lógica que ya tenías)
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const rawUrl = event?.notification?.data?.url || '/';
+
+  event.waitUntil((async () => {
+    try {
+      let targetUrl = '/';
       try {
         const u = new URL(rawUrl, self.location.origin);
         if (u.origin === self.location.origin) {
@@ -95,20 +67,22 @@ self.addEventListener("notificationclick", (event) => {
         }
       } catch {}
 
-      const clientsList = await clients.matchAll({ type: "window", includeUncontrolled: true });
-      for (const c of clientsList) {
+      const clientList = await clients.matchAll({ type: 'window', includeUncontrolled: true });
+      for (const client of clientList) {
         try {
-          const cu = new URL(c.url);
+          const cu = new URL(client.url);
           if (cu.origin === self.location.origin) {
-            if ("navigate" in c && (cu.pathname + cu.search + cu.hash) !== targetUrl) {
-              await c.navigate(targetUrl);
+            if (targetUrl && (cu.pathname + cu.search + cu.hash) !== targetUrl && 'navigate' in client) {
+              await client.navigate(targetUrl);
             }
-            if ("focus" in c) await c.focus();
+            if ('focus' in client) await client.focus();
             return;
           }
         } catch {}
       }
       if (clients.openWindow) await clients.openWindow(targetUrl);
-    })()
-  );
+    } catch {
+      if (clients.openWindow) await clients.openWindow('/');
+    }
+  })());
 });
