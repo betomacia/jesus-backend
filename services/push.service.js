@@ -209,7 +209,7 @@ async function registerDevice({
                  lang = COALESCE($4, lang),
                  tz_offset_minutes = COALESCE($5, tz_offset_minutes),
                  app_version = COALESCE($6, app_version),
-                 os_version = COCOALESCE($7, os_version),
+                 os_version = COALESCE($7, os_version),
                  model = COALESCE($8, model),
                  last_seen = NOW()
            WHERE user_id = $1
@@ -340,15 +340,25 @@ async function sendSimpleToUser({
     const t = title ?? (title_i18n?.[lang] || title_i18n?.[lang.split("-")[0]] || "Notificación");
     const b = body  ?? (body_i18n?.[lang]  || body_i18n?.[lang.split("-")[0]]  || "Tienes un mensaje.");
 
-    // === Política por plataforma (blindada) ===
+    // === Política por plataforma (blindada) + override opcional ===
     const plat = String(d.platform || "").toLowerCase();
     const isWeb = plat === "web";
     const isAndroid = plat === "android";
+
+    // Permitir que el caller fuerce notificación en web para campañas puntuales
+    const forceWebNotification =
+      data &&
+      (
+        data.force_notification === true ||
+        data.forceWebNotification === true ||
+        String(data.__forceNotification).toLowerCase() === "true"
+      );
+
     let useWebDataOnly = true;
     if (isWeb) {
-      useWebDataOnly = true;       // Web/PWA -> data-only (lo muestra el SW)
+      useWebDataOnly = !forceWebNotification; // forzado por caller si lo pide
     } else if (isAndroid) {
-      useWebDataOnly = false;      // Android nativo -> incluir notification
+      useWebDataOnly = false; // Android nativo -> incluir notification
     } else {
       useWebDataOnly = !!webDataOnly; // otros: respetar parámetro
     }
