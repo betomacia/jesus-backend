@@ -1,0 +1,65 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Reset Service Worker</title>
+<style>
+  body{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;padding:24px;background:#0b1020;color:#eaf2ff}
+  h1{margin:0 0 8px;font-size:20px}
+  p{margin:0 0 16px;opacity:.9}
+  pre{background:#0f1733;border:1px solid #243057;border-radius:10px;padding:12px;white-space:pre-wrap}
+  .ok{color:#88ffb1}.warn{color:#ffd477}.err{color:#ff8c88}
+</style>
+<h1>Reset de notificaciones (Service Worker & Cache)</h1>
+<p>Esta página desinstala el Service Worker, borra caches, limpia una bandera local y recarga la app.</p>
+<pre id="log">Iniciando…</pre>
+<script>
+(async () => {
+  const logEl = document.getElementById('log');
+  const log = (msg, cls='') => {
+    const line = document.createElement('div'); line.textContent = msg;
+    if (cls) line.className = cls; logEl.appendChild(line);
+  };
+
+  try {
+    // 1) Unregister SW
+    if ('serviceWorker' in navigator) {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      log(`ServiceWorkers detectados: ${regs.length}`);
+      for (const r of regs) {
+        try { await r.unregister(); log(`✔ Unregistered: ${r.scope}`, 'ok'); }
+        catch (e) { log(`✖ Error al unregister: ${e?.message||e}`, 'err'); }
+      }
+    } else {
+      log('Service Worker API no soportada en este navegador', 'warn');
+    }
+
+    // 2) Borrar caches
+    if ('caches' in self) {
+      const keys = await caches.keys();
+      log(`Caches detectadas: ${keys.length}`);
+      for (const k of keys) {
+        try { await caches.delete(k); log(`✔ Cache eliminada: ${k}`, 'ok'); }
+        catch (e) { log(`✖ Error al borrar cache "${k}": ${e?.message||e}`, 'err'); }
+      }
+    } else {
+      log('Cache API no soportada', 'warn');
+    }
+
+    // 3) Limpieza local mínima
+    try {
+      localStorage.removeItem('push_enabled'); // NO borramos push_device_id a propósito
+      log('✔ localStorage: push_enabled eliminado', 'ok');
+    } catch (e) {
+      log(`✖ localStorage error: ${e?.message||e}`, 'err');
+    }
+
+    log('Listo. Recargando la app…', 'ok');
+    setTimeout(() => {
+      const ts = Date.now();
+      const sep = location.search ? '&' : '?';
+      location.href = '/' + sep + 'sw_reset=' + ts; // fuerza una navegación limpia
+    }, 700);
+  } catch (e) {
+    log(`Fallo inesperado: ${e?.message||e}`, 'err');
+  }
+})();
+</script>
