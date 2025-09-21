@@ -13,7 +13,9 @@ async function getAccessToken() {
   const now = Math.floor(Date.now() / 1000);
   if (cachedToken.token && cachedToken.exp - 60 > now) return cachedToken.token;
   const jwt = new JWT({ email: FB_CLIENT_EMAIL, key: FB_PRIVATE_KEY, scopes: SCOPES });
-  const { access_token, expiry_date } = await jwt.authorize();
+  const auth = await jwt.authorize();
+  const access_token = auth && auth.access_token;
+  const expiry_date  = auth && auth.expiry_date;
   cachedToken.token = access_token;
   cachedToken.exp   = Math.floor((expiry_date || (Date.now() + 55 * 60 * 1000)) / 1000);
   return access_token;
@@ -23,10 +25,11 @@ async function getAccessToken() {
 function normalizeData(data) {
   if (!data) return undefined;
   const out = {};
-  for (const [k, v] of Object.entries(data)) {
-    if (v === null || v === undefined) continue;
-    out[k] = typeof v === "object" ? JSON.stringify(v) : String(v);
-  }
+  Object.keys(data).forEach((k) => {
+    const v = data[k];
+    if (v === null || v === undefined) return;
+    out[k] = (typeof v === "object") ? JSON.stringify(v) : String(v);
+  });
   return Object.keys(out).length ? out : undefined;
 }
 
@@ -36,7 +39,7 @@ function normalizeData(data) {
  * - Para 'webDataOnly=false' SÍ incluimos 'notification' (Android nativo).
  * - JAMÁS agregamos __title/__body por defecto: si caller no manda title/body, no inventamos texto.
  */
-async function sendToFcmV1({ token, title, body, data, webDataOnly = false }) {
+async function sendToFcmV1({ token, title, body, data, webDataOnly }) {
   if (!FB_PROJECT_ID || !FB_CLIENT_EMAIL || !FB_PRIVATE_KEY) {
     return { ok: false, error: "missing_firebase_service_account_envs" };
   }
@@ -50,11 +53,10 @@ async function sendToFcmV1({ token, title, body, data, webDataOnly = false }) {
     };
 
     if (!webDataOnly) {
-      // Android nativo: acá sí se respeta EXACTO el title/body que mande el admin
-      // (si vinieran vacíos, igual los mandamos vacíos)
+      // Android nativo: respetar EXACTO el title/body que mande el admin
       message.notification = {
-        title: title ?? "",
-        body:  body  ?? ""
+        title: (title !== undefined && title !== null) ? String(title) : "",
+        body:  (body  !== undefined && body  !== null) ? String(body)  : ""
       };
     }
 
@@ -66,10 +68,10 @@ async function sendToFcmV1({ token, title, body, data, webDataOnly = false }) {
 
     const json = await r.json().catch(() => ({}));
     if (!r.ok) {
-      const err = json?.error?.message || `fcm_v1_http_${r.status}`;
+      const err = (json && json.error && json.error.message) || `fcm_v1_http_${r.status}`;
       return { ok: false, error: err, status: r.status, json };
     }
-    return { ok: true, messageId: json?.name || null, status: r.status, json };
+    return { ok: true, messageId: (json && json.name) || null, status: r.status, json };
   } catch (e) {
     return { ok: false, error: String((e && e.message) || e) };
   }
@@ -149,7 +151,7 @@ async function registerDevice({
       `,
       [uid, plat, tok, did, lang, tz_offset_minutes, app_version, os_version, model]
     );
-    return r?.[0];
+    return r && r[0];
   }
 
   async function upsertByToken() {
@@ -176,7 +178,7 @@ async function registerDevice({
       `,
       [uid, plat, tok, did, lang, tz_offset_minutes, app_version, os_version, model]
     );
-    return r?.[0];
+    return r && r[0];
   }
 
   if (did) {
@@ -218,7 +220,7 @@ async function registerDevice({
           `,
           [uid, plat, tok, lang, tz_offset_minutes, app_version, os_version, model]
         );
-        return r?.[0];
+        return r && r[0];
       }
       throw e;
     }
@@ -238,6 +240,14 @@ async function listDevicesByUser({ uid, platform = null }) {
   );
 }
 
+/**
+ * Listado para broadcast:
+ *  - platform?: 'web'|'android'|'ios'
+ *  - lastSeenDays?: number
+ *  - groupByUser?: boolean (DISTINCT ON (user_id))
+ *  - preferPrefix?: string (prioriza device_id que empiece así)
+ *  - limit?: number
+ */
 async function listDevicesForBroadcast({
   platform = null,
   lastSeenDays = 30,
@@ -302,9 +312,9 @@ async function listDevicesForBroadcast({
 }
 
 function isInvalidTokenError(resp) {
-  const st = resp?.json?.error?.status;
+  const st = resp && resp.json && resp.json.error && resp.json.error.status;
   if (st === 'NOT_FOUND' || st === 'UNREGISTERED' || st === 'INVALID_ARGUMENT') return true;
-  const msg = (resp?.json?.error?.message || "").toString();
+  const msg = (resp && resp.json && resp.json.error && resp.json.error.message) || "";
   if (
     /not a valid fcm registration token/i.test(msg) ||
     /Requested entity was not found/i.test(msg) ||
@@ -319,10 +329,21 @@ async function deleteDeviceById(id) {
   return 1;
 }
 
+/** Helper sin ?? para elegir i18n */
+function pickI18n(dict, lang) {
+  if (!dict) return null;
+  const direct = dict[lang];
+  if (direct !== undefined && direct !== null) return direct;
+  const base = lang.split("-")[0];
+  const bval = dict[base];
+  if (bval !== undefined && bval !== null) return bval;
+  return null;
+}
+
 /**
  * Política final:
- * - WEB => SIEMPRE data-only (webDataOnly=true); no 'notification' (lo dibuja SW) y no inventamos textos.
- * - ANDROID (nativo) => webDataOnly=false; se manda 'notification' con title/body EXACTOS del admin.
+ * - WEB => SIEMPRE data-only; no 'notification' (lo dibuja SW) y no inventamos textos.
+ * - ANDROID (nativo) => 'notification' con title/body EXACTOS del admin.
  */
 async function sendSimpleToUser({
   user, devices, title = null, body = null, title_i18n = null, body_i18n = null,
@@ -330,27 +351,29 @@ async function sendSimpleToUser({
 }) {
   let sent = 0, failed = 0;
   const results = [];
+
   for (const d of devices) {
-    const lang = (overrideLang || d.lang || user?.lang || "es").slice(0, 5).toLowerCase();
-    const resolvedTitle =
-      title != null ? title
-      : (title_i18n?.[lang] || title_i18n?.[lang.split("-")[0]] ?? null);
-    const resolvedBody  =
-      body  != null ? body
-      : (body_i18n?.[lang]  || body_i18n?.[lang.split("-")[0]]  ?? null);
+    const lang = (overrideLang || d.lang || (user && user.lang) || "es").slice(0, 5).toLowerCase();
+
+    const resolvedTitle = (title !== undefined && title !== null)
+      ? title
+      : pickI18n(title_i18n, lang);
+
+    const resolvedBody = (body !== undefined && body !== null)
+      ? body
+      : pickI18n(body_i18n, lang);
 
     const plat = String(d.platform || "").toLowerCase();
     const isWeb = (plat === "web");
     const isAndroid = (plat === "android");
 
-    // Para diagnóstico (opcional): agregamos una marca liviana
-    const dataWithMark = { ...(data || {}), __sender: "admin" };
+    const dataWithMark = Object.assign({}, data || {}, { __sender: "admin" });
 
     const r = await sendToFcmV1({
       token: d.fcm_token,
-      title: resolvedTitle,  // Android usará exactamente esto
+      title: resolvedTitle,
       body:  resolvedBody,
-      data:  dataWithMark,   // Web lo leerá y lo dibujará tu SW si corresponde
+      data:  dataWithMark,
       webDataOnly: isWeb ? true : (isAndroid ? false : !!webDataOnly),
     });
 
@@ -358,7 +381,7 @@ async function sendSimpleToUser({
       sent++;
       results.push({ device_id: d.device_id, ok: true, messageId: r.messageId || null });
     } else {
-      if (isInvalidTokenError(r) && d?.id) {
+      if (isInvalidTokenError(r) && d && d.id) {
         await deleteDeviceById(d.id);
         results.push({ device_id: d.device_id, ok: false, pruned: true, error: r.error });
       } else {
@@ -367,6 +390,7 @@ async function sendSimpleToUser({
       failed++;
     }
   }
+
   return { sent, failed, results };
 }
 
