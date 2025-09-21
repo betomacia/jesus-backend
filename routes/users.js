@@ -1,4 +1,3 @@
-// routes/users.js
 const express = require("express");
 const { query } = require("./db");
 
@@ -38,7 +37,7 @@ router.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", origin);
   res.header("Vary", "Origin");
   res.header("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
-  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-User-Email");
   res.header("Access-Control-Max-Age", "600"); // cachea preflight unos minutos
 
   if (req.method === "OPTIONS") {
@@ -259,6 +258,8 @@ router.post("/message/delete", async (req, res) => {
 });
 
 /* ============== Dispositivos & Push ============== */
+// ✅ Actualizado: registra aunque la app no mande email, usando fallback.
+//    Normaliza platform a 'web' si no viene (Android Chrome WebPush suele ser web).
 router.post("/push/register", async (req, res) => {
   try {
     await ensureDevicesTable();
@@ -280,18 +281,30 @@ router.post("/push/register", async (req, res) => {
       return res.status(400).json({ ok: false, error: "fcm_token_required" });
     }
 
+    const DEFAULT_TEST_EMAIL = process.env.DEFAULT_TEST_EMAIL || "info@movilive.com";
+    const resolvedEmail = (email || req.get("x-user-email") || DEFAULT_TEST_EMAIL || "")
+      .toString()
+      .trim()
+      .toLowerCase();
+
+    if (!user_id && !resolvedEmail) {
+      return res.status(400).json({ ok: false, error: "user_id_or_email_required" });
+    }
+
+    const plat = platform ? String(platform).trim().toLowerCase() : "web";
+
     const uid = await ensureUserId({
       user_id,
-      email: email ? String(email).trim().toLowerCase() : null,
+      email: resolvedEmail,
       lang,
-      platform: platform ? String(platform).trim().toLowerCase() : null,
+      platform: plat,
     });
 
     const device = await registerDevice({
       uid,
-      platform: platform ? String(platform).trim().toLowerCase() : null,
+      platform: plat,
       fcm_token: String(fcm_token),
-      device_id: device_id || null,
+      device_id: device_id ? String(device_id) : null,
       lang: lang || null,
       tz_offset_minutes: Number.isFinite(+tz_offset_minutes) ? +tz_offset_minutes : null,
       app_version: app_version || null,
