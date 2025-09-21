@@ -209,7 +209,7 @@ async function registerDevice({
                  lang = COALESCE($4, lang),
                  tz_offset_minutes = COALESCE($5, tz_offset_minutes),
                  app_version = COALESCE($6, app_version),
-                 os_version = COALESCE($7, os_version),
+                 os_version = COCOALESCE($7, os_version),
                  model = COALESCE($8, model),
                  last_seen = NOW()
            WHERE user_id = $1
@@ -340,9 +340,18 @@ async function sendSimpleToUser({
     const t = title ?? (title_i18n?.[lang] || title_i18n?.[lang.split("-")[0]] || "Notificación");
     const b = body  ?? (body_i18n?.[lang]  || body_i18n?.[lang.split("-")[0]]  || "Tienes un mensaje.");
 
-    // Web (incluye Android Chrome/PWA) => data-only para evitar duplicados
-    const isWeb = String(d.platform || "").toLowerCase() === "web";
-    const useWebDataOnly = isWeb ? true : !!webDataOnly;
+    // === Política por plataforma (blindada) ===
+    const plat = String(d.platform || "").toLowerCase();
+    const isWeb = plat === "web";
+    const isAndroid = plat === "android";
+    let useWebDataOnly = true;
+    if (isWeb) {
+      useWebDataOnly = true;       // Web/PWA -> data-only (lo muestra el SW)
+    } else if (isAndroid) {
+      useWebDataOnly = false;      // Android nativo -> incluir notification
+    } else {
+      useWebDataOnly = !!webDataOnly; // otros: respetar parámetro
+    }
 
     const r = await sendToFcmV1({
       token: d.fcm_token,
