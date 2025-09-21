@@ -1,69 +1,64 @@
-/* public/firebase-messaging-sw.js */
-importScripts('https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js');
-importScripts('https://www.gstatic.com/firebasejs/10.12.2/firebase-messaging-compat.js');
+// public/firebase-messaging-sw.js
+/* Fuerza update del SW */
+self.__SW_VERSION__ = 'v9';
 
+/* Compat SDK (robusto en navegadores viejos) */
+importScripts('https://www.gstatic.com/firebasejs/9.6.11/firebase-app-compat.js');
+importScripts('https://www.gstatic.com/firebasejs/9.6.11/firebase-messaging-compat.js');
+
+/* 👇 Pega tu config (la misma que usas en el front) */
 firebase.initializeApp({
-  apiKey: "AIzaSyCWIev2L18k_TugAAIDEYREwsfFn0chdpQ",
-  authDomain: "jesus-e7711.firebaseapp.com",
-  projectId: "jesus-e7711",
-  storageBucket: "jesus-e7711.firebasestorage.app",
-  messagingSenderId: "228736362294",
-  appId: "1:228736362294:web:d34485861f9daccb9cf597",
-  measurementId: "G-9QVKVW3YVD"
+  apiKey: "TU_API_KEY",
+  authDomain: "TU_AUTH_DOMAIN",
+  projectId: "TU_PROJECT_ID",
+  messagingSenderId: "TU_SENDER_ID",
+  appId: "TU_APP_ID",
 });
-
-self.addEventListener('install', () => self.skipWaiting());
-self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
 
 const messaging = firebase.messaging();
 
-// ÚNICA vía de render en background (evita duplicados)
+/* ⚠️ ÚNICO lugar que muestra la notificación (sin defaults raros) */
 messaging.onBackgroundMessage((payload) => {
-  try { console.log('[SW] FCM payload:', payload); } catch {}
+  const data = payload?.data || {};
+  const title = data.__title || payload?.notification?.title || " ";
+  const body  = data.__body  || payload?.notification?.body  || "";
 
-  const n = payload && payload.notification ? payload.notification : {};
-  const d = payload && payload.data ? payload.data : {};
+  // URL destino (si viene del admin, quedará acá)
+  const url = data.url || data.click_action || "/";
 
-  // Prioridad a los campos “exactos” del admin
-  const title = (d.__title != null ? d.__title : n.title) || 'Notificación';
-  const body  = (d.__body  != null ? d.__body  : n.body)  || '';
+  // Tag para evitar “agrupaciones raras” del navegador
+  const tag = data.tag || `${data.device_id || 'web'}:${data.ts || Date.now()}`;
 
-  const opts = {
+  const options = {
     body,
-    icon: '/icon-192.png',
-    badge: '/badge-72.png',
-    tag: d.tag || 'general',
-    renotify: true,
-    data: {
-      url: d.url || d.click_action || '/',
-      raw: d
-    }
+    icon: "/icon-192.png",
+    data: { url, ...data },
+    tag,
+    renotify: false,
+    requireInteraction: false,
+    actions: [], // sin acciones extra (evita textos raros tipo “Anular suscripción”)
   };
 
-  self.registration.showNotification(title, opts);
+  self.registration.showNotification(title, options);
 });
 
-self.addEventListener('notificationclick', (event) => {
+/* Click: enfocar o abrir la app */
+self.addEventListener("notificationclick", (event) => {
   event.notification.close();
-  const rawUrl = (event.notification && event.notification.data && event.notification.data.url) || '/';
-  event.waitUntil((async () => {
-    let target = '/';
-    try {
-      const u = new URL(rawUrl, self.location.origin);
-      if (u.origin === self.location.origin) target = u.pathname + u.search + u.hash;
-    } catch {}
-
-    const clientsList = await clients.matchAll({ type: 'window', includeUncontrolled: true });
-    for (const c of clientsList) {
-      try {
-        const cu = new URL(c.url);
-        if (cu.origin === self.location.origin) {
-          if ((cu.pathname + cu.search + cu.hash) !== target && 'navigate' in c) await c.navigate(target);
-          if ('focus' in c) await c.focus();
-          return;
-        }
-      } catch {}
-    }
-    if (clients.openWindow) await clients.openWindow(target);
-  })());
+  const url = (event.notification?.data?.url) || "/";
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clientsArr) => {
+      const had = clientsArr.find((c) => "focus" in c);
+      if (had) return had.focus();
+      if (self.clients.openWindow) return self.clients.openWindow(url);
+    })
+  );
 });
+
+/* Vida del SW */
+self.addEventListener("install", (e) => self.skipWaiting());
+self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));
+
+/* ✅ Importante: NO agregues también un `self.addEventListener("push", ...)`. 
+   Con esto solo alcanza y evita duplicados/textos hardcodeados.
+*/
