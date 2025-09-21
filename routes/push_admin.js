@@ -9,6 +9,100 @@ router.use((req, res, next) => {
   next();
 });
 
+/* ================== PROTECCIÓN PARA ENDPOINTS ADMIN ================== */
+// Usa ADMIN_TOOLS_KEY (recomendado) o, si no está, cae a ADMIN_PUSH_KEY para compat
+function requireKey(req, res, next) {
+  const headerKey = (req.get("x-admin-key") || "").toString();
+  const queryKey  = (req.query.key || "").toString();
+  const K = process.env.ADMIN_TOOLS_KEY || process.env.ADMIN_PUSH_KEY || "";
+  if (!K || (headerKey !== K && queryKey !== K)) {
+    return res.status(403).json({ ok: false, error: "unauthorized" });
+  }
+  next();
+}
+
+/* ================== LIMPIEZA DE DEVICES ==================
+   POST /push/cleanup-devices?key=MI_CLAVE
+   - Ejecuta la limpieza de duplicados / viejos en 4 pasos
+   - Devuelve contadores por paso
+*/
+router.post("/cleanup-devices", requireKey, async (_req, res) => {
+  try {
+    // 1) Duplicados exactos por token (deja el más nuevo)
+    const step1 = await query(`
+      DELETE FROM devices d
+      USING devices d2
+      WHERE d.fcm_token = d2.fcm_token
+        AND d.id < d2.id
+      RETURNING d.id;
+    `);
+    const del_token_dups = step1.length || 0;
+
+    // 2) Duplicados por (user_id, device_id) (deja el más nuevo)
+    const step2 = await query(`
+      DELETE FROM devices d
+      USING devices d2
+      WHERE d.user_id = d2.user_id
+        AND d.device_id IS NOT DISTINCT FROM d2.device_id
+        AND d.id < d2.id
+      RETURNING d.id;
+    `);
+    const del_pair_dups = step2.length || 0;
+
+    // 3) Conserva 1 Android y 1 Desktop por usuario (más recientes)
+    const step3 = await query(`
+      WITH ranked AS (
+        SELECT id,
+               user_id,
+               CASE
+                 WHEN device_id ILIKE 'ANDROID_CHROME%' THEN 'android'
+                 WHEN device_id ILIKE 'WEB_DESKTOP%'    THEN 'desktop'
+                 ELSE 'other'
+               END AS grp,
+               ROW_NUMBER() OVER (
+                 PARTITION BY user_id,
+                              CASE
+                                WHEN device_id ILIKE 'ANDROID_CHROME%' THEN 'android'
+                                WHEN device_id ILIKE 'WEB_DESKTOP%'    THEN 'desktop'
+                                ELSE 'other'
+                              END
+                 ORDER BY last_seen DESC, id DESC
+               ) rn
+        FROM devices
+      )
+      DELETE FROM devices d
+      USING ranked r
+      WHERE d.id = r.id
+        AND r.grp IN ('android','desktop')
+        AND r.rn > 1
+      RETURNING d.id;
+    `);
+    const del_extra_per_group = step3.length || 0;
+
+    // 4) Purga muy viejos (ajustable)
+    const step4 = await query(`
+      DELETE FROM devices
+      WHERE last_seen < NOW() - INTERVAL '120 days'
+      RETURNING id;
+    `);
+    const del_old = step4.length || 0;
+
+    return res.json({
+      ok: true,
+      deleted: {
+        token_dups: del_token_dups,
+        user_device_dups: del_pair_dups,
+        extras_android_desktop: del_extra_per_group,
+        very_old: del_old,
+      },
+      note: "cleanup executed",
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message || String(e) });
+  }
+});
+
+/* ================== ADMIN BROADCAST EXISTENTE ================== */
 // POST /push/admin-broadcast
 router.post("/admin-broadcast", async (req, res) => {
   try {
@@ -76,7 +170,7 @@ router.post("/admin-broadcast", async (req, res) => {
       devices = rows;
     }
 
-    // Agrupar por usuario y enviar
+    // Agrupar por usuario y enviar (respeta idioma por user)
     const byUser = new Map();
     for (const d of devices) {
       if (!byUser.has(d.user_id)) byUser.set(d.user_id, []);
