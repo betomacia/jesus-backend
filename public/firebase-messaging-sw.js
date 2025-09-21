@@ -1,51 +1,41 @@
-/* public/firebase-messaging-sw.js — v3 (debug) */
-const SW_DEBUG_VERSION = 'v3-' + Date.now();
+/* public/firebase-messaging-sw.js — v4 (debug) */
+const SW_DEBUG_VERSION = 'v4-' + Date.now();
 
-self.addEventListener('install', (e) => {
-  // fuerzo actualización del archivo en clientes nuevos
-  self.skipWaiting?.();
-});
-
+self.addEventListener('install', () => self.skipWaiting?.());
 self.addEventListener('activate', (e) => {
   self.clients?.claim?.();
-  // pequeño ping para ver que activó
   console.log('[FM SW] activate', SW_DEBUG_VERSION);
 });
 
 self.addEventListener('push', (event) => {
   let payload = {};
-  try {
-    payload = event.data ? event.data.json() : {};
-  } catch (e) {
-    // algunos navegadores entregan texto plano
+  try { payload = event.data ? event.data.json() : {}; } catch (e) {
     try { payload = JSON.parse(event.data.text()); } catch {}
   }
 
   const data = payload?.data || {};
   const title =
-    (typeof data.__title === 'string' ? data.__title : (payload.notification?.title || '')) || '';
+    (typeof data.__title === 'string' && data.__title) ||
+    (payload.notification?.title || '');
   const body =
-    (typeof data.__body  === 'string' ? data.__body  : (payload.notification?.body  || '')) || '';
-  const icon = (typeof data.icon === 'string' && data.icon) || '/icon-192.png';
-  const tag  = (typeof data.tag  === 'string' && data.tag)  ||
-               (typeof data.__tag === 'string' && data.__tag) || 'fcm-msg';
+    (typeof data.__body === 'string' && data.__body) ||
+    (payload.notification?.body || '');
 
-  // LOG COMPLETO EN CONSOLA DEL SW
   console.log('[FM SW] push payload=', payload);
   console.log('[FM SW] using title/body=', { title, body });
 
   if (!title && !body) {
-    // si no vino nada útil, no mostramos notificación
+    // No mostrar nada si no viene contenido real
     return;
   }
 
   event.waitUntil(
     self.registration.showNotification(title, {
       body,
-      icon,
+      icon: (data.icon || '/icon-192.png'),
       badge: '/icon-192.png',
-      data: data,
-      tag,
+      data,
+      tag: (data.tag || data.__tag || 'fcm-msg'),
       renotify: false,
     })
   );
