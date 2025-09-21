@@ -1,5 +1,5 @@
 // public/firebase-messaging-sw.js
-/* FCM Web SW – v3 */
+/* eslint-disable no-undef */
 importScripts('https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js');
 importScripts('https://www.gstatic.com/firebasejs/10.12.2/firebase-messaging-compat.js');
 
@@ -13,93 +13,66 @@ firebase.initializeApp({
   measurementId: "G-9QVKVW3YVD"
 });
 
+self.addEventListener('install', () => {
+  // tomar control de inmediato (evita “Este sitio se actualizó en segundo plano” en algunos casos)
+  self.skipWaiting();
+});
+self.addEventListener('activate', (event) => {
+  event.waitUntil(self.clients.claim());
+});
+
 const messaging = firebase.messaging();
 
-// --------- util: construir notificación desde payload ----------
-function buildFromPayload(payload) {
-  // FCM data-only => va en payload.data
-  const d = (payload && payload.data) ? payload.data : {};
-  // Si vino notification (Android sistémico), igual priorizamos data si están los campos
-  const n = (payload && payload.notification) ? payload.notification : {};
-
-  const title = (d.__title != null ? String(d.__title) : (n.title || "")).trim();
-  const body  = (d.__body  != null ? String(d.__body)  : (n.body  || "")).trim();
-
-  // No mostrar “Notificación” por defecto: si no hay nada, no mostramos.
-  if (!title && !body) return null;
-
-  const icon  = d.icon  || n.icon  || "/icon-192.png";
-  const badge = d.badge || n.badge || "/icon-192.png";
-  const image = d.image || n.image || undefined;
-
-  const tag   = d.tag || "push-admin";        // mismo tag para reemplazar, no apilar
-  const url   = d.url || d.click_action || "/";
-
-  const data  = Object.assign({}, d, { __open_url: url });
-
-  return {
-    title,
-    options: {
-      body,
-      icon,
-      badge,
-      image,
-      data,
-      tag,
-      renotify: false,
-      requireInteraction: false,
-      // Evita “este sitio se actualizó…”: no usamos skipWaiting/clientsClaim acá.
-      silent: false
-    }
-  };
-}
-
-// --------- onBackgroundMessage (canal oficial FCM) ----------
+/**
+ * 📌 Manejamos *data-only* y también notification.*
+ * Backend envía __title/__body dentro de data cuando webDataOnly=true.
+ */
 messaging.onBackgroundMessage((payload) => {
   try {
-    const built = buildFromPayload(payload);
-    if (!built) return; // nada que mostrar
-    self.registration.showNotification(built.title, built.options);
+    const d = payload && payload.data ? payload.data : {};
+
+    // Preferimos los campos de data (__title/__body). Si no, caemos a notification.*
+    const title =
+      (d.__title) ||
+      (payload.notification && payload.notification.title) ||
+      "";
+
+    const body =
+      (d.__body) ||
+      (payload.notification && payload.notification.body) ||
+      "";
+
+    // Si no hay título ni cuerpo, no mostramos nada (evita “Notificación” por defecto)
+    if (!title && !body) return;
+
+    const icon = d.icon || '/icon-192.png';
+
+    const options = {
+      body,
+      icon,
+      data: d,                 // dejamos data para usar en el click
+      tag: d.tag || undefined, // si querés colapsar por tag
+      renotify: false,
+    };
+
+    self.registration.showNotification(title, options);
   } catch (e) {
-    // log minimal en SW
-    // console.error no siempre aparece en todos los browsers, igual lo dejamos.
-    try { console.error('SW onBackgroundMessage error:', e); } catch {}
+    // silencioso
   }
 });
 
-// --------- listener ‘push’ (fallback y debug) ----------
-self.addEventListener('push', (event) => {
-  try {
-    let payload = {};
-    if (event.data) {
-      try { payload = event.data.json(); } catch { payload = {}; }
-    }
-    const built = buildFromPayload(payload);
-    if (!built) return;
-    event.waitUntil(self.registration.showNotification(built.title, built.options));
-  } catch (e) {
-    try { console.error('SW push event error:', e); } catch {}
-  }
-});
-
-// --------- click: abrir o enfocar la app ----------
+/**
+ * Click: si viene una URL en data.url, la abrimos o enfocamos.
+ */
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-  const url = (event.notification && event.notification.data && event.notification.data.__open_url) || '/';
+  const url = (event.notification && event.notification.data && event.notification.data.url) || '/';
   event.waitUntil((async () => {
-    const allClients = await clients.matchAll({ type: 'window', includeUncontrolled: true });
-    for (const c of allClients) {
-      // Si ya hay una pestaña con la app, enfócala
-      try {
-        const u = new URL(c.url);
-        if (u.origin === location.origin) {
-          await c.focus();
-          try { c.navigate(url); } catch {}
-          return;
-        }
-      } catch {}
+    const allClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    const same = allClients.find(c => c.url.includes(url));
+    if (same) return same.focus();
+    if (self.clients && self.clients.openWindow) {
+      return self.clients.openWindow(url);
     }
-    // Si no hay, abrir nueva
-    await clients.openWindow(url);
   })());
 });
