@@ -1,18 +1,18 @@
-// v4 — data-only first, fallback a 'push', auto-update SW
+// public/firebase-messaging-sw.js
+// v5 — data-only primero, fallback a 'push', auto-update del SW
 
 importScripts('https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js');
 importScripts('https://www.gstatic.com/firebasejs/10.12.2/firebase-messaging-compat.js');
 
-// --- Forzar update del SW cada vez que cambie este valor ---
-const SW_VERSION = "2025-09-21_06"; // súbelo cuando quieras forzar otro update
+const SW_VERSION = "2025-09-21_06";
 self.addEventListener('install', () => self.skipWaiting());
-self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
-console.log('[SW] running', SW_VERSION);
+self.addEventListener('activate', (evt) => evt.waitUntil(self.clients.claim()));
 
 firebase.initializeApp({
   apiKey: "AIzaSyCWIev2L18k_TugAAIDEYREwsfFn0chdpQ",
   authDomain: "jesus-e7711.firebaseapp.com",
   projectId: "jesus-e7711",
+  // (Messaging no usa el bucket, pero este es el formato estándar:)
   storageBucket: "jesus-e7711.appspot.com",
   messagingSenderId: "228736362294",
   appId: "1:228736362294:web:d34485861f9daccb9cf597",
@@ -22,11 +22,11 @@ firebase.initializeApp({
 const messaging = firebase.messaging();
 
 /**
- * BACKGROUND (Firebase) — se dispara para payloads "data-only".
- * Si viene payload.notification, dejamos que el navegador lo dibuje (evita duplicados).
+ * Handler Firebase — SOLO dibuja si el payload es "data-only".
+ * Si llega payload.notification, dejamos que el navegador lo muestre (evita duplicados).
  */
 messaging.onBackgroundMessage((payload) => {
-  if (payload && payload.notification) return;
+  if (payload && payload.notification) return; // evitar doble notificación
 
   const d = payload?.data || {};
   const title = d.__title || d.title || 'Notificación';
@@ -35,7 +35,7 @@ messaging.onBackgroundMessage((payload) => {
   const badge = d.badge   || '/badge-72.png';
   const tag   = d.tag     || 'general';
 
-  const options = {
+  self.registration.showNotification(title, {
     body,
     icon,
     badge,
@@ -46,22 +46,19 @@ messaging.onBackgroundMessage((payload) => {
       raw: d,
       swv: SW_VERSION,
     },
-  };
-
-  self.registration.showNotification(title, options);
+  });
 });
 
 /**
- * Fallback robusto (evento 'push'): si por algún motivo el handler anterior no corre,
- * mostramos la notificación para payloads data-only que lleguen como push crudo.
- * Nota: si el push trae "notification", dejamos que el navegador lo muestre (para no duplicar).
+ * Fallback (evento 'push'): si por algún motivo el handler anterior no corre,
+ * mostramos la notificación para payloads data-only.
  */
 self.addEventListener('push', (event) => {
   if (!event.data) return;
   let raw = {};
   try { raw = event.data.json() || {}; } catch {}
 
-  if (raw && raw.notification) return; // evitar duplicados cuando FCM ya dibuja
+  if (raw && raw.notification) return; // si trae notification, que lo dibuje el navegador
 
   const d = raw?.data || raw || {};
   const title = d.__title || d.title || 'Notificación';
@@ -87,7 +84,7 @@ self.addEventListener('push', (event) => {
 });
 
 /**
- * Click: enfocar o abrir la app y navegar a data.url (si es del mismo origen).
+ * Click en la notificación: enfocar/abrir la app y navegar a data.url (mismo origen).
  */
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
@@ -104,8 +101,6 @@ self.addEventListener('notificationclick', (event) => {
       } catch {}
 
       const clientList = await clients.matchAll({ type: 'window', includeUncontrolled: true });
-
-      // Reutiliza una pestaña del mismo origen si existe
       for (const client of clientList) {
         try {
           const cu = new URL(client.url);
@@ -118,8 +113,6 @@ self.addEventListener('notificationclick', (event) => {
           }
         } catch {}
       }
-
-      // O abre una ventana nueva
       if (clients.openWindow) await clients.openWindow(targetUrl);
     } catch {
       if (clients.openWindow) await clients.openWindow('/');
