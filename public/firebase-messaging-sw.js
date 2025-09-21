@@ -1,10 +1,6 @@
-// v6 — data-only only, de-dupe window
+/* public/firebase-messaging-sw.js */
 importScripts('https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js');
 importScripts('https://www.gstatic.com/firebasejs/10.12.2/firebase-messaging-compat.js');
-
-const SW_VERSION = "2025-09-21_10";
-self.addEventListener('install', () => self.skipWaiting());
-self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
 
 firebase.initializeApp({
   apiKey: "AIzaSyCWIev2L18k_TugAAIDEYREwsfFn0chdpQ",
@@ -16,80 +12,58 @@ firebase.initializeApp({
   measurementId: "G-9QVKVW3YVD"
 });
 
+self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
+
 const messaging = firebase.messaging();
 
-// --- De-dupe simple en memoria (5s)
-let lastKey = null;
-let lastTs = 0;
-function shouldShowOnce(key) {
-  const now = Date.now();
-  const ok = !(lastKey === key && (now - lastTs) < 5000);
-  if (ok) { lastKey = key; lastTs = now; }
-  return ok;
-}
-
-function drawDataOnlyNotification(d) {
-  const title = d.__title || d.title || 'Notificación';
-  const body  = d.__body  || d.body  || '';
-  const icon  = d.icon    || '/icon-192.png';
-  const badge = d.badge   || '/badge-72.png';
-  const tag   = d.tag     || 'general';
-  const url   = d.url || d.click_action || '/';
-
-  const key = `${title}__${body}__${d.__id || d.id || d.ts || ''}`;
-  if (!shouldShowOnce(key)) return;
-
-  const options = {
-    body, icon, badge, tag,
-    renotify: true,
-    data: { url, raw: d, swv: SW_VERSION },
-  };
-  return self.registration.showNotification(title, options);
-}
-
-// Solo dibujar si ES data-only (sin "notification")
+// ÚNICA vía de render en background (evita duplicados)
 messaging.onBackgroundMessage((payload) => {
-  if (payload && payload.notification) return; // evitar duplicados con FCM UI
-  const d = payload?.data || {};
-  return drawDataOnlyNotification(d);
-});
+  try { console.log('[SW] FCM payload:', payload); } catch {}
 
-// Fallback: algunos navegadores entregan push crudo
-self.addEventListener('push', (event) => {
-  if (!event.data) return;
-  let raw = {};
-  try { raw = event.data.json() || {}; } catch {}
-  if (raw && raw.notification) return; // evitar duplicado si FCM UI ya dibuja
+  const n = payload && payload.notification ? payload.notification : {};
+  const d = payload && payload.data ? payload.data : {};
 
-  const d = raw?.data || raw || {};
-  event.waitUntil(drawDataOnlyNotification(d));
+  // Prioridad a los campos “exactos” del admin
+  const title = (d.__title != null ? d.__title : n.title) || 'Notificación';
+  const body  = (d.__body  != null ? d.__body  : n.body)  || '';
+
+  const opts = {
+    body,
+    icon: '/icon-192.png',
+    badge: '/badge-72.png',
+    tag: d.tag || 'general',
+    renotify: true,
+    data: {
+      url: d.url || d.click_action || '/',
+      raw: d
+    }
+  };
+
+  self.registration.showNotification(title, opts);
 });
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-  const rawUrl = event?.notification?.data?.url || '/';
-
+  const rawUrl = (event.notification && event.notification.data && event.notification.data.url) || '/';
   event.waitUntil((async () => {
-    let targetUrl = '/';
+    let target = '/';
     try {
       const u = new URL(rawUrl, self.location.origin);
-      if (u.origin === self.location.origin) {
-        targetUrl = u.pathname + u.search + u.hash;
-      }
+      if (u.origin === self.location.origin) target = u.pathname + u.search + u.hash;
     } catch {}
-    const clientList = await clients.matchAll({ type: 'window', includeUncontrolled: true });
-    for (const client of clientList) {
+
+    const clientsList = await clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const c of clientsList) {
       try {
-        const cu = new URL(client.url);
+        const cu = new URL(c.url);
         if (cu.origin === self.location.origin) {
-          if (targetUrl && (cu.pathname + cu.search + cu.hash) !== targetUrl && 'navigate' in client) {
-            await client.navigate(targetUrl);
-          }
-          if ('focus' in client) await client.focus();
+          if ((cu.pathname + cu.search + cu.hash) !== target && 'navigate' in c) await c.navigate(target);
+          if ('focus' in c) await c.focus();
           return;
         }
       } catch {}
     }
-    if (clients.openWindow) await clients.openWindow(targetUrl);
+    if (clients.openWindow) await clients.openWindow(target);
   })());
 });
