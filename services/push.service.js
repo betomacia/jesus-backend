@@ -1,3 +1,4 @@
+// services/push.service.js
 const { query } = require("../routes/db");
 const { JWT } = require("google-auth-library");
 
@@ -12,25 +13,36 @@ async function getAccessToken() {
   const now = Math.floor(Date.now() / 1000);
   if (cachedToken.token && cachedToken.exp - 60 > now) return cachedToken.token;
   const jwt = new JWT({ email: FB_CLIENT_EMAIL, key: FB_PRIVATE_KEY, scopes: SCOPES });
-  const { access_token, expiry_date } = await jwt.authorize();
+  const a = await jwt.authorize();
+  const access_token = a && a.access_token ? a.access_token : null;
+  const expiry_date  = a && a.expiry_date ? a.expiry_date : (Date.now() + 55 * 60 * 1000);
   cachedToken.token = access_token;
-  cachedToken.exp   = Math.floor((expiry_date || (Date.now() + 55 * 60 * 1000)) / 1000);
+  cachedToken.exp   = Math.floor(expiry_date / 1000);
   return access_token;
 }
 
 function normalizeData(data) {
   if (!data) return undefined;
   const out = {};
-  for (const k in data) {
-    if (!Object.prototype.hasOwnProperty.call(data, k)) continue;
+  Object.keys(data).forEach(function (k) {
     const v = data[k];
-    if (v === null || v === undefined) continue;
-    out[k] = typeof v === "object" ? JSON.stringify(v) : String(v);
-  }
+    if (v === null || typeof v === "undefined") return;
+    out[k] = (typeof v === "object") ? JSON.stringify(v) : String(v);
+  });
   return Object.keys(out).length ? out : undefined;
 }
 
-async function sendToFcmV1({ token, title, body, data, webDataOnly }) {
+/**
+ * No inventa textos por defecto. Si no mandas title/body quedan "".
+ * En webDataOnly=false se adjunta message.notification para Android (sistémico).
+ */
+async function sendToFcmV1(params) {
+  const token = params && params.token ? params.token : null;
+  const title = params && typeof params.title !== "undefined" ? String(params.title || "") : "";
+  const body  = params && typeof params.body  !== "undefined" ? String(params.body  || "") : "";
+  const data  = params && params.data ? params.data : null;
+  const webDataOnly = !!(params && params.webDataOnly);
+
   if (!FB_PROJECT_ID || !FB_CLIENT_EMAIL || !FB_PRIVATE_KEY) {
     return { ok: false, error: "missing_firebase_service_account_envs" };
   }
@@ -38,32 +50,36 @@ async function sendToFcmV1({ token, title, body, data, webDataOnly }) {
     const accessToken = await getAccessToken();
     const url = "https://fcm.googleapis.com/v1/projects/" + FB_PROJECT_ID + "/messages:send";
 
-    // Enviamos SIEMPRE __title/__body en data para que Web los respete en SW
     const msgData = normalizeData({
-      ...(data || {}),
-      __title: title ? title : "Notificación",
-      __body:  body  ? body  : ""
+      __title: title,     // ← sin defaults “Notificación”
+      __body:  body,      // ← sin defaults
+      ...(data || {})
     });
 
     const message = { token: token, data: msgData };
     if (!webDataOnly) {
-      message.notification = { title: title ? title : "Notificación", body: body ? body : "" };
+      message.notification = { title: title, body: body };
     }
 
     const r = await fetch(url, {
       method: "POST",
-      headers: { Authorization: "Bearer " + accessToken, "Content-Type": "application/json" },
-      body: JSON.stringify({ message })
+      headers: {
+        Authorization: "Bearer " + accessToken,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ message: message })
     });
 
-    const json = await r.json().catch(() => ({}));
+    let json = {};
+    try { json = await r.json(); } catch (_e) {}
+
     if (!r.ok) {
-      const err = (json && json.error && json.error.message) ? json.error.message : ("fcm_v1_http_" + r.status);
-      return { ok: false, error: err, status: r.status, json };
+      const err = json && json.error && json.error.message ? json.error.message : ("fcm_v1_http_" + r.status);
+      return { ok: false, error: err, status: r.status, json: json };
     }
-    return { ok: true, messageId: (json && json.name) ? json.name : null, status: r.status, json };
+    return { ok: true, messageId: (json && json.name) || null, status: r.status, json: json };
   } catch (e) {
-    const msg = e && e.message ? e.message : String(e);
+    const msg = (e && e.message) ? e.message : String(e);
     return { ok: false, error: msg };
   }
 }
@@ -71,25 +87,25 @@ async function sendToFcmV1({ token, title, body, data, webDataOnly }) {
 async function ensureDevicesTable() {
   await query(
     "CREATE TABLE IF NOT EXISTS devices (" +
-    "  id                 BIGSERIAL PRIMARY KEY," +
-    "  user_id            BIGINT REFERENCES users(id) ON DELETE CASCADE," +
-    "  platform           TEXT," +
-    "  fcm_token          TEXT NOT NULL," +
-    "  device_id          TEXT," +
-    "  lang               TEXT," +
-    "  tz_offset_minutes  INTEGER," +
-    "  app_version        TEXT," +
-    "  os_version         TEXT," +
-    "  model              TEXT," +
-    "  last_seen          TIMESTAMPTZ DEFAULT NOW()," +
-    "  created_at         TIMESTAMPTZ DEFAULT NOW()" +
+      "id BIGSERIAL PRIMARY KEY," +
+      "user_id BIGINT REFERENCES users(id) ON DELETE CASCADE," +
+      "platform TEXT," +
+      "fcm_token TEXT NOT NULL," +
+      "device_id TEXT," +
+      "lang TEXT," +
+      "tz_offset_minutes INTEGER," +
+      "app_version TEXT," +
+      "os_version TEXT," +
+      "model TEXT," +
+      "last_seen TIMESTAMPTZ DEFAULT NOW()," +
+      "created_at TIMESTAMPTZ DEFAULT NOW()" +
     ");"
   );
 
   await query("CREATE UNIQUE INDEX IF NOT EXISTS uq_devices_token ON devices(fcm_token);");
   await query("CREATE INDEX IF NOT EXISTS idx_devices_user ON devices(user_id);");
 
-  // Única REAL por (user_id, device_id)
+  // Única real por (user_id, device_id)
   await query(
     "DO $$ " +
     "BEGIN " +
@@ -99,38 +115,36 @@ async function ensureDevicesTable() {
     "      AND constraint_name='uq_devices_user_device' " +
     "      AND constraint_type='UNIQUE' " +
     "  ) THEN " +
-    "    ALTER TABLE devices " +
-    "      ADD CONSTRAINT uq_devices_user_device UNIQUE (user_id, device_id); " +
+    "    ALTER TABLE devices ADD CONSTRAINT uq_devices_user_device UNIQUE (user_id, device_id); " +
     "  END IF; " +
     "END$$;"
   );
 
-  // Limpiar índice parcial viejo si quedara
+  // Limpiar índice parcial viejo si existiera
   await query("DROP INDEX IF EXISTS uq_devices_user_device_nonnull;");
 }
 
 /**
- * UPSERT robusto con manejo de colisión cruzada:
- * 1) Intento por (user_id, device_id)
- * 2) Si falla por uq_devices_token => borro la fila que tiene ese token y reintento
- * 3) Sin device_id => upsert por fcm_token
+ * UPSERT robusto:
+ * - Si hay choque por token único, borra el viejo y reintenta.
+ * - Si no hay device_id, consolida por fcm_token.
  */
-async function registerDevice({
-  uid, platform = null, fcm_token, device_id = null, lang = null,
-  tz_offset_minutes = null, app_version = null, os_version = null, model = null
-}) {
-  const plat = platform ? String(platform).trim().toLowerCase() : null;
-  const tok  = String(fcm_token);
-  const did  = device_id ? String(device_id) : null;
+async function registerDevice(params) {
+  const uid  = params && params.uid ? params.uid : null;
+  const plat = params && params.platform ? String(params.platform).trim().toLowerCase() : null;
+  const tok  = String(params && params.fcm_token ? params.fcm_token : "");
+  const did  = params && params.device_id ? String(params.device_id) : null;
+  const lang = params && params.lang ? params.lang : null;
+  const tz   = (params && params.tz_offset_minutes != null) ? params.tz_offset_minutes : null;
+  const appv = params && params.app_version ? params.app_version : null;
+  const osv  = params && params.os_version  ? params.os_version  : null;
+  const model= params && params.model       ? params.model       : null;
 
   async function upsertByPair() {
-    const r = await query(
-      "INSERT INTO devices (" +
-      "  user_id, platform, fcm_token, device_id, lang, tz_offset_minutes," +
-      "  app_version, os_version, model, last_seen" +
-      ") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW()) " +
-      "ON CONFLICT (user_id, device_id) " +
-      "DO UPDATE SET " +
+    const rows = await query(
+      "INSERT INTO devices (user_id, platform, fcm_token, device_id, lang, tz_offset_minutes, app_version, os_version, model, last_seen) " +
+      "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW()) " +
+      "ON CONFLICT (user_id, device_id) DO UPDATE SET " +
       "  platform = COALESCE(EXCLUDED.platform, devices.platform)," +
       "  fcm_token = EXCLUDED.fcm_token," +
       "  lang = COALESCE(EXCLUDED.lang, devices.lang)," +
@@ -138,22 +152,18 @@ async function registerDevice({
       "  app_version = COALESCE(EXCLUDED.app_version, devices.app_version)," +
       "  os_version = COALESCE(EXCLUDED.os_version, devices.os_version)," +
       "  model = COALESCE(EXCLUDED.model, devices.model)," +
-      "  last_seen = NOW() " +
-      "RETURNING id, user_id, platform, fcm_token, device_id, lang, tz_offset_minutes," +
-      "          app_version, os_version, model, last_seen, created_at",
-      [uid, plat, tok, did, lang, tz_offset_minutes, app_version, os_version, model]
+      "  last_seen = NOW()" +
+      "RETURNING id, user_id, platform, fcm_token, device_id, lang, tz_offset_minutes, app_version, os_version, model, last_seen, created_at",
+      [uid, plat, tok, did, lang, tz, appv, osv, model]
     );
-    return r && r[0] ? r[0] : null;
+    return rows && rows[0] ? rows[0] : null;
   }
 
   async function upsertByToken() {
-    const r = await query(
-      "INSERT INTO devices (" +
-      "  user_id, platform, fcm_token, device_id, lang, tz_offset_minutes," +
-      "  app_version, os_version, model, last_seen" +
-      ") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW()) " +
-      "ON CONFLICT (fcm_token) " +
-      "DO UPDATE SET " +
+    const rows = await query(
+      "INSERT INTO devices (user_id, platform, fcm_token, device_id, lang, tz_offset_minutes, app_version, os_version, model, last_seen) " +
+      "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW()) " +
+      "ON CONFLICT (fcm_token) DO UPDATE SET " +
       "  user_id = EXCLUDED.user_id," +
       "  platform = COALESCE(EXCLUDED.platform, devices.platform)," +
       "  device_id = COALESCE(EXCLUDED.device_id, devices.device_id)," +
@@ -162,24 +172,21 @@ async function registerDevice({
       "  app_version = COALESCE(EXCLUDED.app_version, devices.app_version)," +
       "  os_version = COALESCE(EXCLUDED.os_version, devices.os_version)," +
       "  model = COALESCE(EXCLUDED.model, devices.model)," +
-      "  last_seen = NOW() " +
-      "RETURNING id, user_id, platform, fcm_token, device_id, lang, tz_offset_minutes," +
-      "          app_version, os_version, model, last_seen, created_at",
-      [uid, plat, tok, did, lang, tz_offset_minutes, app_version, os_version, model]
+      "  last_seen = NOW()" +
+      "RETURNING id, user_id, platform, fcm_token, device_id, lang, tz_offset_minutes, app_version, os_version, model, last_seen, created_at",
+      [uid, plat, tok, did, lang, tz, appv, osv, model]
     );
-    return r && r[0] ? r[0] : null;
+    return rows && rows[0] ? rows[0] : null;
   }
 
   if (did) {
     try {
       return await upsertByPair();
     } catch (e) {
-      const msg = e && e.message ? e.message : "";
+      const msg = (e && e.message) ? e.message : "";
       if (/uq_devices_token|unique.*fcm_token|duplicate key.*fcm_token/i.test(msg)) {
         await query(
-          "DELETE FROM devices " +
-          " WHERE fcm_token = $1 " +
-          "   AND (user_id <> $2 OR device_id IS DISTINCT FROM $3)",
+          "DELETE FROM devices WHERE fcm_token = $1 AND (user_id <> $2 OR device_id IS DISTINCT FROM $3)",
           [tok, uid, did]
         );
         return await upsertByPair();
@@ -190,31 +197,33 @@ async function registerDevice({
     try {
       return await upsertByToken();
     } catch (e) {
-      const msg = e && e.message ? e.message : "";
+      const msg = (e && e.message) ? e.message : "";
       if (/uq_devices_user_device|unique.*user_id.*device_id/i.test(msg)) {
-        const r = await query(
-          "UPDATE devices " +
-          "   SET platform = COALESCE($2, platform)," +
-          "       fcm_token = $3," +
-          "       lang = COALESCE($4, lang)," +
-          "       tz_offset_minutes = COALESCE($5, tz_offset_minutes)," +
-          "       app_version = COALESCE($6, app_version)," +
-          "       os_version = COALESCE($7, os_version)," +
-          "       model = COALESCE($8, model)," +
-          "       last_seen = NOW() " +
-          " WHERE user_id = $1 " +
-          "RETURNING id, user_id, platform, fcm_token, device_id, lang, tz_offset_minutes," +
-          "          app_version, os_version, model, last_seen, created_at",
-          [uid, plat, tok, lang, tz_offset_minutes, app_version, os_version, model]
+        const rows = await query(
+          "UPDATE devices SET " +
+          "  platform = COALESCE($2, platform)," +
+          "  fcm_token = $3," +
+          "  lang = COALESCE($4, lang)," +
+          "  tz_offset_minutes = COALESCE($5, tz_offset_minutes)," +
+          "  app_version = COALESCE($6, app_version)," +
+          "  os_version = COALESCE($7, os_version)," +
+          "  model = COALESCE($8, model)," +
+          "  last_seen = NOW() " +
+          "WHERE user_id = $1 " +
+          "RETURNING id, user_id, platform, fcm_token, device_id, lang, tz_offset_minutes, app_version, os_version, model, last_seen, created_at",
+          [uid, plat, tok, lang, tz, appv, osv, model]
         );
-        return r && r[0] ? r[0] : null;
+        return rows && rows[0] ? rows[0] : null;
       }
       throw e;
     }
   }
 }
 
-async function listDevicesByUser({ uid, platform = null }) {
+async function listDevicesByUser(params) {
+  const uid = params && params.uid ? params.uid : null;
+  const platform = params && params.platform ? params.platform : null;
+
   if (platform) {
     return await query(
       "SELECT * FROM devices WHERE user_id=$1 AND platform=$2 ORDER BY last_seen DESC, id DESC",
@@ -227,81 +236,54 @@ async function listDevicesByUser({ uid, platform = null }) {
   );
 }
 
-/**
- * Listado para broadcast SEGMENTABLE:
- *  - platform?: 'web'|'android'|'ios'
- *  - lastSeenDays?: number
- *  - groupByUser?: boolean  (si true, devolvemos máx. 1 device POR PLATAFORMA por usuario)
- *  - preferPrefix?: string  (prioridad por device_id que empiece así)
- *  - limit?: number
- *  - excludeEmbedded?: boolean (default: true) => filtra WEB_BOLT
- */
-async function listDevicesForBroadcast({
-  platform = null,
-  lastSeenDays = 30,
-  groupByUser = true,
-  preferPrefix = "ANDROID_CHROME",
-  limit = 1000,
-  excludeEmbedded = true
-}) {
+async function listDevicesForBroadcast(params) {
+  const platform = params && params.platform ? String(params.platform).toLowerCase() : null;
+  const lastSeenDays = (params && params.lastSeenDays != null) ? +params.lastSeenDays : 30;
+  const groupByUser = !!(params && params.groupByUser);
+  const preferPrefix = params && params.preferPrefix ? String(params.preferPrefix) : "ANDROID_CHROME";
+  const limit = Math.min(Math.max(parseInt((params && params.limit) || 1000, 10) || 1000, 1), 10000);
+
   const whereClauses = [];
-  const params = [];
+  const p = [];
 
   if (platform) {
-    params.push(String(platform).toLowerCase());
-    whereClauses.push("platform = $" + params.length);
+    p.push(platform);
+    whereClauses.push("platform = $" + p.length);
   }
-  if (Number.isFinite(+lastSeenDays) && +lastSeenDays >= 0) {
-    params.push(+lastSeenDays);
-    whereClauses.push("last_seen >= NOW() - ($" + params.length + " * INTERVAL '1 day')");
-  }
-  if (excludeEmbedded) {
-    // Excluir DEL LADO DEL SERVIDOR cualquier device embebido
-    whereClauses.push("(device_id IS NULL OR device_id NOT ILIKE 'WEB_BOLT%')");
+  if (isFinite(lastSeenDays) && lastSeenDays >= 0) {
+    p.push(lastSeenDays);
+    whereClauses.push("last_seen >= NOW() - ($" + p.length + " * INTERVAL '1 day')");
   }
 
   const whereSql = whereClauses.length ? ("WHERE " + whereClauses.join(" AND ")) : "";
 
   if (groupByUser) {
-    // Distinct por usuario + plataforma (web/android/ios), priorizando preferPrefix dentro de cada plataforma
-    params.push(String(preferPrefix));
-    const prefIdx = params.length;
+    p.push(preferPrefix);
+    const prefIdx = p.length;
+    p.push(limit);
+    const limIdx = p.length;
 
-    params.push(Math.min(Math.max(parseInt(limit, 10) || 1000, 1), 10000));
-    const limIdx = params.length;
-
-    const rows = await query(
-      "WITH base AS ( " +
-      "  SELECT d.*, " +
-      "         CASE WHEN d.device_id ILIKE ($" + prefIdx + " || '%') THEN 0 ELSE 1 END AS pref, " +
-      "         LOWER(COALESCE(d.platform, '')) AS plat " +
-      "    FROM devices d " +
-      "    " + whereSql +
-      "), ranked AS ( " +
-      "  SELECT base.*, " +
-      "         ROW_NUMBER() OVER (PARTITION BY user_id, plat ORDER BY pref ASC, last_seen DESC, id DESC) AS rn " +
-      "    FROM base " +
+    const sql =
+      "WITH base AS (" +
+      "  SELECT d.*, CASE WHEN d.device_id ILIKE ($" + prefIdx + " || '%') THEN 0 ELSE 1 END AS pref " +
+      "  FROM devices d " + whereSql +
       ") " +
-      "SELECT id, user_id, platform, device_id, fcm_token, lang, tz_offset_minutes, " +
-      "       app_version, os_version, model, last_seen, created_at " +
-      "  FROM ranked " +
-      " WHERE rn = 1 " +
-      " ORDER BY last_seen DESC, id DESC " +
-      " LIMIT $" + limIdx,
-      params
-    );
+      "SELECT DISTINCT ON (user_id) " +
+      "  id, user_id, platform, device_id, fcm_token, lang, tz_offset_minutes, app_version, os_version, model, last_seen, created_at " +
+      "FROM base " +
+      "ORDER BY user_id, pref ASC, last_seen DESC, id DESC " +
+      "LIMIT $" + limIdx;
+
+    const rows = await query(sql, p);
     return rows || [];
   } else {
-    params.push(Math.min(Math.max(parseInt(limit, 10) || 1000, 1), 10000));
-    const rows = await query(
-      "SELECT id, user_id, platform, device_id, fcm_token, lang, tz_offset_minutes, " +
-      "       app_version, os_version, model, last_seen, created_at " +
-      "  FROM devices " +
-      "  " + whereSql +
-      " ORDER BY last_seen DESC, id DESC " +
-      " LIMIT $" + params.length,
-      params
-    );
+    p.push(limit);
+    const sql =
+      "SELECT id, user_id, platform, device_id, fcm_token, lang, tz_offset_minutes, app_version, os_version, model, last_seen, created_at " +
+      "FROM devices " + whereSql + " " +
+      "ORDER BY last_seen DESC, id DESC " +
+      "LIMIT $" + p.length;
+    const rows = await query(sql, p);
     return rows || [];
   }
 }
@@ -310,39 +292,97 @@ function isInvalidTokenError(resp) {
   const st = resp && resp.json && resp.json.error ? resp.json.error.status : null;
   if (st === "NOT_FOUND" || st === "UNREGISTERED" || st === "INVALID_ARGUMENT") return true;
   const msg = resp && resp.json && resp.json.error && resp.json.error.message ? String(resp.json.error.message) : "";
-  if (
-    /not a valid fcm registration token/i.test(msg) ||
-    /Requested entity was not found/i.test(msg) ||
-    /Requested entity has been deleted/i.test(msg) ||
-    /registration token.*is invalid/i.test(msg)
-  ) return true;
+  if (/not a valid fcm registration token/i.test(msg)) return true;
+  if (/Requested entity was not found/i.test(msg)) return true;
+  if (/Requested entity has been deleted/i.test(msg)) return true;
+  if (/registration token.*is invalid/i.test(msg)) return true;
   return false;
 }
 
 async function deleteDeviceById(id) {
-  try { await query("DELETE FROM devices WHERE id=$1", [Number(id)]); } catch (e) {}
+  try { await query("DELETE FROM devices WHERE id=$1", [Number(id)]); } catch (_e) {}
   return 1;
 }
 
-async function sendSimpleToUser({
-  user, devices, title = null, body = null, title_i18n = null, body_i18n = null,
-  data = null, overrideLang = null, webDataOnly = false
-}) {
-  let sent = 0, failed = 0;
-  const results = [];
+/** Dedupe defensivo: deja 1 android y 1 desktop por usuario (más recientes) */
+function dedupeDevices(devices) {
+  const byToken = new Map();
+  const byPair  = new Map();
+
   for (let i = 0; i < devices.length; i++) {
     const d = devices[i];
-    const baseLang = overrideLang ? overrideLang : (d.lang ? d.lang : (user && user.lang ? user.lang : "es"));
-    const lang = String(baseLang).slice(0, 5).toLowerCase();
-    const langShort = lang.split("-")[0];
+    const keyTok  = String(d.fcm_token || "");
+    const keyPair = String(d.user_id || "0") + "|" + String(d.device_id || "-");
 
-    const t = title !== null && title !== undefined
-      ? title
-      : (title_i18n && (title_i18n[lang] || title_i18n[langShort])) ? (title_i18n[lang] || title_i18n[langShort]) : "Notificación";
+    if (!byToken.has(keyTok)) byToken.set(keyTok, d);
+    else {
+      const prev = byToken.get(keyTok);
+      const newer = (String(d.last_seen || "") > String(prev.last_seen || ""));
+      if (newer) byToken.set(keyTok, d);
+    }
 
-    const b = body !== null && body !== undefined
-      ? body
-      : (body_i18n && (body_i18n[lang] || body_i18n[langShort])) ? (body_i18n[lang] || body_i18n[langShort]) : "Tienes un mensaje.";
+    if (!byPair.has(keyPair)) byPair.set(keyPair, d);
+    else {
+      const prev = byPair.get(keyPair);
+      const newer = (String(d.last_seen || "") > String(prev.last_seen || ""));
+      if (newer) byPair.set(keyPair, d);
+    }
+  }
+
+  const merged = new Map();
+  function groupOf(dev) {
+    const id = String(dev.device_id || "");
+    if (id.indexOf("ANDROID_CHROME") === 0) return "android";
+    if (id.indexOf("WEB_DESKTOP") === 0) return "desktop";
+    return "other";
+    }
+
+  const all = [].concat(Array.from(byToken.values()), Array.from(byPair.values()));
+  for (let i = 0; i < all.length; i++) {
+    const d = all[i];
+    const key = groupOf(d) + "|" + String(d.user_id || "0");
+    if (!merged.has(key)) merged.set(key, d);
+    else {
+      const prev = merged.get(key);
+      const newer = (String(d.last_seen || "") > String(prev.last_seen || ""));
+      if (newer) merged.set(key, d);
+    }
+  }
+  return Array.from(merged.values());
+}
+
+async function sendSimpleToUser(params) {
+  const user = params && params.user ? params.user : {};
+  const devices = Array.isArray(params && params.devices) ? params.devices : [];
+  const title = (typeof (params && params.title) !== "undefined") ? params.title : null;
+  const body  = (typeof (params && params.body)  !== "undefined") ? params.body  : null;
+  const title_i18n = params && params.title_i18n ? params.title_i18n : null;
+  const body_i18n  = params && params.body_i18n  ? params.body_i18n  : null;
+  const data = params && params.data ? params.data : null;
+  const overrideLang = params && params.overrideLang ? params.overrideLang : null;
+  const webDataOnly  = !!(params && params.webDataOnly);
+
+  let sent = 0, failed = 0;
+  const results = [];
+
+  const safeDevices = dedupeDevices(devices);
+
+  for (let i = 0; i < safeDevices.length; i++) {
+    const d = safeDevices[i];
+    const rawLang = overrideLang || d.lang || user.lang || "es";
+    const lang = String(rawLang || "es").slice(0, 5).toLowerCase();
+
+    var t;
+    if (title !== null) t = String(title);
+    else if (title_i18n && (title_i18n[lang] || title_i18n[lang.split("-")[0]])) {
+      t = String(title_i18n[lang] || title_i18n[lang.split("-")[0]]);
+    } else t = "";
+
+    var b;
+    if (body !== null) b = String(body);
+    else if (body_i18n && (body_i18n[lang] || body_i18n[lang.split("-")[0]])) {
+      b = String(body_i18n[lang] || body_i18n[lang.split("-")[0]]);
+    } else b = "";
 
     const isWeb = String(d.platform || "").toLowerCase() === "web";
     const useWebDataOnly = isWeb ? true : !!webDataOnly;
@@ -351,19 +391,19 @@ async function sendSimpleToUser({
       token: d.fcm_token,
       title: t,
       body: b,
-      data: data || null,
+      data: data,
       webDataOnly: useWebDataOnly
     });
 
-    if (r.ok) {
+    if (r && r.ok) {
       sent++;
-      results.push({ device_id: d.device_id, ok: true, messageId: r.messageId || null });
+      results.push({ device_id: d.device_id, ok: true, messageId: (r.messageId || null) });
     } else {
       if (isInvalidTokenError(r) && d && d.id) {
         await deleteDeviceById(d.id);
-        results.push({ device_id: d.device_id, ok: false, pruned: true, error: r.error });
+        results.push({ device_id: d.device_id, ok: false, pruned: true, error: (r && r.error) || "send_error" });
       } else {
-        results.push({ device_id: d.device_id, ok: false, error: r.error });
+        results.push({ device_id: d.device_id, ok: false, error: (r && r.error) || "send_error" });
       }
       failed++;
     }
@@ -375,7 +415,7 @@ module.exports = {
   ensureDevicesTable,
   registerDevice,
   listDevicesByUser,
-  listDevicesForBroadcast, // export
+  listDevicesForBroadcast,
   sendSimpleToUser,
-  deleteDeviceById
+  deleteDeviceById,
 };
