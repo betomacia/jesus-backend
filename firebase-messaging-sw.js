@@ -1,7 +1,14 @@
 // public/firebase-messaging-sw.js
-// v3: data-only + fallback al evento 'push'
+// v4 — data-only first, fallback a 'push', auto-update SW
+
 importScripts('https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js');
 importScripts('https://www.gstatic.com/firebasejs/10.12.2/firebase-messaging-compat.js');
+
+const SW_VERSION = "2025-09-21_02";
+
+// Auto-actualización del SW
+self.addEventListener("install", () => self.skipWaiting());
+self.addEventListener("activate", (evt) => evt.waitUntil(self.clients.claim()));
 
 firebase.initializeApp({
   apiKey: "AIzaSyCWIev2L18k_TugAAIDEYREwsfFn0chdpQ",
@@ -16,43 +23,73 @@ firebase.initializeApp({
 const messaging = firebase.messaging();
 
 /**
- * Firebase handler — SOLO para payloads data-only
- * (si viene payload.notification, deja que el navegador lo dibuje solo).
+ * BACKGROUND (Firebase) — se dispara para payloads "data-only".
+ * Si viene payload.notification, dejaremos que el navegador lo dibuje (evita duplicados).
  */
 messaging.onBackgroundMessage((payload) => {
   if (payload && payload.notification) return;
 
-  const data  = payload?.data || {};
-  const title = data.__title || 'Notificación';
-  const body  = data.__body  || '';
-  const icon  = data.icon    || '/icon-192.png';
+  const d = payload?.data || {};
+  const title = d.__title || d.title || 'Notificación';
+  const body  = d.__body  || d.body  || '';
+  const icon  = d.icon    || '/icon-192.png';
+  const badge = d.badge   || '/badge-72.png';
+  const tag   = d.tag     || 'general';
 
-  self.registration.showNotification(title, { body, icon, data });
+  const options = {
+    body,
+    icon,
+    badge,
+    tag,
+    renotify: true,
+    data: {
+      url: d.url || d.click_action || '/',
+      raw: d,
+      swv: SW_VERSION,
+    },
+  };
+
+  self.registration.showNotification(title, options);
 });
 
 /**
- * Fallback robusto: si por algún motivo el handler de Firebase no corre,
- * capturamos el 'push' crudo y mostramos la notificación para payloads data-only.
+ * Fallback robusto (evento 'push'): si por algún motivo el handler anterior no corre,
+ * mostramos la notificación para payloads data-only que lleguen como push crudo.
+ * Nota: si el push trae "notification", dejamos que el navegador lo muestre (para no duplicar).
  */
 self.addEventListener('push', (event) => {
   if (!event.data) return;
   let raw = {};
   try { raw = event.data.json() || {}; } catch {}
 
-  // FCM v1 suele venir como { data: {...}, notification?: {...} }
-  if (raw.notification) return;      // si trae notification, deja al navegador
-  const d = raw.data || raw || {};
+  if (raw && raw.notification) return; // evitar duplicados cuando FCM ya dibuja
 
-  const title = d.__title || 'Notificación';
-  const body  = d.__body  || '';
+  const d = raw?.data || raw || {};
+  const title = d.__title || d.title || 'Notificación';
+  const body  = d.__body  || d.body  || '';
   const icon  = d.icon    || '/icon-192.png';
+  const badge = d.badge   || '/badge-72.png';
+  const tag   = d.tag     || 'general';
 
-  event.waitUntil(
-    self.registration.showNotification(title, { body, icon, data: d })
-  );
+  const options = {
+    body,
+    icon,
+    badge,
+    tag,
+    renotify: true,
+    data: {
+      url: d.url || d.click_action || '/',
+      raw: d,
+      swv: SW_VERSION,
+    },
+  };
+
+  event.waitUntil(self.registration.showNotification(title, options));
 });
 
-// Click: enfocar/abrir la app (misma lógica que ya tenías)
+/**
+ * Click: enfocar o abrir la app y navegar a data.url (si es del mismo origen).
+ */
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
   const rawUrl = event?.notification?.data?.url || '/';
@@ -68,6 +105,8 @@ self.addEventListener('notificationclick', (event) => {
       } catch {}
 
       const clientList = await clients.matchAll({ type: 'window', includeUncontrolled: true });
+
+      // Reutiliza una pestaña del mismo origen si existe
       for (const client of clientList) {
         try {
           const cu = new URL(client.url);
@@ -80,6 +119,8 @@ self.addEventListener('notificationclick', (event) => {
           }
         } catch {}
       }
+
+      // O abre una ventana nueva
       if (clients.openWindow) await clients.openWindow(targetUrl);
     } catch {
       if (clients.openWindow) await clients.openWindow('/');
