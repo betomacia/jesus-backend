@@ -17,26 +17,30 @@ router.use((_, res, next) => {
   next();
 });
 
-/* agrupa devices del usuario en: android / desktop / other, y elige 1 (el más reciente) por grupo */
-function pickPerGroup(devs) {
-  const bucket = { android: [], desktop: [], other: [] };
+// normaliza y bucketiza por grupos
+function groupAndPick(devs) {
+  const bucket = { android: [], desktop: [] };
+
   for (const d of devs) {
     const id = (d.device_id || "");
+
+    // ❌ descartamos explícitamente WEB_BOLT
+    if (id.startsWith("WEB_BOLT")) continue;
+
     if (id.startsWith("ANDROID_CHROME")) bucket.android.push(d);
-    else if (id.startsWith("WEB_DESKTOP") || id.startsWith("WEB_BOLT")) bucket.desktop.push(d);
-    else bucket.other.push(d);
+    else if (id.startsWith("WEB_DESKTOP")) bucket.desktop.push(d);
   }
+
   const byRecent = (a, b) => {
     const la = new Date(a.last_seen || a.created_at || 0).getTime();
     const lb = new Date(b.last_seen || b.created_at || 0).getTime();
     return lb - la || (b.id - a.id);
   };
-  const out = [];
-  if (bucket.desktop.length) out.push([...bucket.desktop].sort(byRecent)[0]);
-  if (bucket.android.length) out.push([...bucket.android].sort(byRecent)[0]);
-  // Si querés incluir "other", descomenta:
-  // if (bucket.other.length) out.push([...bucket.other].sort(byRecent)[0]);
-  return out;
+
+  const chosen = [];
+  if (bucket.desktop.length) chosen.push([...bucket.desktop].sort(byRecent)[0]);
+  if (bucket.android.length) chosen.push([...bucket.android].sort(byRecent)[0]);
+  return chosen;
 }
 
 /**
@@ -105,7 +109,7 @@ router.post("/admin-broadcast", async (req, res) => {
       devices = rows || [];
     }
 
-    // Agrupar por usuario y elegir sólo 1 desktop + 1 android
+    // por usuario, quedarse sólo con 1 desktop + 1 android (descartando WEB_BOLT)
     const byUser = new Map();
     for (const d of devices) {
       if (!byUser.has(d.user_id)) byUser.set(d.user_id, []);
@@ -114,8 +118,9 @@ router.post("/admin-broadcast", async (req, res) => {
 
     let sent = 0, targeted = 0;
     for (const [uid, devs] of byUser) {
-      const chosen = pickPerGroup(devs);
+      const chosen = groupAndPick(devs);
       targeted += chosen.length;
+
       const user = { id: uid, lang: (devs[0]?.user_lang || devs[0]?.lang || "es") };
       const report = await sendSimpleToUser({
         user,
@@ -126,7 +131,7 @@ router.post("/admin-broadcast", async (req, res) => {
         body_i18n: null,
         data: data || null,
         overrideLang: null,
-        webDataOnly: true, // web/Android-PWA como data-only => un solo toast (SW)
+        webDataOnly: true, // web/PWA data-only => muestra lo que mandas y evita duplicados
       });
       sent += (report?.sent || 0);
     }
@@ -140,5 +145,4 @@ router.post("/admin-broadcast", async (req, res) => {
   }
 });
 
-/* Limpieza por HTTP ya la tienes; no la toco. */
 module.exports = router;
