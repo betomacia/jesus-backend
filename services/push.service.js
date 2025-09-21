@@ -199,18 +199,18 @@ async function registerDevice({
       return await upsertByToken();
     } catch (e) {
       const msg = (e && e.message) || "";
-      // en el extremo improbable de colisión por (user_id,device_id), actualizamos el par
+      // En el improbable caso de colisión por (user_id,device_id): actualizamos ese par
       if (/uq_devices_user_device|unique.*user_id.*device_id/i.test(msg)) {
         const r = await query(
           `
           UPDATE devices
-             SET fcm_token = $3,
-                 platform = COALESCE($2, platform),
-                 lang = COALESCE($5, lang),
-                 tz_offset_minutes = COALESCE($6, tz_offset_minutes),
-                 app_version = COALESCE($7, app_version),
-                 os_version = COALESCE($8, os_version),
-                 model = COALESCE($9, model),
+             SET platform = COALESCE($2, platform),
+                 fcm_token = $3,
+                 lang = COALESCE($4, lang),
+                 tz_offset_minutes = COALESCE($5, tz_offset_minutes),
+                 app_version = COALESCE($6, app_version),
+                 os_version = COALESCE($7, os_version),
+                 model = COALESCE($8, model),
                  last_seen = NOW()
            WHERE user_id = $1
           RETURNING id, user_id, platform, fcm_token, device_id, lang, tz_offset_minutes,
@@ -236,6 +236,79 @@ async function listDevicesByUser({ uid, platform = null }) {
     `SELECT * FROM devices WHERE user_id=$1 ORDER BY last_seen DESC, id DESC`,
     [uid]
   );
+}
+
+/**
+ * Listado para broadcast:
+ *  - platform?: 'web'|'android'|'ios'
+ *  - lastSeenDays?: number
+ *  - groupByUser?: boolean (DISTINCT ON (user_id))
+ *  - preferPrefix?: string (prioriza device_id que empiece así)
+ *  - limit?: number
+ */
+async function listDevicesForBroadcast({
+  platform = null,
+  lastSeenDays = 30,
+  groupByUser = true,
+  preferPrefix = "ANDROID_CHROME",
+  limit = 1000,
+}) {
+  const whereClauses = [];
+  const params = [];
+
+  if (platform) {
+    params.push(String(platform).toLowerCase());
+    whereClauses.push(`platform = $${params.length}`);
+  }
+  if (Number.isFinite(+lastSeenDays) && +lastSeenDays >= 0) {
+    params.push(+lastSeenDays);
+    // last_seen >= NOW() - N * interval '1 day'
+    whereClauses.push(`last_seen >= NOW() - ($${params.length} * INTERVAL '1 day')`);
+  }
+
+  const whereSql = whereClauses.length ? `WHERE ${whereClauses.join(" AND ")}` : "";
+
+  if (groupByUser) {
+    // DISTINCT ON (user_id) priorizando device_id que empieza con preferPrefix
+    params.push(String(preferPrefix));
+    const prefIdx = params.length;
+
+    params.push(Math.min(Math.max(parseInt(limit, 10) || 1000, 1), 10000));
+    const limIdx = params.length;
+
+    const rows = await query(
+      `
+      WITH base AS (
+        SELECT d.*,
+               CASE WHEN d.device_id ILIKE ($${prefIdx} || '%') THEN 0 ELSE 1 END AS pref
+          FROM devices d
+          ${whereSql}
+      )
+      SELECT DISTINCT ON (user_id)
+             id, user_id, platform, device_id, fcm_token, lang, tz_offset_minutes,
+             app_version, os_version, model, last_seen, created_at
+        FROM base
+       ORDER BY user_id, pref ASC, last_seen DESC, id DESC
+       LIMIT $${limIdx}
+      `,
+      params
+    );
+    return rows || [];
+  } else {
+    params.push(Math.min(Math.max(parseInt(limit, 10) || 1000, 1), 10000));
+    const rows = await query(
+      `
+      SELECT id, user_id, platform, device_id, fcm_token, lang, tz_offset_minutes,
+             app_version, os_version, model, last_seen, created_at
+        FROM devices
+        ${whereSql}
+       ORDER BY last_seen DESC, id DESC
+       LIMIT $${params.length}
+      `,
+      params
+    );
+    return rows || [];
+  }
 }
 
 function isInvalidTokenError(resp) {
@@ -299,6 +372,7 @@ module.exports = {
   ensureDevicesTable,
   registerDevice,
   listDevicesByUser,
+  listDevicesForBroadcast, // 👈 export
   sendSimpleToUser,
   deleteDeviceById,
 };
