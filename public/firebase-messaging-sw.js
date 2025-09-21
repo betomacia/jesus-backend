@@ -1,73 +1,69 @@
-/* public/firebase-messaging-sw.js */
-/* FCM v9 compat en SW */
-importScripts("https://www.gstatic.com/firebasejs/9.6.11/firebase-app-compat.js");
-importScripts("https://www.gstatic.com/firebasejs/9.6.11/firebase-messaging-compat.js");
+/* public/firebase-messaging-sw.js — v3 (debug) */
+const SW_DEBUG_VERSION = 'v3-' + Date.now();
 
-/* ⚠️ PONÉ TU CONFIG REAL */
-firebase.initializeApp({
-  apiKey: "YOUR_API_KEY",
-  authDomain: "YOUR_PROJECT.firebaseapp.com",
-  projectId: "YOUR_PROJECT_ID",
-  messagingSenderId: "YOUR_SENDER_ID",
-  appId: "YOUR_APP_ID",
+self.addEventListener('install', (e) => {
+  // fuerzo actualización del archivo en clientes nuevos
+  self.skipWaiting?.();
 });
 
-const messaging = firebase.messaging();
-
-/**
- * Helper: arma opciones de notificación SOLO con lo que llega en data.
- * Nada de “Notificación” ni “Tienes un mensaje.” por defecto.
- */
-function buildOptionsFromData(data) {
-  const title = (data && data.__title) ? String(data.__title) : "";
-  const body  = (data && data.__body)  ? String(data.__body)  : "";
-  const icon  = data && data.icon ? data.icon : "/icon-192.png";
-
-  // Si no vino título NI cuerpo => no mostramos nada (evita “Notificación” genérica)
-  if (!title && !body) return null;
-
-  const opts = {
-    body,
-    icon,
-    badge: "/icon-192.png",
-    data: data || {},
-    tag: (data && data.tag) || (data && data.__tag) || "fcm-msg",   // colapsa duplicados
-    renotify: false,
-  };
-  return { title, opts };
-}
-
-/* FCM: background messages (cuando no hay foco) */
-messaging.onBackgroundMessage((payload) => {
-  const data = (payload && payload.data) || {};
-  const built = buildOptionsFromData(data);
-  if (!built) return; // no title/body => no mostrar nada
-  self.registration.showNotification(built.title, built.opts);
+self.addEventListener('activate', (e) => {
+  self.clients?.claim?.();
+  // pequeño ping para ver que activó
+  console.log('[FM SW] activate', SW_DEBUG_VERSION);
 });
 
-/* Por si el navegador entrega como push “crudo” */
-self.addEventListener("push", (event) => {
+self.addEventListener('push', (event) => {
+  let payload = {};
   try {
-    const json = event.data ? event.data.json() : null;
-    const data = (json && (json.data || json)) || {};
-    const built = buildOptionsFromData(data);
-    if (!built) return;
-    event.waitUntil(self.registration.showNotification(built.title, built.opts));
+    payload = event.data ? event.data.json() : {};
   } catch (e) {
-    // silencioso
+    // algunos navegadores entregan texto plano
+    try { payload = JSON.parse(event.data.text()); } catch {}
   }
-});
 
-/* Click: abrir o enfocar pestaña */
-self.addEventListener("notificationclick", (event) => {
-  event.notification.close();
-  const url = (event.notification.data && (event.notification.data.url || event.notification.data.__url)) || "/";
+  const data = payload?.data || {};
+  const title =
+    (typeof data.__title === 'string' ? data.__title : (payload.notification?.title || '')) || '';
+  const body =
+    (typeof data.__body  === 'string' ? data.__body  : (payload.notification?.body  || '')) || '';
+  const icon = (typeof data.icon === 'string' && data.icon) || '/icon-192.png';
+  const tag  = (typeof data.tag  === 'string' && data.tag)  ||
+               (typeof data.__tag === 'string' && data.__tag) || 'fcm-msg';
+
+  // LOG COMPLETO EN CONSOLA DEL SW
+  console.log('[FM SW] push payload=', payload);
+  console.log('[FM SW] using title/body=', { title, body });
+
+  if (!title && !body) {
+    // si no vino nada útil, no mostramos notificación
+    return;
+  }
+
   event.waitUntil(
-    clients.matchAll({ type: "window", includeUncontrolled: true }).then((clis) => {
-      for (const c of clis) {
-        if (c.url.includes(url) && "focus" in c) return c.focus();
-      }
-      if (clients.openWindow) return clients.openWindow(url);
+    self.registration.showNotification(title, {
+      body,
+      icon,
+      badge: '/icon-192.png',
+      data: data,
+      tag,
+      renotify: false,
     })
   );
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const data = event.notification?.data || {};
+  const targetUrl = data.url || data.link || '/';
+
+  event.waitUntil((async () => {
+    const clientsList = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    const sameOrigin = clientsList.find((c) => c.url.startsWith(self.location.origin));
+    if (sameOrigin) {
+      sameOrigin.focus();
+      try { sameOrigin.postMessage({ type: 'push-click', data }); } catch {}
+    } else {
+      await self.clients.openWindow(targetUrl);
+    }
+  })());
 });
