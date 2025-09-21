@@ -83,11 +83,10 @@ async function ensureDevicesTable() {
     );
   `);
 
-  // Índices
   await query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_devices_token ON devices(fcm_token);`);
   await query(`CREATE INDEX IF NOT EXISTS idx_devices_user ON devices(user_id);`);
 
-  // Constraint única real (user_id, device_id)
+  // Única REAL por (user_id, device_id)
   await query(`
     DO $$
     BEGIN
@@ -104,18 +103,26 @@ async function ensureDevicesTable() {
     END$$;
   `);
 
-  // Limpieza del índice parcial antiguo si existiera
+  // Limpiar índice parcial viejo si quedara
   await query(`DROP INDEX IF EXISTS uq_devices_user_device_nonnull;`);
 }
 
-/** Upsert robusto por (user_id, device_id). Fallback: por fcm_token. */
+/**
+ * UPSERT robusto con manejo de colisión cruzada:
+ * 1) Intento por (user_id, device_id)
+ * 2) Si falla por uq_devices_token => borro la fila que tiene ese token y reintento
+ * 3) Sin device_id => upsert por fcm_token
+ */
 async function registerDevice({
   uid, platform = null, fcm_token, device_id = null, lang = null,
   tz_offset_minutes = null, app_version = null, os_version = null, model = null,
 }) {
   const plat = platform ? String(platform).trim().toLowerCase() : null;
+  const tok  = String(fcm_token);
+  const did  = device_id ? String(device_id) : null;
 
-  if (device_id) {
+  // Helper: upsert por (user_id, device_id)
+  async function upsertByPair() {
     const r = await query(
       `
       INSERT INTO devices (
@@ -136,36 +143,86 @@ async function registerDevice({
       RETURNING id, user_id, platform, fcm_token, device_id, lang, tz_offset_minutes,
                 app_version, os_version, model, last_seen, created_at
       `,
-      [uid, plat, String(fcm_token), String(device_id), lang, tz_offset_minutes, app_version, os_version, model]
+      [uid, plat, tok, did, lang, tz_offset_minutes, app_version, os_version, model]
     );
     return r?.[0];
   }
 
-  // Fallback: upsert por token cuando no tenemos device_id
-  const r = await query(
-    `
-    INSERT INTO devices (
-      user_id, platform, fcm_token, device_id, lang, tz_offset_minutes,
-      app_version, os_version, model, last_seen
-    )
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())
-    ON CONFLICT (fcm_token)
-    DO UPDATE SET
-      user_id = EXCLUDED.user_id,
-      platform = COALESCE(EXCLUDED.platform, devices.platform),
-      device_id = COALESCE(EXCLUDED.device_id, devices.device_id),
-      lang = COALESCE(EXCLUDED.lang, devices.lang),
-      tz_offset_minutes = COALESCE(EXCLUDED.tz_offset_minutes, devices.tz_offset_minutes),
-      app_version = COALESCE(EXCLUDED.app_version, devices.app_version),
-      os_version = COALESCE(EXCLUDED.os_version, devices.os_version),
-      model = COALESCE(EXCLUDED.model, devices.model),
-      last_seen = NOW()
-    RETURNING id, user_id, platform, fcm_token, device_id, lang, tz_offset_minutes,
-              app_version, os_version, model, last_seen, created_at
-    `,
-    [uid, plat, String(fcm_token), device_id, lang, tz_offset_minutes, app_version, os_version, model]
-  );
-  return r?.[0];
+  // Helper: upsert por token
+  async function upsertByToken() {
+    const r = await query(
+      `
+      INSERT INTO devices (
+        user_id, platform, fcm_token, device_id, lang, tz_offset_minutes,
+        app_version, os_version, model, last_seen
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())
+      ON CONFLICT (fcm_token)
+      DO UPDATE SET
+        user_id = EXCLUDED.user_id,
+        platform = COALESCE(EXCLUDED.platform, devices.platform),
+        device_id = COALESCE(EXCLUDED.device_id, devices.device_id),
+        lang = COALESCE(EXCLUDED.lang, devices.lang),
+        tz_offset_minutes = COALESCE(EXCLUDED.tz_offset_minutes, devices.tz_offset_minutes),
+        app_version = COALESCE(EXCLUDED.app_version, devices.app_version),
+        os_version = COALESCE(EXCLUDED.os_version, devices.os_version),
+        model = COALESCE(EXCLUDED.model, devices.model),
+        last_seen = NOW()
+      RETURNING id, user_id, platform, fcm_token, device_id, lang, tz_offset_minutes,
+                app_version, os_version, model, last_seen, created_at
+      `,
+      [uid, plat, tok, did, lang, tz_offset_minutes, app_version, os_version, model]
+    );
+    return r?.[0];
+  }
+
+  if (did) {
+    try {
+      return await upsertByPair();
+    } catch (e) {
+      const msg = (e && e.message) || "";
+      // choque por token único: borro el que tiene ese token y reintento
+      if (/uq_devices_token|unique.*fcm_token|duplicate key.*fcm_token/i.test(msg)) {
+        await query(
+          `DELETE FROM devices
+             WHERE fcm_token = $1
+               AND (user_id <> $2 OR device_id IS DISTINCT FROM $3)`,
+          [tok, uid, did]
+        );
+        return await upsertByPair();
+      }
+      throw e;
+    }
+  } else {
+    // Sin device_id: consolidar por token
+    try {
+      return await upsertByToken();
+    } catch (e) {
+      const msg = (e && e.message) || "";
+      // en el extremo improbable de colisión por (user_id,device_id), actualizamos el par
+      if (/uq_devices_user_device|unique.*user_id.*device_id/i.test(msg)) {
+        const r = await query(
+          `
+          UPDATE devices
+             SET fcm_token = $3,
+                 platform = COALESCE($2, platform),
+                 lang = COALESCE($5, lang),
+                 tz_offset_minutes = COALESCE($6, tz_offset_minutes),
+                 app_version = COALESCE($7, app_version),
+                 os_version = COALESCE($8, os_version),
+                 model = COALESCE($9, model),
+                 last_seen = NOW()
+           WHERE user_id = $1
+          RETURNING id, user_id, platform, fcm_token, device_id, lang, tz_offset_minutes,
+                    app_version, os_version, model, last_seen, created_at
+          `,
+          [uid, plat, tok, lang, tz_offset_minutes, app_version, os_version, model]
+        );
+        return r?.[0];
+      }
+      throw e;
+    }
+  }
 }
 
 async function listDevicesByUser({ uid, platform = null }) {
@@ -210,7 +267,7 @@ async function sendSimpleToUser({
     const t = title ?? (title_i18n?.[lang] || title_i18n?.[lang.split("-")[0]] || "Notificación");
     const b = body  ?? (body_i18n?.[lang]  || body_i18n?.[lang.split("-")[0]]  || "Tienes un mensaje.");
 
-    // Para web (incluye Android Chrome PWA) => data-only para evitar duplicados
+    // Web (incluye Android Chrome/PWA) => data-only para evitar duplicados
     const isWeb = String(d.platform || "").toLowerCase() === "web";
     const useWebDataOnly = isWeb ? true : !!webDataOnly;
 
