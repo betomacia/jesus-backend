@@ -82,21 +82,33 @@ async function ensureDevicesTable() {
       created_at         TIMESTAMPTZ DEFAULT NOW()
     );
   `);
+
+  // Índices
   await query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_devices_token ON devices(fcm_token);`);
   await query(`CREATE INDEX IF NOT EXISTS idx_devices_user ON devices(user_id);`);
+
+  // Constraint única real (user_id, device_id)
   await query(`
     DO $$
     BEGIN
       IF NOT EXISTS (
-        SELECT 1 FROM pg_indexes WHERE indexname = 'uq_devices_user_device_nonnull'
+        SELECT 1
+        FROM information_schema.table_constraints
+        WHERE table_name='devices'
+          AND constraint_name='uq_devices_user_device'
+          AND constraint_type='UNIQUE'
       ) THEN
-        EXECUTE 'CREATE UNIQUE INDEX uq_devices_user_device_nonnull ON devices(user_id, device_id) WHERE device_id IS NOT NULL';
+        ALTER TABLE devices
+          ADD CONSTRAINT uq_devices_user_device UNIQUE (user_id, device_id);
       END IF;
     END$$;
   `);
+
+  // Limpieza del índice parcial antiguo si existiera
+  await query(`DROP INDEX IF EXISTS uq_devices_user_device_nonnull;`);
 }
 
-/** ✅ Upsert robusto por (user_id, device_id). Fallback: por fcm_token si no hay device_id. */
+/** Upsert robusto por (user_id, device_id). Fallback: por fcm_token. */
 async function registerDevice({
   uid, platform = null, fcm_token, device_id = null, lang = null,
   tz_offset_minutes = null, app_version = null, os_version = null, model = null,
@@ -104,12 +116,14 @@ async function registerDevice({
   const plat = platform ? String(platform).trim().toLowerCase() : null;
 
   if (device_id) {
-    // 👇 IMPORTANTE: inferencia por columnas + WHERE (índice único parcial)
     const r = await query(
       `
-      INSERT INTO devices (user_id, platform, fcm_token, device_id, lang, tz_offset_minutes, app_version, os_version, model, last_seen)
+      INSERT INTO devices (
+        user_id, platform, fcm_token, device_id, lang, tz_offset_minutes,
+        app_version, os_version, model, last_seen
+      )
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())
-      ON CONFLICT (user_id, device_id) WHERE device_id IS NOT NULL
+      ON CONFLICT (user_id, device_id)
       DO UPDATE SET
         platform = COALESCE(EXCLUDED.platform, devices.platform),
         fcm_token = EXCLUDED.fcm_token,
@@ -119,17 +133,21 @@ async function registerDevice({
         os_version = COALESCE(EXCLUDED.os_version, devices.os_version),
         model = COALESCE(EXCLUDED.model, devices.model),
         last_seen = NOW()
-      RETURNING id, user_id, platform, fcm_token, device_id, lang, tz_offset_minutes, app_version, os_version, model, last_seen, created_at
+      RETURNING id, user_id, platform, fcm_token, device_id, lang, tz_offset_minutes,
+                app_version, os_version, model, last_seen, created_at
       `,
       [uid, plat, String(fcm_token), String(device_id), lang, tz_offset_minutes, app_version, os_version, model]
     );
     return r?.[0];
   }
 
-  // Fallback: upsert por token
+  // Fallback: upsert por token cuando no tenemos device_id
   const r = await query(
     `
-    INSERT INTO devices (user_id, platform, fcm_token, device_id, lang, tz_offset_minutes, app_version, os_version, model, last_seen)
+    INSERT INTO devices (
+      user_id, platform, fcm_token, device_id, lang, tz_offset_minutes,
+      app_version, os_version, model, last_seen
+    )
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())
     ON CONFLICT (fcm_token)
     DO UPDATE SET
@@ -142,7 +160,8 @@ async function registerDevice({
       os_version = COALESCE(EXCLUDED.os_version, devices.os_version),
       model = COALESCE(EXCLUDED.model, devices.model),
       last_seen = NOW()
-    RETURNING id, user_id, platform, fcm_token, device_id, lang, tz_offset_minutes, app_version, os_version, model, last_seen, created_at
+    RETURNING id, user_id, platform, fcm_token, device_id, lang, tz_offset_minutes,
+              app_version, os_version, model, last_seen, created_at
     `,
     [uid, plat, String(fcm_token), device_id, lang, tz_offset_minutes, app_version, os_version, model]
   );
@@ -191,8 +210,7 @@ async function sendSimpleToUser({
     const t = title ?? (title_i18n?.[lang] || title_i18n?.[lang.split("-")[0]] || "Notificación");
     const b = body  ?? (body_i18n?.[lang]  || body_i18n?.[lang.split("-")[0]]  || "Tienes un mensaje.");
 
-    // 💡 Android Chrome (PWA/Web) cuenta como "web". Para evitar duplicados,
-    // a Web le mandamos "data-only" y muestra el SW.
+    // Para web (incluye Android Chrome PWA) => data-only para evitar duplicados
     const isWeb = String(d.platform || "").toLowerCase() === "web";
     const useWebDataOnly = isWeb ? true : !!webDataOnly;
 
