@@ -39,7 +39,8 @@ router.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", origin);
   res.header("Vary", "Origin");
   res.header("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
-  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-User-Email");
+  // 👇 añadimos X-Admin-Key
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-User-Email, X-Admin-Key");
   res.header("Access-Control-Max-Age", "600"); // cachea preflight unos minutos
 
   if (req.method === "OPTIONS") {
@@ -54,6 +55,15 @@ router.use((req, res, next) => {
   res.set("Content-Type", "application/json; charset=utf-8");
   next();
 });
+
+/* ====== Middleware simple de Admin (Header: X-Admin-Key) ====== */
+function requireAdmin(req, res, next) {
+  const key = (req.get("x-admin-key") || "").toString();
+  if (!ADMIN_PUSH_KEY || key !== ADMIN_PUSH_KEY) {
+    return res.status(401).json({ ok: false, error: "unauthorized_admin" });
+  }
+  next();
+}
 
 /* ============== Health & Register ============== */
 router.get("/health", async (_req, res) => {
@@ -489,11 +499,203 @@ router.post("/push/send-simple", async (req, res) => {
   }
 });
 
-/* ============== Broadcast admin (campañas / avisos) ============== */
+/* ========= ENVÍO ADMIN A 1+ USUARIOS ESPECÍFICOS =========
+   POST /users/push/admin-send
+   Headers: X-Admin-Key: <clave>
+   Body:
+   {
+     emails: ["a@b.com","c@d.com"],   // ó user_ids: [1,2] (uno de los dos)
+     platform: "web"|"android"|"ios", // opcional
+     device_id: "ANDROID_CHROME_XXXX",// opcional (si querés 1 device)
+     fcm_token: "token...",           // opcional (envío directo por token)
+     title, body, title_i18n, body_i18n, data,
+     webDataOnly: true
+   }
+*/
+router.post("/push/admin-send", requireAdmin, async (req, res) => {
+  try {
+    await ensureDevicesTable();
+    const {
+      emails = null,
+      user_ids = null,
+      platform = null,
+      device_id = null,
+      fcm_token = null,
+      title = null,
+      body = null,
+      title_i18n = null,
+      body_i18n = null,
+      data = null,
+      webDataOnly = true,
+    } = req.body || {};
+
+    // Resolver lista de usuarios
+    let users = [];
+    if (Array.isArray(user_ids) && user_ids.length) {
+      const ids = user_ids.filter((x) => Number.isFinite(+x)).map((x) => +x);
+      if (!ids.length) return res.status(400).json({ ok: false, error: "bad_user_ids" });
+      users = await query(`SELECT id, lang FROM users WHERE id = ANY($1)`, [ids]);
+    } else if (Array.isArray(emails) && emails.length) {
+      const norm = emails.map((e) => String(e || "").trim().toLowerCase()).filter(Boolean);
+      if (!norm.length) return res.status(400).json({ ok: false, error: "bad_emails" });
+      users = await query(`SELECT id, lang FROM users WHERE email = ANY($1)`, [norm]);
+    } else if (fcm_token) {
+      // Envío directo por token (sin usuarios)
+      const devices = [{ user_id: null, id: null, platform: platform || "web", device_id: device_id || null, fcm_token: String(fcm_token), lang: "es" }];
+      const report = await sendSimpleToUser({
+        user: {}, devices,
+        title, body, title_i18n, body_i18n, data,
+        overrideLang: null, webDataOnly: !!webDataOnly,
+      });
+      return res.json({ ok: true, targeted: devices.length, ...report });
+    } else {
+      return res.status(400).json({ ok: false, error: "emails_or_user_ids_or_fcm_token_required" });
+    }
+
+    if (!users.length) return res.status(404).json({ ok: false, error: "users_not_found" });
+
+    const plat = platform ? String(platform).trim().toLowerCase() : null;
+    const allowed = new Set(["web", "android", "ios"]);
+    const platFilter = plat && allowed.has(plat) ? plat : null;
+
+    // Traer devices por usuario (aplicando filtros finos si vienen)
+    let targetedDevices = [];
+    for (const u of users) {
+      let devs = await listDevicesByUser({ uid: u.id, platform: platFilter });
+      if (device_id) devs = devs.filter(d => String(d.device_id || "") === String(device_id));
+      if (fcm_token) devs = devs.filter(d => String(d.fcm_token) === String(fcm_token));
+      if (devs.length) targetedDevices.push({ user: u, devices: devs });
+    }
+
+    if (!targetedDevices.length) {
+      return res.status(404).json({ ok: false, error: "no_devices_for_target_users" });
+    }
+
+    // Enviar por usuario para respetar lang
+    let sent = 0, failed = 0, targeted = 0;
+    const summary = [];
+    for (const td of targetedDevices) {
+      const r = await sendSimpleToUser({
+        user: td.user,
+        devices: td.devices,
+        title, body, title_i18n, body_i18n, data,
+        overrideLang: null,
+        webDataOnly: !!webDataOnly,
+      });
+      sent   += r.sent;
+      failed += r.failed;
+      targeted += td.devices.length;
+      summary.push({ user_id: td.user.id, sent: r.sent, failed: r.failed, results: r.results });
+    }
+
+    res.json({ ok: true, targeted, sent, failed, by_user: summary });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: "admin_send_failed", detail: e.message || String(e) });
+  }
+});
+
+/* ========= BROADCAST ADMIN (segmentable) =========
+   POST /users/push/admin-broadcast
+   Headers: X-Admin-Key: <clave>
+   Body:
+   {
+     platform: "web"|"android"|"ios",  // opcional (default: todos)
+     lastSeenDays: 30,                 // opcional (default 30)
+     groupByUser: true,                // default true => 1 device por usuario
+     preferPrefix: "ANDROID_CHROME",   // prioriza ese device_id
+     limit: 500,                       // límite duro de dispositivos
+     title, body, title_i18n, body_i18n, data,
+     webDataOnly: true
+   }
+*/
+router.post("/push/admin-broadcast", requireAdmin, async (req, res) => {
+  try {
+    await ensureDevicesTable();
+
+    const {
+      platform = null,
+      lastSeenDays = 30,
+      groupByUser = true,
+      preferPrefix = "ANDROID_CHROME",
+      limit = 500,
+      title = null,
+      body = null,
+      title_i18n = null,
+      body_i18n = null,
+      data = null,
+      webDataOnly = true,
+    } = req.body || {};
+
+    // 1) Resolver candidatos
+    const devs = await listDevicesForBroadcast({
+      platform: platform ? String(platform).trim().toLowerCase() : null,
+      lastSeenDays: Number.isFinite(+lastSeenDays) ? +lastSeenDays : 30,
+      groupByUser: !!groupByUser,
+      preferPrefix: String(preferPrefix || "ANDROID_CHROME"),
+      limit: Math.min(Math.max(parseInt(limit, 10) || 500, 1), 10000),
+    });
+
+    if (!devs || !devs.length) {
+      return res.status(404).json({ ok: false, error: "no_devices_for_broadcast" });
+    }
+
+    // 2) Traer langs de usuarios involucrados (si groupByUser)
+    let usersById = {};
+    if (groupByUser) {
+      const ids = [...new Set(devs.map(d => d.user_id).filter(Boolean))];
+      if (ids.length) {
+        const rows = await query(`SELECT id, lang FROM users WHERE id = ANY($1)`, [ids]);
+        for (const r of rows) usersById[r.id] = r;
+      }
+    }
+
+    // 3) Enviar por usuario (si groupByUser), o en un batch único
+    let sent = 0, failed = 0, targeted = devs.length;
+    const results = [];
+
+    if (groupByUser) {
+      // agrupar
+      const map = new Map();
+      for (const d of devs) {
+        if (!map.has(d.user_id)) map.set(d.user_id, []);
+        map.get(d.user_id).push(d);
+      }
+      for (const [uid, arr] of map.entries()) {
+        const user = usersById[uid] || {};
+        const r = await sendSimpleToUser({
+          user,
+          devices: arr,
+          title, body, title_i18n, body_i18n, data,
+          overrideLang: null,
+          webDataOnly: !!webDataOnly,
+        });
+        sent += r.sent; failed += r.failed;
+        results.push({ user_id: uid, sent: r.sent, failed: r.failed, results: r.results });
+      }
+    } else {
+      // un solo batch con user genérico
+      const r = await sendSimpleToUser({
+        user: {},
+        devices: devs,
+        title, body, title_i18n, body_i18n, data,
+        overrideLang: null,
+        webDataOnly: !!webDataOnly,
+      });
+      sent = r.sent; failed = r.failed;
+      results.push(...r.results);
+    }
+
+    res.json({ ok: true, targeted, sent, failed, results });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: "admin_broadcast_failed", detail: e.message || String(e) });
+  }
+});
+
+/* ============== Broadcast (compat) ============== */
 /**
- * POST /users/push/broadcast  (solo admins)
+ * POST /users/push/broadcast  (compat: acepta X-Admin-Key o admin_key en body)
  * Body:
- *  admin_key: string (debe igualar process.env.ADMIN_PUSH_KEY si está seteada)
+ *  admin_key?: string (si no se manda header X-Admin-Key)
  *  title, body, data
  *  platform?: 'web'|'android'|'ios' (default: null = todas)
  *  last_seen_days?: number (default: 30)
@@ -504,7 +706,11 @@ router.post("/push/send-simple", async (req, res) => {
  */
 router.post("/push/broadcast", async (req, res) => {
   try {
-    if (ADMIN_PUSH_KEY && req.body?.admin_key !== ADMIN_PUSH_KEY) {
+    // Permite header o body
+    const headerKey = (req.get("x-admin-key") || "").toString();
+    const bodyKey = (req.body?.admin_key || "").toString();
+    const authed = ADMIN_PUSH_KEY && (headerKey === ADMIN_PUSH_KEY || bodyKey === ADMIN_PUSH_KEY);
+    if (!authed) {
       return res.status(403).json({ ok: false, error: "forbidden" });
     }
 
