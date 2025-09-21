@@ -43,10 +43,11 @@ async function sendToFcmV1({ token, title, body, data, webDataOnly }) {
     const message = { token };
     if (data) message.data = normalizeData(data);
 
+    // Solo si NO es webDataOnly incluimos "notification"
     if (!webDataOnly) {
       message.notification = {
         title: (title !== undefined && title !== null) ? String(title) : "",
-        body:  (body  !== undefined && body  !== null) ? String(body)  : ""
+        body:  (body  !== undefined && body  !== null)  ? String(body)  : ""
       };
     }
 
@@ -84,8 +85,8 @@ async function ensureDevicesTable() {
       created_at         TIMESTAMPTZ DEFAULT NOW()
     );
   `);
-  await query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_devices_token ON devices(fcm_token);`);
-  await query(`CREATE INDEX IF NOT EXISTS idx_devices_user ON devices(user_id);`);
+  await query(\`CREATE UNIQUE INDEX IF NOT EXISTS uq_devices_token ON devices(fcm_token);\`);
+  await query(\`CREATE INDEX IF NOT EXISTS idx_devices_user ON devices(user_id);\`);
   await query(`
     DO $$
     BEGIN
@@ -101,7 +102,7 @@ async function ensureDevicesTable() {
       END IF;
     END$$;
   `);
-  await query(`DROP INDEX IF EXISTS uq_devices_user_device_nonnull;`);
+  await query(\`DROP INDEX IF EXISTS uq_devices_user_device_nonnull;\`);
 }
 
 async function registerDevice({
@@ -114,7 +115,7 @@ async function registerDevice({
 
   async function upsertByPair() {
     const r = await query(
-      `
+      \`
       INSERT INTO devices (
         user_id, platform, fcm_token, device_id, lang, tz_offset_minutes,
         app_version, os_version, model, last_seen
@@ -132,7 +133,7 @@ async function registerDevice({
         last_seen = NOW()
       RETURNING id, user_id, platform, fcm_token, device_id, lang, tz_offset_minutes,
                 app_version, os_version, model, last_seen, created_at
-      `,
+      \`,
       [uid, plat, tok, did, lang, tz_offset_minutes, app_version, os_version, model]
     );
     return r && r[0];
@@ -140,7 +141,7 @@ async function registerDevice({
 
   async function upsertByToken() {
     const r = await query(
-      `
+      \`
       INSERT INTO devices (
         user_id, platform, fcm_token, device_id, lang, tz_offset_minutes,
         app_version, os_version, model, last_seen
@@ -159,7 +160,7 @@ async function registerDevice({
         last_seen = NOW()
       RETURNING id, user_id, platform, fcm_token, device_id, lang, tz_offset_minutes,
                 app_version, os_version, model, last_seen, created_at
-      `,
+      \`,
       [uid, plat, tok, did, lang, tz_offset_minutes, app_version, os_version, model]
     );
     return r && r[0];
@@ -171,9 +172,9 @@ async function registerDevice({
       const msg = (e && e.message) || "";
       if (/uq_devices_token|unique.*fcm_token|duplicate key.*fcm_token/i.test(msg)) {
         await query(
-          `DELETE FROM devices
+          \`DELETE FROM devices
              WHERE fcm_token = $1
-               AND (user_id <> $2 OR device_id IS DISTINCT FROM $3)`,
+               AND (user_id <> $2 OR device_id IS DISTINCT FROM $3)\`,
           [tok, uid, did]
         );
         return await upsertByPair();
@@ -186,7 +187,7 @@ async function registerDevice({
       const msg = (e && e.message) || "";
       if (/uq_devices_user_device|unique.*user_id.*device_id/i.test(msg)) {
         const r = await query(
-          `
+          \`
           UPDATE devices
              SET platform = COALESCE($2, platform),
                  fcm_token = $3,
@@ -199,7 +200,7 @@ async function registerDevice({
            WHERE user_id = $1
           RETURNING id, user_id, platform, fcm_token, device_id, lang, tz_offset_minutes,
                     app_version, os_version, model, last_seen, created_at
-          `,
+          \`,
           [uid, plat, tok, lang, tz_offset_minutes, app_version, os_version, model]
         );
         return r && r[0];
@@ -212,12 +213,12 @@ async function registerDevice({
 async function listDevicesByUser({ uid, platform = null }) {
   if (platform) {
     return await query(
-      `SELECT * FROM devices WHERE user_id=$1 AND platform=$2 ORDER BY last_seen DESC, id DESC`,
+      \`SELECT * FROM devices WHERE user_id=$1 AND platform=$2 ORDER BY last_seen DESC, id DESC\`,
       [uid, platform]
     );
   }
   return await query(
-    `SELECT * FROM devices WHERE user_id=$1 ORDER BY last_seen DESC, id DESC`,
+    \`SELECT * FROM devices WHERE user_id=$1 ORDER BY last_seen DESC, id DESC\`,
     [uid]
   );
 }
@@ -234,14 +235,14 @@ async function listDevicesForBroadcast({
 
   if (platform) {
     params.push(String(platform).toLowerCase());
-    whereClauses.push(`platform = $${params.length}`);
+    whereClauses.push(\`platform = $\${params.length}\`);
   }
   if (Number.isFinite(+lastSeenDays) && +lastSeenDays >= 0) {
     params.push(+lastSeenDays);
-    whereClauses.push(`last_seen >= NOW() - ($${params.length} * INTERVAL '1 day')`);
+    whereClauses.push(\`last_seen >= NOW() - ($\${params.length} * INTERVAL '1 day')\`);
   }
 
-  const whereSql = whereClauses.length ? `WHERE ${whereClauses.join(" AND ")}` : "";
+  const whereSql = whereClauses.length ? \`WHERE \${whereClauses.join(" AND ")}\` : "";
 
   if (groupByUser) {
     params.push(String(preferPrefix));
@@ -251,10 +252,10 @@ async function listDevicesForBroadcast({
     const limIdx = params.length;
 
     const rows = await query(
-      `
+      \`
       WITH base AS (
         SELECT d.*,
-               CASE WHEN d.device_id ILIKE ($${prefIdx} || '%') THEN 0 ELSE 1 END AS pref
+               CASE WHEN d.device_id ILIKE ($\${prefIdx} || '%') THEN 0 ELSE 1 END AS pref
           FROM devices d
           ${whereSql}
       )
@@ -263,22 +264,22 @@ async function listDevicesForBroadcast({
              app_version, os_version, model, last_seen, created_at
         FROM base
        ORDER BY user_id, pref ASC, last_seen DESC, id DESC
-       LIMIT $${limIdx}
-      `,
+       LIMIT $\${limIdx}
+      \`,
       params
     );
     return rows || [];
   } else {
     params.push(Math.min(Math.max(parseInt(limit, 10) || 1000, 1), 10000));
     const rows = await query(
-      `
+      \`
       SELECT id, user_id, platform, device_id, fcm_token, lang, tz_offset_minutes,
              app_version, os_version, model, last_seen, created_at
         FROM devices
         ${whereSql}
        ORDER BY last_seen DESC, id DESC
-       LIMIT $${params.length}
-      `,
+       LIMIT $\${params.length}
+      \`,
       params
     );
     return rows || [];
@@ -299,17 +300,17 @@ function isInvalidTokenError(resp) {
 }
 
 async function deleteDeviceById(id) {
-  try { await query(`DELETE FROM devices WHERE id=$1`, [Number(id)]); } catch {}
+  try { await query(\`DELETE FROM devices WHERE id=$1\`, [Number(id)]); } catch {}
   return 1;
 }
 
 function pickI18n(dict, lang) {
   if (!dict) return null;
-  const direct = dict[lang];
-  if (direct !== undefined && direct !== null) return direct;
+  const val1 = dict[lang];
+  if (val1 !== undefined && val1 !== null) return val1;
   const base = lang.split("-")[0];
-  const baseVal = dict[base];
-  if (baseVal !== undefined && baseVal !== null) return baseVal;
+  const val2 = dict[base];
+  if (val2 !== undefined && val2 !== null) return val2;
   return null;
 }
 
@@ -320,7 +321,21 @@ async function sendSimpleToUser({
   let sent = 0, failed = 0;
   const results = [];
 
-  for (const d of devices) {
+  // 🔒 De-dup por token y device_id para evitar triples
+  const seenToken = new Set();
+  const seenDevice = new Set();
+  const unique = [];
+  for (const d of (devices || [])) {
+    const tok = String(d.fcm_token || "");
+    const did = String(d.device_id || "");
+    if (tok && seenToken.has(tok)) continue;
+    if (did && seenDevice.has(did)) continue;
+    seenToken.add(tok);
+    if (did) seenDevice.add(did);
+    unique.push(d);
+  }
+
+  for (const d of unique) {
     const lang = (overrideLang || d.lang || (user && user.lang) || "es").slice(0, 5).toLowerCase();
     let resolvedTitle = (title !== undefined && title !== null) ? String(title) : pickI18n(title_i18n, lang);
     let resolvedBody  = (body  !== undefined && body  !== null)  ? String(body)  : pickI18n(body_i18n, lang);
@@ -331,10 +346,10 @@ async function sendSimpleToUser({
     const isWeb = (plat === "web");
     const isAndroid = (plat === "android");
 
-    // Data a enviar (siempre agregamos una marca para diagnóstico)
+    // Data passthrough + marca de admin
     const payloadData = Object.assign({}, data || {}, { __sender: "admin" });
 
-    // En WEB: mandamos también el texto dentro de data para que el SW/foreground usen EXACTO lo que vino del admin
+    // Para WEB: mandamos los textos exactos sólo en data (data-only)
     if (isWeb) {
       payloadData.title   = resolvedTitle;
       payloadData.body    = resolvedBody;
@@ -344,7 +359,7 @@ async function sendSimpleToUser({
 
     const r = await sendToFcmV1({
       token: d.fcm_token,
-      title: isAndroid ? resolvedTitle : null,
+      title: isAndroid ? resolvedTitle : null, // Android usa "notification"
       body:  isAndroid ? resolvedBody  : null,
       data:  payloadData,
       webDataOnly: isWeb ? true : (isAndroid ? false : !!webDataOnly),
