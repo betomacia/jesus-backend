@@ -4,6 +4,12 @@
 importScripts('https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js');
 importScripts('https://www.gstatic.com/firebasejs/10.12.2/firebase-messaging-compat.js');
 
+// --- Forzar update del SW cada vez que cambie este valor ---
+const SW_VERSION = "2025-09-21_04"; // súbelo cuando quieras forzar otro update
+self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
+
+
 const SW_VERSION = "2025-09-21_02";
 
 // Auto-actualización del SW
