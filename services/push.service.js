@@ -21,7 +21,6 @@ async function getAccessToken() {
   return access_token;
 }
 
-/** NO metemos defaults; solo serializamos lo que venga en data */
 function normalizeData(data) {
   if (!data) return undefined;
   const out = {};
@@ -33,12 +32,6 @@ function normalizeData(data) {
   return Object.keys(out).length ? out : undefined;
 }
 
-/**
- * Envía al endpoint v1 de FCM.
- * - Para 'webDataOnly=true' NO incluimos 'notification' (solo 'data').
- * - Para 'webDataOnly=false' SÍ incluimos 'notification' (Android nativo).
- * - JAMÁS agregamos __title/__body por defecto: si caller no manda title/body, no inventamos texto.
- */
 async function sendToFcmV1({ token, title, body, data, webDataOnly }) {
   if (!FB_PROJECT_ID || !FB_CLIENT_EMAIL || !FB_PRIVATE_KEY) {
     return { ok: false, error: "missing_firebase_service_account_envs" };
@@ -47,13 +40,9 @@ async function sendToFcmV1({ token, title, body, data, webDataOnly }) {
     const accessToken = await getAccessToken();
     const url = `https://fcm.googleapis.com/v1/projects/${FB_PROJECT_ID}/messages:send`;
 
-    const message = {
-      token,
-      data: normalizeData(data) // <- solo lo que venga, sin defaults
-    };
+    const message = { token, data: normalizeData(data) };
 
     if (!webDataOnly) {
-      // Android nativo: respetar EXACTO el title/body que mande el admin
       message.notification = {
         title: (title !== undefined && title !== null) ? String(title) : "",
         body:  (body  !== undefined && body  !== null) ? String(body)  : ""
@@ -94,10 +83,8 @@ async function ensureDevicesTable() {
       created_at         TIMESTAMPTZ DEFAULT NOW()
     );
   `);
-
   await query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_devices_token ON devices(fcm_token);`);
   await query(`CREATE INDEX IF NOT EXISTS idx_devices_user ON devices(user_id);`);
-
   await query(`
     DO $$
     BEGIN
@@ -113,13 +100,9 @@ async function ensureDevicesTable() {
       END IF;
     END$$;
   `);
-
   await query(`DROP INDEX IF EXISTS uq_devices_user_device_nonnull;`);
 }
 
-/**
- * UPSERT con manejo de colisión cruzada.
- */
 async function registerDevice({
   uid, platform = null, fcm_token, device_id = null, lang = null,
   tz_offset_minutes = null, app_version = null, os_version = null, model = null,
@@ -182,9 +165,8 @@ async function registerDevice({
   }
 
   if (did) {
-    try {
-      return await upsertByPair();
-    } catch (e) {
+    try { return await upsertByPair(); }
+    catch (e) {
       const msg = (e && e.message) || "";
       if (/uq_devices_token|unique.*fcm_token|duplicate key.*fcm_token/i.test(msg)) {
         await query(
@@ -198,9 +180,8 @@ async function registerDevice({
       throw e;
     }
   } else {
-    try {
-      return await upsertByToken();
-    } catch (e) {
+    try { return await upsertByToken(); }
+    catch (e) {
       const msg = (e && e.message) || "";
       if (/uq_devices_user_device|unique.*user_id.*device_id/i.test(msg)) {
         const r = await query(
@@ -211,7 +192,7 @@ async function registerDevice({
                  lang = COALESCE($4, lang),
                  tz_offset_minutes = COALESCE($5, tz_offset_minutes),
                  app_version = COALESCE($6, app_version),
-                 os_version = COALESCE($7, os_version),
+                 os_version = COCOALESCE($7, os_version),
                  model = COALESCE($8, model),
                  last_seen = NOW()
            WHERE user_id = $1
@@ -240,14 +221,6 @@ async function listDevicesByUser({ uid, platform = null }) {
   );
 }
 
-/**
- * Listado para broadcast:
- *  - platform?: 'web'|'android'|'ios'
- *  - lastSeenDays?: number
- *  - groupByUser?: boolean (DISTINCT ON (user_id))
- *  - preferPrefix?: string (prioriza device_id que empiece así)
- *  - limit?: number
- */
 async function listDevicesForBroadcast({
   platform = null,
   lastSeenDays = 30,
@@ -329,7 +302,6 @@ async function deleteDeviceById(id) {
   return 1;
 }
 
-/** Helper sin ?? para elegir i18n */
 function pickI18n(dict, lang) {
   if (!dict) return null;
   const direct = dict[lang];
@@ -340,11 +312,6 @@ function pickI18n(dict, lang) {
   return null;
 }
 
-/**
- * Política final:
- * - WEB => SIEMPRE data-only; no 'notification' (lo dibuja SW) y no inventamos textos.
- * - ANDROID (nativo) => 'notification' con title/body EXACTOS del admin.
- */
 async function sendSimpleToUser({
   user, devices, title = null, body = null, title_i18n = null, body_i18n = null,
   data = null, overrideLang = null, webDataOnly = false,
@@ -354,26 +321,25 @@ async function sendSimpleToUser({
 
   for (const d of devices) {
     const lang = (overrideLang || d.lang || (user && user.lang) || "es").slice(0, 5).toLowerCase();
-
-    const resolvedTitle = (title !== undefined && title !== null)
-      ? title
-      : pickI18n(title_i18n, lang);
-
-    const resolvedBody = (body !== undefined && body !== null)
-      ? body
-      : pickI18n(body_i18n, lang);
+    const resolvedTitle = (title !== undefined && title !== null) ? title : pickI18n(title_i18n, lang);
+    const resolvedBody  = (body  !== undefined && body  !== null)  ? body  : pickI18n(body_i18n, lang);
 
     const plat = String(d.platform || "").toLowerCase();
     const isWeb = (plat === "web");
     const isAndroid = (plat === "android");
 
-    const dataWithMark = Object.assign({}, data || {}, { __sender: "admin" });
+    // WEB: data-only + inyectar title/body dentro de data para que el SW muestre exactamente lo que mandó el admin
+    let payloadData = Object.assign({}, data || {}, { __sender: "admin" });
+    if (isWeb) {
+      if (resolvedTitle !== undefined && resolvedTitle !== null) payloadData.title = String(resolvedTitle);
+      if (resolvedBody  !== undefined && resolvedBody  !== null) payloadData.body  = String(resolvedBody);
+    }
 
     const r = await sendToFcmV1({
       token: d.fcm_token,
-      title: resolvedTitle,
-      body:  resolvedBody,
-      data:  dataWithMark,
+      title: isAndroid ? resolvedTitle : null,
+      body:  isAndroid ? resolvedBody  : null,
+      data:  payloadData,
       webDataOnly: isWeb ? true : (isAndroid ? false : !!webDataOnly),
     });
 
