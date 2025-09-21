@@ -1,7 +1,7 @@
 // routes/push_admin.js
 const express = require("express");
 const { query } = require("./db");
-const { listDevicesByUser, sendSimpleToUser } = require("../services/push.service");
+const { sendSimpleToUser } = require("../services/push.service");
 
 const router = express.Router();
 
@@ -17,35 +17,12 @@ router.use((_, res, next) => {
   next();
 });
 
-// normaliza y bucketiza por grupos
-function groupAndPick(devs) {
-  const bucket = { android: [], desktop: [] };
-
-  for (const d of devs) {
-    const id = (d.device_id || "");
-
-    // ❌ descartamos explícitamente WEB_BOLT
-    if (id.startsWith("WEB_BOLT")) continue;
-
-    if (id.startsWith("ANDROID_CHROME")) bucket.android.push(d);
-    else if (id.startsWith("WEB_DESKTOP")) bucket.desktop.push(d);
-  }
-
-  const byRecent = (a, b) => {
-    const la = new Date(a.last_seen || a.created_at || 0).getTime();
-    const lb = new Date(b.last_seen || b.created_at || 0).getTime();
-    return lb - la || (b.id - a.id);
-  };
-
-  const chosen = [];
-  if (bucket.desktop.length) chosen.push([...bucket.desktop].sort(byRecent)[0]);
-  if (bucket.android.length) chosen.push([...bucket.android].sort(byRecent)[0]);
-  return chosen;
-}
-
 /**
  * POST /push/admin-broadcast
  * Body: { lang?, platform?, inactive_days?, emails?, title, body, data? }
+ * - Excluye WEB_BOLT
+ * - Toma 1 Desktop (WEB_DESKTOP*) + 1 Android (ANDROID_CHROME*) por usuario (los más recientes)
+ * - Envía data-only a web/PWA para evitar duplicados y siempre respetar tu título/cuerpo
  */
 router.post("/admin-broadcast", async (req, res) => {
   try {
@@ -53,9 +30,9 @@ router.post("/admin-broadcast", async (req, res) => {
 
     const {
       lang = null,
-      platform = null,
-      inactive_days = null,
-      emails = null,
+      platform = null,            // opcional: 'web'|'android'|'ios' (no es necesario)
+      inactive_days = null,       // opcional
+      emails = null,              // opcional: array de emails target
       title = null,
       body = null,
       data = null,
@@ -65,73 +42,100 @@ router.post("/admin-broadcast", async (req, res) => {
       return res.status(400).json({ ok: false, error: "title_and_body_required" });
     }
 
-    let devices = [];
+    // --- Parámetros y filtros base
+    const params = [];
+    let whereUser = "";   // para limitar por emails
+    let whereExtra = "";  // lang/platform/inactive_days
 
     if (Array.isArray(emails) && emails.length) {
-      const rows = await query(
-        `SELECT id FROM users WHERE email = ANY($1::text[])`,
-        [emails.map((e) => String(e).trim().toLowerCase())]
-      );
-      const uids = rows.map((r) => r.id);
-      if (!uids.length) return res.json({ ok: true, targeted: 0, sent: 0 });
-
-      for (const uid of uids) {
-        const devs = await listDevicesByUser({ uid, platform: platform || null });
-        devices.push(...devs);
-      }
-    } else {
-      const where = [];
-      const params = [];
-      let i = 1;
-
-      if (lang) {
-        where.push(`d.lang = $${i++}`);
-        params.push(String(lang));
-      }
-      if (platform) {
-        where.push(`d.platform = $${i++}`);
-        params.push(String(platform));
-      }
-      if (inactive_days && Number(inactive_days) > 0) {
-        where.push(
-          `COALESCE(d.last_seen, d.created_at) <= NOW() - ($${i++}::int * INTERVAL '1 day')`
-        );
-        params.push(Number(inactive_days));
-      }
-
-      const sql = `
-        SELECT d.*, u.id AS user_id, u.lang AS user_lang
-          FROM devices d
-          JOIN users u ON u.id = d.user_id
-        ${where.length ? "WHERE " + where.join(" AND ") : ""}
-      `;
-      const rows = await query(sql, params);
-      devices = rows || [];
+      params.push(emails.map(e => String(e).trim().toLowerCase()));
+      whereUser = `WHERE u.email = ANY($${params.length}::text[])`;
     }
 
-    // por usuario, quedarse sólo con 1 desktop + 1 android (descartando WEB_BOLT)
+    const extra = [];
+    if (lang) {
+      params.push(String(lang));
+      extra.push(`d.lang = $${params.length}`);
+    }
+    if (platform) {
+      params.push(String(platform));
+      extra.push(`d.platform = $${params.length}`);
+    }
+    if (inactive_days && Number(inactive_days) > 0) {
+      params.push(Number(inactive_days));
+      extra.push(`COALESCE(d.last_seen, d.created_at) <= NOW() - ($${params.length}::int * INTERVAL '1 day')`);
+    }
+    // ❌ excluir explícitamente WEB_BOLT
+    extra.push(`(d.device_id IS NULL OR d.device_id NOT ILIKE 'WEB_BOLT%')`);
+
+    if (extra.length) {
+      whereExtra = `AND ${extra.join(" AND ")}`;
+    }
+
+    // --- Selección **en SQL**: 1 desktop + 1 android por usuario, más recientes
+    const sql = `
+      WITH targets AS (
+        SELECT u.id AS user_id, u.lang AS user_lang
+          FROM users u
+          ${whereUser}
+      ),
+      devs AS (
+        SELECT
+          d.*,
+          t.user_id,
+          t.user_lang,
+          CASE
+            WHEN d.device_id ILIKE 'ANDROID_CHROME%' THEN 'android'
+            WHEN d.device_id ILIKE 'WEB_DESKTOP%'    THEN 'desktop'
+            ELSE NULL
+          END AS grp
+        FROM devices d
+        JOIN targets t ON t.user_id = d.user_id
+        WHERE 1=1
+          ${whereExtra}
+      ),
+      ranked AS (
+        SELECT
+          d.*,
+          ROW_NUMBER() OVER (
+            PARTITION BY d.user_id, d.grp
+            ORDER BY COALESCE(d.last_seen, d.created_at) DESC, d.id DESC
+          ) AS rn
+        FROM devs d
+        WHERE d.grp IS NOT NULL   -- sólo android/desktop
+      )
+      SELECT *
+        FROM ranked
+       WHERE rn = 1
+       ORDER BY user_id, grp;     -- como mucho 2 por usuario (android y/o desktop)
+    `;
+
+    const devices = await query(sql, params); // ya vienen filtrados y rankeados
+
+    // Agrupamos por usuario (máx 2 devices por user) y enviamos
     const byUser = new Map();
     for (const d of devices) {
-      if (!byUser.has(d.user_id)) byUser.set(d.user_id, []);
-      byUser.get(d.user_id).push(d);
+      if (!byUser.has(d.user_id)) byUser.set(d.user_id, { lang: d.user_lang || d.lang || "es", list: [] });
+      byUser.get(d.user_id).list.push(d);
     }
 
-    let sent = 0, targeted = 0;
-    for (const [uid, devs] of byUser) {
-      const chosen = groupAndPick(devs);
-      targeted += chosen.length;
+    let sent = 0;
+    let targeted = devices.length;
 
-      const user = { id: uid, lang: (devs[0]?.user_lang || devs[0]?.lang || "es") };
+    for (const [uid, pack] of byUser) {
+      const user = { id: uid, lang: pack.lang || "es" };
+      const devs = pack.list;
+
       const report = await sendSimpleToUser({
         user,
-        devices: chosen,
+        devices: devs,
         title,
         body,
         title_i18n: null,
         body_i18n: null,
         data: data || null,
         overrideLang: null,
-        webDataOnly: true, // web/PWA data-only => muestra lo que mandas y evita duplicados
+        webDataOnly: true, // web/PWA data-only → muestra exactamente tu título/cuerpo y evita duplicados
       });
       sent += (report?.sent || 0);
     }
@@ -139,9 +143,7 @@ router.post("/admin-broadcast", async (req, res) => {
     return res.json({ ok: true, targeted, users: byUser.size, sent });
   } catch (e) {
     console.error("admin-broadcast error:", e);
-    return res
-      .status(500)
-      .json({ ok: false, error: "admin_broadcast_failed", detail: e.message || String(e) });
+    return res.status(500).json({ ok: false, error: "admin_broadcast_failed", detail: e.message || String(e) });
   }
 });
 
