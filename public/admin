@@ -2,321 +2,453 @@
 <html lang="es">
 <head>
   <meta charset="utf-8" />
-  <title>Panel Admin · Notificaciones</title>
+  <title>Admin — Notificaciones & Estadísticas</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <style>
-    :root{color-scheme:dark light}
-    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Helvetica,Arial,sans-serif;margin:0;background:#0b0b0c;color:#eaeaea}
-    .wrap{max-width:960px;margin:32px auto;padding:0 16px}
-    .card{background:#131316;border:1px solid #2a2a32;border-radius:16px;padding:16px 16px}
-    h1{font-size:20px;margin:0 0 8px}
-    h2{font-size:16px;margin:20px 0 8px}
-    .row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-    .row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
-    @media (max-width:820px){.row,.row3{grid-template-columns:1fr}}
-    input,select,textarea,button{width:100%;box-sizing:border-box}
-    input,select,textarea{background:#1a1a22;border:1px solid #34343f;color:#eaeaea;border-radius:10px;padding:10px 12px;outline:none}
-    textarea{min-height:80px;resize:vertical}
-    button{cursor:pointer;background:#2563eb;border:0;color:white;padding:10px 14px;border-radius:10px;font-weight:600}
-    button.secondary{background:#374151}
-    .toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-    .muted{opacity:.8;font-size:13px}
-    .ok{color:#22c55e}.warn{color:#f59e0b}.err{color:#ef4444}
-    .log{font:12px ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;background:#0c0c0f;border:1px solid #2a2a32;border-radius:10px;padding:10px;white-space:pre-wrap}
-    .tag{display:inline-block;background:#1f2937;border:1px solid #374151;color:#cbd5e1;border-radius:999px;padding:2px 8px;font-size:12px}
-    .pill{display:inline-flex;gap:6px;align-items:center}
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, 'Helvetica Neue', Arial, 'Noto Sans', 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji'; margin: 16px; }
+    h1 { margin: 0 0 12px; font-size: 20px; }
+    h2 { margin: 24px 0 8px; font-size: 18px; }
+    .row { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); align-items: end; }
+    .box { border: 1px solid #0003; border-radius: 10px; padding: 12px; background: #fff; }
+    .stack { display: grid; gap: 8px; }
+    label { display:block; font-size:12px; opacity: .8; margin-bottom: 4px; }
+    input[type="text"], input[type="number"], input[type="url"], textarea, select {
+      width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid #0003; background: #fff;
+      font-family: inherit; font-size: 14px;
+    }
+    textarea { min-height: 84px; }
+    button { padding: 10px 14px; border-radius: 999px; border: 0; background: #0d6efd; color: #fff; cursor: pointer; }
+    button:disabled { opacity:.6; cursor: default; }
+    .muted { opacity:.8; font-size: 12px; }
+    .ok { color: #137b13; }
+    .err { color: #b00020; white-space: pre-wrap; }
+    .grid-2 { display:grid; gap: 12px; grid-template-columns: 1fr 1fr; }
+    .cards { display:grid; gap:12px; grid-template-columns: repeat(auto-fit, minmax(160px,1fr)); }
+    .card { border:1px solid #0002; border-radius:12px; padding:12px; background:#fff; }
+    .card h3 { margin:0 0 6px; font-size:13px; opacity:.7; }
+    .big { font-size:24px; font-weight:600; }
+    .footer-note { margin-top: 8px; font-size: 12px; opacity: .8; }
+    .kbd { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; font-size: 12px; background: #00000012; padding: 2px 6px; border-radius: 6px; }
+    canvas { max-width:100%; }
+    @media (prefers-color-scheme: dark) {
+      body, .box, input, textarea, select, .card { background:#0b0c0e; color:#f6f7f9; border-color:#ffffff22; }
+      .kbd{ background:#ffffff14; }
+    }
   </style>
+  <!-- Charts (solo para el panel de estadísticas) -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js" integrity="sha384-FYjNQGmJKy1Gm3QKx6C8QfEChlLzCy0z2R7nbm4Q2k5s3sLQO2T5k1dO3GqX4wqZ" crossorigin="anonymous"></script>
 </head>
 <body>
-  <div class="wrap">
-    <div class="card">
-      <h1>Panel de notificaciones (Admin)</h1>
-      <div class="toolbar" style="margin:8px 0 12px">
-        <span class="muted">Backend:</span>
-        <input id="api" placeholder="https://jesus-backend-production-1098.up.railway.app" />
-        <span class="muted">X-Admin-Key:</span>
-        <input id="admkey" placeholder="clave secreta" />
-        <button id="saveKey" class="secondary">Guardar clave</button>
+  <h1>Panel Administrador — Notificaciones & Estadísticas</h1>
+
+  <!-- =================== Ajustes de conexión =================== -->
+  <div class="box stack">
+    <h2>Conexión</h2>
+    <div class="row">
+      <div>
+        <label>Backend Base URL</label>
+        <input id="baseUrl" type="url" placeholder="https://jesus-backend-production-1098.up.railway.app" />
+        <div class="muted">Si lo dejas vacío, se usa el mismo origen (<span id="hintOrigin"></span>).</div>
       </div>
-
-      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
-        <button id="tabSingle">A usuarios específicos</button>
-        <button id="tabBroadcast" class="secondary">Broadcast</button>
+      <div>
+        <label>Admin Key (para Broadcast/Stats protegidos)</label>
+        <input id="adminKey" type="text" placeholder="ADMIN_PUSH_KEY" />
       </div>
-
-      <!-- SINGLE -->
-      <section id="single">
-        <h2>Destino</h2>
-        <div class="row">
-          <div>
-            <label class="muted">Emails (coma separados)</label>
-            <input id="emails" placeholder="usuario@dominio.com, otro@dominio.com" />
-          </div>
-          <div>
-            <label class="muted">User IDs (coma separados, opcional)</label>
-            <input id="userIds" placeholder="1,2,3" />
-          </div>
-        </div>
-        <div class="row" style="margin-top:8px">
-          <div>
-            <label class="muted">Plataforma (opcional)</label>
-            <select id="platform">
-              <option value="">(todas)</option>
-              <option value="web">web</option>
-              <option value="android">android</option>
-              <option value="ios">ios</option>
-            </select>
-          </div>
-          <div>
-            <label class="muted">device_id (opcional)</label>
-            <input id="deviceId" placeholder="ANDROID_CHROME_XXXXXX / WEB_DESKTOP_XXXXXX" />
-          </div>
-        </div>
-        <div style="margin-top:8px">
-          <label class="muted">fcm_token (opcional, envío directo a token)</label>
-          <input id="fcmToken" placeholder="e.g. d0KOhDFI..." />
-        </div>
-
-        <h2>Mensaje</h2>
-        <div class="row">
-          <div>
-            <label class="muted">Título</label>
-            <input id="title" value="Aviso" />
-          </div>
-          <div>
-            <label class="muted">URL (data.action=open_app)</label>
-            <input id="url" value="/" />
-          </div>
-        </div>
-        <div style="margin-top:8px">
-          <label class="muted">Cuerpo</label>
-          <textarea id="body">Tenemos novedades para ti 🙌</textarea>
-        </div>
-        <label class="pill" style="margin:8px 0 12px">
-          <input type="checkbox" id="webDataOnly" checked />
-          <span class="muted">Web (incluye Android PWA) como <b>data-only</b> (recomendado)</span>
-        </label>
-
-        <div class="toolbar">
-          <button id="btnSendSingle">Enviar a esos usuarios</button>
-          <button id="btnFillMe" class="secondary">Rellenar con mi email detectado</button>
-          <span class="tag">Consejo: usa plataforma=<b>web</b> para Android PWA</span>
-        </div>
-      </section>
-
-      <!-- BROADCAST -->
-      <section id="broadcast" style="display:none">
-        <h2>Segmento</h2>
-        <div class="row">
-          <div>
-            <label class="muted">Plataforma</label>
-            <select id="bcPlatform">
-              <option value="">(todas)</option>
-              <option value="web" selected>web</option>
-              <option value="android">android</option>
-              <option value="ios">ios</option>
-            </select>
-          </div>
-          <div>
-            <label class="muted">lastSeenDays</label>
-            <input id="lastSeenDays" type="number" min="1" value="30" />
-          </div>
-        </div>
-        <div class="row" style="margin-top:8px">
-          <div>
-            <label class="pill">
-              <input type="checkbox" id="groupByUser" checked />
-              <span class="muted">1 device por usuario</span>
-            </label>
-          </div>
-          <div class="row">
-            <div>
-              <label class="muted">preferPrefix</label>
-              <input id="preferPrefix" value="ANDROID_CHROME" />
-            </div>
-            <div>
-              <label class="muted">limit</label>
-              <input id="limit" type="number" min="1" value="500" />
-            </div>
-          </div>
-        </div>
-
-        <h2>Mensaje</h2>
-        <div class="row">
-          <div>
-            <label class="muted">Título</label>
-            <input id="bcTitle" value="Aviso" />
-          </div>
-          <div>
-            <label class="muted">URL (data.action=open_app)</label>
-            <input id="bcUrl" value="/" />
-          </div>
-        </div>
-        <div style="margin-top:8px">
-          <label class="muted">Cuerpo</label>
-          <textarea id="bcBody">Tenemos novedades para ti 🙌</textarea>
-        </div>
-        <label class="pill" style="margin:8px 0 12px">
-          <input type="checkbox" id="bcWebDataOnly" checked />
-          <span class="muted">Web como <b>data-only</b> (recomendado)</span>
-        </label>
-
-        <div class="toolbar">
-          <button id="btnSendBroadcast">Enviar broadcast</button>
-        </div>
-      </section>
-
-      <h2>Log</h2>
-      <div id="log" class="log"></div>
+    </div>
+    <div class="row">
+      <div>
+        <button id="btnSaveCfg">Guardar</button>
+        <span class="muted">Se guarda en <span class="kbd">localStorage</span>.</span>
+      </div>
     </div>
   </div>
 
-<script>
-(function(){
-  const $ = (id)=>document.getElementById(id);
-  const log = (v)=>{
-    const pre = typeof v==='string' ? v : JSON.stringify(v,null,2);
-    $('log').textContent += ( $('log').textContent ? "\n" : "" ) + pre;
-  };
-  const clearLog = ()=>{ $('log').textContent=''; };
+  <!-- =================== Envío dirigido =================== -->
+  <div class="box stack">
+    <h2>Enviar dirigido (usuario/dispositivo)</h2>
+    <div class="row">
+      <div>
+        <label>Email</label>
+        <input id="tEmail" type="text" placeholder="usuario@dominio.com" />
+      </div>
+      <div>
+        <label>Platform</label>
+        <select id="tPlatform">
+          <option value="">(cualquiera)</option>
+          <option value="web" selected>web</option>
+          <option value="android">android</option>
+          <option value="ios">ios</option>
+        </select>
+      </div>
+      <div>
+        <label>Device ID (opcional)</label>
+        <input id="tDeviceId" type="text" placeholder="ANDROID_CHROME_XXXXXX / WEB_DESKTOP_XXXXXX" />
+      </div>
+      <div>
+        <label>FCM Token (opcional)</label>
+        <input id="tToken" type="text" placeholder="e.g. d0KOhD...:APA91..." />
+      </div>
+    </div>
 
-  // Persistencia
-  $('api').value = localStorage.getItem('admin_api') || 'https://jesus-backend-production-1098.up.railway.app';
-  $('admkey').value = localStorage.getItem('admin_key') || '';
-  $('saveKey').onclick = ()=>{
-    localStorage.setItem('admin_api', $('api').value.trim());
-    localStorage.setItem('admin_key', $('admkey').value.trim());
-    log('✅ Guardado');
-  };
+    <div class="row">
+      <div>
+        <label>Título</label>
+        <input id="tTitle" type="text" value="Ping" />
+      </div>
+      <div>
+        <label>Cuerpo</label>
+        <input id="tBody" type="text" value="Hola desde admin" />
+      </div>
+      <div>
+        <label>Data JSON</label>
+        <input id="tData" type="text" value='{"action":"open_app","url":"/"}' />
+      </div>
+      <div>
+        <label>webDataOnly</label>
+        <select id="tWebDataOnly">
+          <option value="true" selected>true</option>
+          <option value="false">false</option>
+        </select>
+      </div>
+    </div>
 
-  // Tabs
-  $('tabSingle').onclick = ()=>{
-    $('single').style.display='block';
-    $('broadcast').style.display='none';
-    $('tabSingle').classList.remove('secondary');
-    $('tabBroadcast').classList.add('secondary');
-  };
-  $('tabBroadcast').onclick = ()=>{
-    $('single').style.display='none';
-    $('broadcast').style.display='block';
-    $('tabBroadcast').classList.remove('secondary');
-    $('tabSingle').classList.add('secondary');
-  };
+    <div class="row">
+      <div>
+        <button id="btnSendTarget">Enviar dirigido</button>
+      </div>
+      <div>
+        <div id="tResult" class="muted"></div>
+      </div>
+    </div>
+  </div>
 
-  // Util
-  function resolveEmail(){
-    const w = window;
-    return (w.__APP_EMAIL || localStorage.getItem('user_email') || 'info@movilive.com').toLowerCase();
-  }
-  $('btnFillMe').onclick = ()=>{
-    $('emails').value = resolveEmail();
-  };
+  <!-- =================== Broadcast =================== -->
+  <div class="box stack">
+    <h2>Broadcast (campaña / aviso masivo)</h2>
+    <div class="row">
+      <div>
+        <label>Título</label>
+        <input id="bTitle" type="text" value="Notificación" />
+      </div>
+      <div>
+        <label>Cuerpo</label>
+        <input id="bBody" type="text" value="Tienes un mensaje." />
+      </div>
+      <div>
+        <label>Data JSON</label>
+        <input id="bData" type="text" value='{"action":"open_app","url":"/"}' />
+      </div>
+      <div>
+        <label>Platform</label>
+        <select id="bPlatform">
+          <option value="">(todas)</option>
+          <option value="web" selected>web</option>
+          <option value="android">android</option>
+          <option value="ios">ios</option>
+        </select>
+      </div>
+    </div>
 
-  // Fetch helper
-  async function post(path, payload, alsoPutInBody=false){
-    const api = $('api').value.trim().replace(/\/+$/,'');
-    const key = $('admkey').value.trim();
-    if(!api){ throw new Error('missing_api');}
-    if(!key){ throw new Error('missing_admin_key');}
-    const headers = { 'Content-Type':'application/json; charset=utf-8', 'X-Admin-Key': key };
-    const body = alsoPutInBody ? JSON.stringify(Object.assign({ admin_key:key }, payload)) : JSON.stringify(payload);
-    const r = await fetch(api+path, { method:'POST', headers, body });
-    const j = await r.json().catch(()=>({}));
-    if(!r.ok || j?.ok===false){
-      const err = j?.error || ('http_'+r.status);
-      throw Object.assign(new Error(err), { response:j });
+    <div class="row">
+      <div>
+        <label>Últimos N días activos</label>
+        <input id="bDays" type="number" min="1" value="30" />
+      </div>
+      <div>
+        <label>Agrupar por usuario</label>
+        <select id="bGroup">
+          <option value="true" selected>true (1 device por usuario)</option>
+          <option value="false">false (todos los devices)</option>
+        </select>
+      </div>
+      <div>
+        <label>Preferir device_id con prefijo</label>
+        <input id="bPrefix" type="text" value="ANDROID_CHROME" />
+      </div>
+      <div>
+        <label>Límite</label>
+        <input id="bLimit" type="number" min="1" value="1000" />
+      </div>
+    </div>
+
+    <!-- >>> NUEVO: idioma en broadcast -->
+    <div class="row">
+      <div>
+        <label>Idioma (prefijo, p.ej. en / es / pt-BR)</label>
+        <input id="bLang" type="text" placeholder="en, es, pt-BR..." />
+      </div>
+      <div>
+        <label>lang_scope</label>
+        <select id="bLangScope">
+          <option value="either" selected>either (device.lang OR user.lang)</option>
+          <option value="device">device</option>
+          <option value="user">user</option>
+        </select>
+      </div>
+      <div>
+        <label>webDataOnly</label>
+        <select id="bWebDataOnly">
+          <option value="true" selected>true</option>
+          <option value="false">false</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="row">
+      <div>
+        <button id="btnBroadcast">Enviar Broadcast</button>
+      </div>
+      <div>
+        <div id="bResult" class="muted"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- =================== Estadísticas =================== -->
+  <div class="box stack">
+    <h2>Estadísticas</h2>
+    <div class="row">
+      <div>
+        <label>Últimos N días</label>
+        <input id="sDays" type="number" min="1" value="30" />
+      </div>
+      <div>
+        <button id="btnLoadStats">Actualizar estadísticas</button>
+      </div>
+      <div>
+        <span class="muted">Los endpoints de stats requieren <span class="kbd">admin_key</span>.</span>
+      </div>
+    </div>
+
+    <!-- KPIs -->
+    <div class="cards" id="kpiCards">
+      <div class="card"><h3>Usuarios</h3><div id="kUsers" class="big">—</div></div>
+      <div class="card"><h3>Dispositivos</h3><div id="kDevices" class="big">—</div></div>
+      <div class="card"><h3>DAU (ayer)</h3><div id="kDAU" class="big">—</div></div>
+      <div class="card"><h3>Mensajes</h3><div id="kMsgs" class="big">—</div></div>
+      <div class="card"><h3>Ingresos</h3><div id="kRevenue" class="big">—</div></div>
+      <div class="card"><h3>Pagos a proveedores</h3><div id="kPayouts" class="big">—</div></div>
+    </div>
+
+    <div class="grid-2">
+      <div class="card">
+        <h3>Dispositivos por idioma</h3>
+        <canvas id="chartLang"></canvas>
+        <div id="warnLang" class="footer-note"></div>
+      </div>
+      <div class="card">
+        <h3>Dispositivos por plataforma</h3>
+        <canvas id="chartPlat"></canvas>
+        <div id="warnPlat" class="footer-note"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Top preguntas</h3>
+      <div id="topQ"></div>
+      <div id="warnTopQ" class="footer-note"></div>
+    </div>
+  </div>
+
+  <script>
+    // ===== Helpers =====
+    const $ = (id) => document.getElementById(id);
+    const originBase = location.origin;
+    $("hintOrigin").textContent = originBase;
+
+    // Load saved config
+    (function loadCfg() {
+      $("baseUrl").value = localStorage.getItem("admin.baseUrl") || "";
+      $("adminKey").value = localStorage.getItem("admin.key") || "";
+      // defaults útiles
+      if (!$("baseUrl").value) $("baseUrl").placeholder = originBase;
+    })();
+
+    $("btnSaveCfg").onclick = () => {
+      localStorage.setItem("admin.baseUrl", $("baseUrl").value.trim());
+      localStorage.setItem("admin.key", $("adminKey").value.trim());
+      alert("Guardado.");
+    };
+
+    function getBase() {
+      const v = $("baseUrl").value.trim();
+      return v || originBase;
     }
-    return j;
-  }
+    function getAdminKey() {
+      return $("adminKey").value.trim() || null;
+    }
+    function parseJSONLoose(s, fallback=null) {
+      try { return s ? JSON.parse(s) : fallback; } catch { return fallback; }
+    }
+    async function fetchJSON(url, opts = {}) {
+      const r = await fetch(url, opts);
+      let j = null;
+      try { j = await r.json(); } catch {}
+      if (!r.ok) {
+        const err = (j && (j.error || j.detail)) ? (j.error + (j.detail ? (": " + j.detail) : "")) : ("HTTP " + r.status);
+        throw new Error(err);
+      }
+      return j;
+    }
 
-  // SINGLE
-  $('btnSendSingle').onclick = async ()=>{
-    clearLog();
-    try{
-      const emails = $('emails').value.split(',').map(s=>s.trim().toLowerCase()).filter(Boolean);
-      const userIds = $('userIds').value.split(',').map(s=>s.trim()).map(s=>s?Number(s):NaN).filter(n=>Number.isFinite(n));
-      const platform = $('platform').value || undefined;
-      const device_id = $('deviceId').value.trim() || undefined;
-      const fcm_token = $('fcmToken').value.trim() || undefined;
+    // ===== Envío dirigido =====
+    $("btnSendTarget").onclick = async () => {
+      const base = getBase();
+      const email = $("tEmail").value.trim();
+      const platform = $("tPlatform").value || null;
+      const device_id = $("tDeviceId").value.trim() || null;
+      const fcm_token = $("tToken").value.trim() || null;
+      const title = $("tTitle").value;
+      const body  = $("tBody").value;
+      const data  = parseJSONLoose($("tData").value, null);
+      const webDataOnly = $("tWebDataOnly").value === "true";
 
-      const payloadBase = {
-        title: $('title').value,
-        body: $('body').value,
-        data: { action:'open_app', url: $('url').value },
-        webDataOnly: $('webDataOnly').checked
-      };
-      if(platform) payloadBase.platform = platform;
-      if(device_id) payloadBase.device_id = device_id;
-      if(fcm_token) payloadBase.fcm_token = fcm_token;
+      $("tResult").textContent = "Enviando...";
+      try {
+        const payload = {
+          email: email || undefined,
+          platform: platform || undefined,
+          device_id: device_id || undefined,
+          fcm_token: fcm_token || undefined,
+          title, body, data, webDataOnly
+        };
+        const j = await fetchJSON(base + "/users/push/send-simple", {
+          method: "POST",
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+          body: JSON.stringify(payload),
+        });
+        $("tResult").innerHTML = '<span class="ok">OK</span> ' + JSON.stringify(j);
+      } catch (e) {
+        $("tResult").innerHTML = '<span class="err">Error: ' + e.message + '</span>';
+      }
+    };
 
-      let targets = 0, sent=0, failed=0;
+    // ===== Broadcast con idioma =====
+    $("btnBroadcast").onclick = async () => {
+      const base = getBase();
+      const adminKey = getAdminKey();
 
-      // por token directo (1 tiro)
-      if (fcm_token){
-        targets++;
-        log({ sending: { ...payloadBase, fcm_token: '***' }});
-        try{
-          const r = await post('/users/push/send-simple', payloadBase);
-          sent += r?.sent||0; failed += r?.failed||0;
-          log({ ok:true, r });
-        }catch(e){ failed++; log({ error: e.message, resp: e.response }); }
+      const title = $("bTitle").value;
+      const body  = $("bBody").value;
+      const data  = parseJSONLoose($("bData").value, null);
+
+      const platform = $("bPlatform").value.trim() || null;
+      const last_seen_days = parseInt($("bDays").value || "30", 10);
+      const group_by_user  = $("bGroup").value === "true";
+      const prefer_prefix  = $("bPrefix").value.trim() || "ANDROID_CHROME";
+      const limit          = parseInt($("bLimit").value || "1000", 10);
+      const webDataOnly    = $("bWebDataOnly").value === "true";
+
+      // NUEVO idioma
+      const lang       = ($("bLang").value || "").trim() || null; // prefijo: "en", "es", "pt-BR"
+      const lang_scope = $("bLangScope").value; // "either" | "device" | "user"
+
+      $("bResult").textContent = "Enviando broadcast...";
+      try {
+        const payload = {
+          admin_key: adminKey || undefined,
+          title, body, data,
+          platform, last_seen_days, group_by_user, prefer_prefix, limit,
+          webDataOnly,
+          // idioma
+          lang, lang_scope
+        };
+        const j = await fetchJSON(base + "/users/push/broadcast", {
+          method: "POST",
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+          body: JSON.stringify(payload),
+        });
+        $("bResult").innerHTML = '<span class="ok">OK</span> ' + JSON.stringify(j);
+      } catch (e) {
+        $("bResult").innerHTML = '<span class="err">Error: ' + e.message + '</span>';
+      }
+    };
+
+    // ===== Estadísticas =====
+    let chartLang = null, chartPlat = null;
+
+    function setKPI(id, v) { $(id).textContent = (v == null) ? "—" : v; }
+    function renderBarChart(canvasId, labels, values) {
+      const ctx = $(canvasId).getContext("2d");
+      if (canvasId === "chartLang" && chartLang) { chartLang.destroy(); }
+      if (canvasId === "chartPlat" && chartPlat) { chartPlat.destroy(); }
+      const c = new Chart(ctx, {
+        type: "bar",
+        data: { labels, datasets: [{ label: "Cantidad", data: values }] },
+        options: {
+          responsive: true,
+          plugins: { legend: { display: false } },
+          scales: { y: { beginAtZero: true, ticks: { precision:0 } } }
+        }
+      });
+      if (canvasId === "chartLang") chartLang = c;
+      if (canvasId === "chartPlat") chartPlat = c;
+    }
+
+    async function loadStats() {
+      const base = getBase();
+      const adminKey = getAdminKey();
+      const days = parseInt($("sDays").value || "30", 10);
+
+      // 1) Overview
+      try {
+        const j = await fetchJSON(`${base}/admin/stats/overview?days=${days}&admin_key=${encodeURIComponent(adminKey||"")}`);
+        setKPI("kUsers", j.users_total ?? "—");
+        setKPI("kDevices", j.devices_total ?? "—");
+        setKPI("kDAU", j.dau ?? "—");
+        setKPI("kMsgs", j.messages_total ?? "—");
+        setKPI("kRevenue", j.revenue_total ?? "—");
+        setKPI("kPayouts", j.provider_payouts_total ?? "—");
+      } catch (e) {
+        // endpoints aún no implementados
+        setKPI("kUsers", "—"); setKPI("kDevices", "—"); setKPI("kDAU","—");
+        setKPI("kMsgs","—"); setKPI("kRevenue","—"); setKPI("kPayouts","—");
+        console.warn("overview:", e.message);
       }
 
-      // por emails
-      for (const email of emails){
-        targets++;
-        const p = { ...payloadBase, email };
-        log({ sending: p });
-        try{
-          const r = await post('/users/push/send-simple', p);
-          sent += r?.sent||0; failed += r?.failed||0;
-          log({ ok:true, r });
-        }catch(e){ failed++; log({ error: e.message, resp: e.response }); }
+      // 2) Devices by language
+      try {
+        const j = await fetchJSON(`${base}/admin/stats/by-language?days=${days}&admin_key=${encodeURIComponent(adminKey||"")}`);
+        const labels = (j.items || []).map(x => x.lang || "(sin)");
+        const values = (j.items || []).map(x => x.devices || 0);
+        renderBarChart("chartLang", labels, values);
+        $("warnLang").textContent = "";
+      } catch (e) {
+        $("warnLang").textContent = "Endpoint /admin/stats/by-language no disponible.";
+        renderBarChart("chartLang", ["—"], [0]);
       }
 
-      // por user_ids
-      for (const uid of userIds){
-        targets++;
-        const p = { ...payloadBase, user_id: uid };
-        log({ sending: p });
-        try{
-          const r = await post('/users/push/send-simple', p);
-          sent += r?.sent||0; failed += r?.failed||0;
-          log({ ok:true, r });
-        }catch(e){ failed++; log({ error: e.message, resp: e.response }); }
+      // 3) Devices by platform
+      try {
+        const j = await fetchJSON(`${base}/admin/stats/by-platform?days=${days}&admin_key=${encodeURIComponent(adminKey||"")}`);
+        const labels = (j.items || []).map(x => x.platform || "(sin)");
+        const values = (j.items || []).map(x => x.devices || 0);
+        renderBarChart("chartPlat", labels, values);
+        $("warnPlat").textContent = "";
+      } catch (e) {
+        $("warnPlat").textContent = "Endpoint /admin/stats/by-platform no disponible.";
+        renderBarChart("chartPlat", ["—"], [0]);
       }
 
-      log(`\n==> FIN :: targeted=${targets} sent=${sent} failed=${failed}`);
-    }catch(e){
-      log({ error: e.message });
+      // 4) Top questions (texto más frecuente)
+      try {
+        const j = await fetchJSON(`${base}/admin/stats/top-questions?days=${days}&limit=10&admin_key=${encodeURIComponent(adminKey||"")}`);
+        const items = (j.items || []).map((x)=> `<div><span class="kbd">${(x.text||"").slice(0,120)}</span> — <b>${x.count}</b></div>`).join("");
+        $("topQ").innerHTML = items || "<div class='muted'>—</div>";
+        $("warnTopQ").textContent = "";
+      } catch (e) {
+        $("warnTopQ").textContent = "Endpoint /admin/stats/top-questions no disponible.";
+        $("topQ").innerHTML = "<div class='muted'>—</div>";
+      }
     }
-  };
 
-  // BROADCAST
-  $('btnSendBroadcast').onclick = async ()=>{
-    clearLog();
-    try{
-      const payload = {
-        title: $('bcTitle').value,
-        body: $('bcBody').value,
-        data: { action:'open_app', url: $('bcUrl').value },
-        webDataOnly: $('bcWebDataOnly').checked,
-        platform: $('bcPlatform').value || undefined,
-        last_seen_days: Number($('lastSeenDays').value) || 30,
-        group_by_user: $('groupByUser').checked,
-        prefer_prefix: $('preferPrefix').value || 'ANDROID_CHROME',
-        limit: Number($('limit').value) || 500
-      };
-      log({ sending: payload });
-      // también pone admin_key en body para compatibilidad con tu backend actual
-      const r = await post('/users/push/broadcast', payload, true);
-      log({ ok:true, r });
-    }catch(e){
-      log({ error: e.message, resp: e.response });
+    $("btnLoadStats").onclick = loadStats;
+
+    // auto-cargar al abrir si hay adminKey
+    if (getAdminKey()) {
+      loadStats().catch(() => {});
     }
-  };
-
-})();
-</script>
+  </script>
 </body>
 </html>
