@@ -2,7 +2,7 @@
 const express = require("express");
 const { query } = require("./db");
 
-// Servicios
+// Servicios (modulares)
 const {
   findUserByEmail,
   upsertUser,
@@ -16,6 +16,14 @@ const {
 } = require("../services/credit.service");
 
 const {
+  addMessage,
+  getHistory,
+  deleteById,
+  deleteMany,
+  deleteBefore,
+} = require("../services/message.service");
+
+const {
   ensureDevicesTable,
   registerDevice,
   listDevicesByUser,
@@ -26,7 +34,32 @@ const {
 const router = express.Router();
 const ADMIN_PUSH_KEY = process.env.ADMIN_PUSH_KEY || null;
 
-/* ====== CORS para TODO /users ====== */
+/* ====== util: helpers de devices ====== */
+function isDesktopId(deviceId = "") {
+  return /^WEB_DESKTOP/.test(deviceId) || deviceId === "WEB_BOLT";
+}
+function isAndroidWebId(deviceId = "") {
+  return /^ANDROID_CHROME/.test(deviceId);
+}
+function filterByPlatformFlavor(devs, plat /* 'web'|'android'|'ios'|null */) {
+  if (!Array.isArray(devs) || !devs.length) return [];
+  if (!plat) return devs;
+  const p = String(plat).toLowerCase();
+  if (p === "web") {
+    // SOLO desktop web
+    return devs.filter(d => isDesktopId(String(d.device_id || "")));
+  }
+  if (p === "android") {
+    return devs.filter(d => isAndroidWebId(String(d.device_id || "")));
+  }
+  if (p === "ios") {
+    // si en el futuro agregan device_id para iOS, filtrarlo aquí
+    return devs.filter(_d => false);
+  }
+  return devs;
+}
+
+/* ====== CORS para TODO /users (incluye preflight) ====== */
 router.use((req, res, next) => {
   const origin = req.headers.origin || "*";
   res.header("Access-Control-Allow-Origin", origin);
@@ -34,17 +67,20 @@ router.use((req, res, next) => {
   res.header("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
   res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-User-Email, X-Admin-Key");
   res.header("Access-Control-Max-Age", "600");
-  if (req.method === "OPTIONS") return res.status(204).end();
+
+  if (req.method === "OPTIONS") {
+    return res.status(204).end();
+  }
   next();
 });
 
-/* ====== JSON UTF-8 ====== */
+/* ====== Fuerza respuestas JSON en UTF-8 para TODO este router ====== */
 router.use((req, res, next) => {
   res.set("Content-Type", "application/json; charset=utf-8");
   next();
 });
 
-/* ====== Admin simple (X-Admin-Key) ====== */
+/* ====== Middleware simple de Admin (Header: X-Admin-Key) ====== */
 function requireAdmin(req, res, next) {
   const key = (req.get("x-admin-key") || "").toString();
   if (!ADMIN_PUSH_KEY || key !== ADMIN_PUSH_KEY) {
@@ -151,7 +187,7 @@ router.post("/credit/spend", async (req, res) => {
   }
 });
 
-/* ============== Mensajes ============== */
+/* ============== Mensajes (90 días calendario) ============== */
 router.post("/message/add", async (req, res) => {
   try {
     const {
@@ -327,10 +363,9 @@ router.get("/push/devices", async (req, res) => {
     });
 
     const plat = platform ? String(platform).trim().toLowerCase() : null;
-    const devs = await listDevicesByUser({
-      uid,
-      platform: plat || null,
-    });
+    let devs = await listDevicesByUser({ uid, platform: plat || null });
+    // aplica separación por sabor
+    devs = filterByPlatformFlavor(devs, plat || null);
 
     res.json({ ok: true, user_id: uid, devices: devs });
   } catch (e) {
@@ -415,7 +450,7 @@ router.post("/push/unregister", async (req, res) => {
   }
 });
 
-/* ============== SEND SIMPLE (por usuario) ============== */
+/* ============== Envío simple (con filtros) ============== */
 router.post("/push/send-simple", async (req, res) => {
   try {
     await ensureDevicesTable();
@@ -423,16 +458,16 @@ router.post("/push/send-simple", async (req, res) => {
     const {
       user_id = null,
       email = null,
-      title = undefined,
-      body = undefined,
+      title = null,
+      body = null,
       title_i18n = null,
       body_i18n = null,
       data = null,
-      platform = null,
-      lang = null,
-      device_id = null,
-      fcm_token = null,
-      webDataOnly = true,
+      platform = null,     // 'web'|'android'|'ios' (opcional)
+      lang = null,         // override opcional
+      device_id = null,    // filtrar un device específico
+      fcm_token = null,    // o filtrar por token exacto
+      webDataOnly = undefined,
     } = req.body || {};
 
     const uid = await ensureUserId({
@@ -447,6 +482,8 @@ router.post("/push/send-simple", async (req, res) => {
     const platFilter = plat && allowed.has(plat) ? plat : null;
 
     let devices = await listDevicesByUser({ uid, platform: platFilter });
+    // separación por sabor (desktop vs android web)
+    devices = filterByPlatformFlavor(devices, platFilter);
 
     if (device_id) {
       const did = String(device_id).trim();
@@ -461,17 +498,22 @@ router.post("/push/send-simple", async (req, res) => {
       return res.status(404).json({ ok: false, error: "no_devices_for_user" });
     }
 
-    // No inventamos defaults aquí; si no hay title/body pero sí i18n, sendSimpleToUser lo resuelve.
+    // decide webDataOnly por plataforma si no lo pasan
+    const finalWebDataOnly =
+      typeof webDataOnly === "boolean"
+        ? webDataOnly
+        : (platFilter === "web" ? true : false);
+
     const report = await sendSimpleToUser({
       user,
       devices,
-      title: typeof title !== "undefined" ? title : null,
-      body : typeof body  !== "undefined" ? body  : null,
+      title: title || null,
+      body: body || null,
       title_i18n: title_i18n || null,
-      body_i18n : body_i18n  || null,
+      body_i18n: body_i18n || null,
       data: data || null,
       overrideLang: lang || null,
-      webDataOnly: !!webDataOnly,
+      webDataOnly: finalWebDataOnly,
     });
 
     res.json({ ok: true, user_id: uid, targeted: devices.length, ...report });
@@ -480,7 +522,7 @@ router.post("/push/send-simple", async (req, res) => {
   }
 });
 
-/* ========= ADMIN: SEND A 1+ USUARIOS ========= */
+/* ========= ENVÍO ADMIN A 1+ USUARIOS ========= */
 router.post("/push/admin-send", requireAdmin, async (req, res) => {
   try {
     await ensureDevicesTable();
@@ -490,22 +532,15 @@ router.post("/push/admin-send", requireAdmin, async (req, res) => {
       platform = null,
       device_id = null,
       fcm_token = null,
-      title = undefined,
-      body = undefined,
+      title = null,
+      body = null,
       title_i18n = null,
       body_i18n = null,
       data = null,
-      webDataOnly = true,
+      webDataOnly = undefined,
     } = req.body || {};
 
-    // Exigir que venga title/body o i18n
-    const hasDirect = typeof title !== "undefined" && typeof body !== "undefined";
-    const hasI18n   = !!(title_i18n || body_i18n);
-    if (!hasDirect && !hasI18n) {
-      return res.status(400).json({ ok: false, error: "title/body_or_i18n_required" });
-    }
-
-    // Resolver lista de usuarios / token directo
+    // Resolver lista de usuarios
     let users = [];
     if (Array.isArray(user_ids) && user_ids.length) {
       const ids = user_ids.filter((x) => Number.isFinite(+x)).map((x) => +x);
@@ -516,19 +551,13 @@ router.post("/push/admin-send", requireAdmin, async (req, res) => {
       if (!norm.length) return res.status(400).json({ ok: false, error: "bad_emails" });
       users = await query(`SELECT id, lang FROM users WHERE email = ANY($1)`, [norm]);
     } else if (fcm_token) {
-      const devices = [{
-        user_id: null, id: null,
-        platform: platform || "web",
-        device_id: device_id || null,
-        fcm_token: String(fcm_token),
-        lang: "es"
-      }];
+      // Envío directo por token (sin usuarios)
+      const devices = [{ user_id: null, id: null, platform: platform || "web", device_id: device_id || null, fcm_token: String(fcm_token), lang: "es" }];
+      const finalWebDataOnly = (String(platform||"").toLowerCase()==="web");
       const report = await sendSimpleToUser({
         user: {}, devices,
-        title: hasDirect ? title : null,
-        body : hasDirect ? body  : null,
-        title_i18n, body_i18n, data,
-        overrideLang: null, webDataOnly: !!webDataOnly,
+        title, body, title_i18n, body_i18n, data,
+        overrideLang: null, webDataOnly: typeof webDataOnly==="boolean"? webDataOnly : finalWebDataOnly,
       });
       return res.json({ ok: true, targeted: devices.length, ...report });
     } else {
@@ -544,6 +573,7 @@ router.post("/push/admin-send", requireAdmin, async (req, res) => {
     let targetedDevices = [];
     for (const u of users) {
       let devs = await listDevicesByUser({ uid: u.id, platform: platFilter });
+      devs = filterByPlatformFlavor(devs, platFilter);
       if (device_id) devs = devs.filter(d => String(d.device_id || "") === String(device_id));
       if (fcm_token) devs = devs.filter(d => String(d.fcm_token) === String(fcm_token));
       if (devs.length) targetedDevices.push({ user: u, devices: devs });
@@ -555,15 +585,18 @@ router.post("/push/admin-send", requireAdmin, async (req, res) => {
 
     let sent = 0, failed = 0, targeted = 0;
     const summary = [];
+
     for (const td of targetedDevices) {
+      const finalWebDataOnly =
+        typeof webDataOnly === "boolean"
+          ? webDataOnly
+          : (platFilter === "web" ? true : false);
       const r = await sendSimpleToUser({
         user: td.user,
         devices: td.devices,
-        title: hasDirect ? title : null,
-        body : hasDirect ? body  : null,
-        title_i18n, body_i18n, data,
+        title, body, title_i18n, body_i18n, data,
         overrideLang: null,
-        webDataOnly: !!webDataOnly,
+        webDataOnly: finalWebDataOnly,
       });
       sent   += r.sent;
       failed += r.failed;
@@ -577,32 +610,26 @@ router.post("/push/admin-send", requireAdmin, async (req, res) => {
   }
 });
 
-/* ========= ADMIN: BROADCAST ========= */
+/* ========= BROADCAST ADMIN ========= */
 router.post("/push/admin-broadcast", requireAdmin, async (req, res) => {
   try {
     await ensureDevicesTable();
 
     const {
-      platform = null,
+      platform = null,       // "web" | "android" | "ios" | null
       lastSeenDays = 30,
       groupByUser = true,
       preferPrefix = "ANDROID_CHROME",
       limit = 500,
-      title = undefined,
-      body  = undefined,
+      title = null,
+      body = null,
       title_i18n = null,
-      body_i18n  = null,
+      body_i18n = null,
       data = null,
-      webDataOnly = true,
+      webDataOnly = undefined,
     } = req.body || {};
 
-    const hasDirect = typeof title !== "undefined" && typeof body !== "undefined";
-    const hasI18n   = !!(title_i18n || body_i18n);
-    if (!hasDirect && !hasI18n) {
-      return res.status(400).json({ ok: false, error: "title/body_or_i18n_required" });
-    }
-
-    const devs = await listDevicesForBroadcast({
+    const devsRaw = await listDevicesForBroadcast({
       platform: platform ? String(platform).trim().toLowerCase() : null,
       lastSeenDays: Number.isFinite(+lastSeenDays) ? +lastSeenDays : 30,
       groupByUser: !!groupByUser,
@@ -610,10 +637,14 @@ router.post("/push/admin-broadcast", requireAdmin, async (req, res) => {
       limit: Math.min(Math.max(parseInt(limit, 10) || 500, 1), 10000),
     });
 
+    // Filtro de “sabor” por device_id (clave para separar web desktop vs android web)
+    const devs = filterByPlatformFlavor(devsRaw, platform ? String(platform).toLowerCase() : null);
+
     if (!devs || !devs.length) {
       return res.status(404).json({ ok: false, error: "no_devices_for_broadcast" });
     }
 
+    // Traer langs si agrupa
     let usersById = {};
     if (groupByUser) {
       const ids = [...new Set(devs.map(d => d.user_id).filter(Boolean))];
@@ -634,27 +665,33 @@ router.post("/push/admin-broadcast", requireAdmin, async (req, res) => {
       }
       for (const [uid, arr] of map.entries()) {
         const user = usersById[uid] || {};
+        const finalWebDataOnly =
+          typeof webDataOnly === "boolean"
+            ? webDataOnly
+            : (String(platform||"").toLowerCase() === "web" ? true : false);
+
         const r = await sendSimpleToUser({
           user,
           devices: arr,
-          title: hasDirect ? title : null,
-          body : hasDirect ? body  : null,
-          title_i18n, body_i18n, data,
+          title, body, title_i18n, body_i18n, data,
           overrideLang: null,
-          webDataOnly: !!webDataOnly,
+          webDataOnly: finalWebDataOnly,
         });
         sent += r.sent; failed += r.failed;
         results.push({ user_id: uid, sent: r.sent, failed: r.failed, results: r.results });
       }
     } else {
+      const finalWebDataOnly =
+        typeof webDataOnly === "boolean"
+          ? webDataOnly
+          : (String(platform||"").toLowerCase() === "web" ? true : false);
+
       const r = await sendSimpleToUser({
         user: {},
         devices: devs,
-        title: hasDirect ? title : null,
-        body : hasDirect ? body  : null,
-        title_i18n, body_i18n, data,
+        title, body, title_i18n, body_i18n, data,
         overrideLang: null,
-        webDataOnly: !!webDataOnly,
+        webDataOnly: finalWebDataOnly,
       });
       sent = r.sent; failed = r.failed;
       results.push(...r.results);
@@ -670,15 +707,17 @@ router.post("/push/admin-broadcast", requireAdmin, async (req, res) => {
 router.post("/push/broadcast", async (req, res) => {
   try {
     const headerKey = (req.get("x-admin-key") || "").toString();
-    const bodyKey   = (req.body?.admin_key || "").toString();
-    const authed    = ADMIN_PUSH_KEY && (headerKey === ADMIN_PUSH_KEY || bodyKey === ADMIN_PUSH_KEY);
-    if (!authed) return res.status(403).json({ ok: false, error: "forbidden" });
+    const bodyKey = (req.body?.admin_key || "").toString();
+    const authed = ADMIN_PUSH_KEY && (headerKey === ADMIN_PUSH_KEY || bodyKey === ADMIN_PUSH_KEY);
+    if (!authed) {
+      return res.status(403).json({ ok: false, error: "forbidden" });
+    }
 
     await ensureDevicesTable();
 
     const {
-      title = undefined,
-      body  = undefined,
+      title = "Notificación",
+      body  = "Tienes un mensaje.",
       data  = null,
 
       platform       = null,
@@ -686,15 +725,10 @@ router.post("/push/broadcast", async (req, res) => {
       group_by_user  = true,
       prefer_prefix  = "ANDROID_CHROME",
       limit          = 1000,
-      webDataOnly    = true,
+      webDataOnly    = undefined,
     } = req.body || {};
 
-    // 🚫 sin defaults: si no hay title/body → 400
-    if (typeof title === "undefined" || typeof body === "undefined") {
-      return res.status(400).json({ ok: false, error: "title_and_body_required" });
-    }
-
-    const devices = await listDevicesForBroadcast({
+    const devsRaw = await listDevicesForBroadcast({
       platform: platform ? String(platform).trim().toLowerCase() : null,
       lastSeenDays: Number.isFinite(+last_seen_days) ? +last_seen_days : 30,
       groupByUser: !!group_by_user,
@@ -702,12 +736,14 @@ router.post("/push/broadcast", async (req, res) => {
       limit: Math.min(Math.max(parseInt(limit, 10) || 1000, 1), 10000),
     });
 
-    if (!devices.length) {
+    const devs = filterByPlatformFlavor(devsRaw, platform ? String(platform).toLowerCase() : null);
+
+    if (!devs.length) {
       return res.json({ ok: true, targeted: 0, sent: 0, failed: 0, results: [] });
     }
 
-    const userIds = [...new Set(devices.map(d => d.user_id))];
-    const users   = await query(`SELECT id, lang FROM users WHERE id = ANY($1)`, [userIds]);
+    const userIds = [...new Set(devs.map(d => d.user_id))];
+    const users = await query(`SELECT id, lang FROM users WHERE id = ANY($1)`, [userIds]);
     const userMap = new Map(users.map(u => [u.id, u]));
 
     let sent = 0, failed = 0;
@@ -715,18 +751,23 @@ router.post("/push/broadcast", async (req, res) => {
 
     for (const uid of userIds) {
       const user = userMap.get(uid) || { id: uid, lang: 'es' };
-      const devs = devices.filter(d => d.user_id === uid);
+      const perUser = devs.filter(d => d.user_id === uid);
+
+      const finalWebDataOnly =
+        typeof webDataOnly === "boolean"
+          ? webDataOnly
+          : (String(platform||"").toLowerCase() === "web" ? true : false);
 
       const report = await sendSimpleToUser({
         user,
-        devices: devs,
-        title: String(title || ""),
-        body : String(body  || ""),
+        devices: perUser,
+        title,
+        body,
         data,
         overrideLang: null,
-        webDataOnly: !!webDataOnly,
+        webDataOnly: finalWebDataOnly,
         title_i18n: null,
-        body_i18n : null,
+        body_i18n: null,
       });
 
       sent   += report.sent;
@@ -739,7 +780,7 @@ router.post("/push/broadcast", async (req, res) => {
       }
     }
 
-    return res.json({ ok: true, targeted: devices.length, sent, failed, sample });
+    return res.json({ ok: true, targeted: devs.length, sent, failed, sample });
   } catch (e) {
     return res.status(500).json({ ok: false, error: "broadcast_failed", detail: e.message || String(e) });
   }
