@@ -40,7 +40,8 @@ async function sendToFcmV1({ token, title, body, data, webDataOnly }) {
     const accessToken = await getAccessToken();
     const url = `https://fcm.googleapis.com/v1/projects/${FB_PROJECT_ID}/messages:send`;
 
-    const message = { token, data: normalizeData(data) };
+    const message = { token };
+    if (data) message.data = normalizeData(data);
 
     if (!webDataOnly) {
       message.notification = {
@@ -192,7 +193,7 @@ async function registerDevice({
                  lang = COALESCE($4, lang),
                  tz_offset_minutes = COALESCE($5, tz_offset_minutes),
                  app_version = COALESCE($6, app_version),
-                 os_version = COCOALESCE($7, os_version),
+                 os_version = COALESCE($7, os_version),
                  model = COALESCE($8, model),
                  last_seen = NOW()
            WHERE user_id = $1
@@ -307,8 +308,8 @@ function pickI18n(dict, lang) {
   const direct = dict[lang];
   if (direct !== undefined && direct !== null) return direct;
   const base = lang.split("-")[0];
-  const bval = dict[base];
-  if (bval !== undefined && bval !== null) return bval;
+  const baseVal = dict[base];
+  if (baseVal !== undefined && baseVal !== null) return baseVal;
   return null;
 }
 
@@ -321,18 +322,24 @@ async function sendSimpleToUser({
 
   for (const d of devices) {
     const lang = (overrideLang || d.lang || (user && user.lang) || "es").slice(0, 5).toLowerCase();
-    const resolvedTitle = (title !== undefined && title !== null) ? title : pickI18n(title_i18n, lang);
-    const resolvedBody  = (body  !== undefined && body  !== null)  ? body  : pickI18n(body_i18n, lang);
+    let resolvedTitle = (title !== undefined && title !== null) ? String(title) : pickI18n(title_i18n, lang);
+    let resolvedBody  = (body  !== undefined && body  !== null)  ? String(body)  : pickI18n(body_i18n, lang);
+    if (resolvedTitle === null || resolvedTitle === undefined) resolvedTitle = "";
+    if (resolvedBody  === null || resolvedBody  === undefined) resolvedBody  = "";
 
     const plat = String(d.platform || "").toLowerCase();
     const isWeb = (plat === "web");
     const isAndroid = (plat === "android");
 
-    // WEB: data-only + inyectar title/body dentro de data para que el SW muestre exactamente lo que mandó el admin
-    let payloadData = Object.assign({}, data || {}, { __sender: "admin" });
+    // Data a enviar (siempre agregamos una marca para diagnóstico)
+    const payloadData = Object.assign({}, data || {}, { __sender: "admin" });
+
+    // En WEB: mandamos también el texto dentro de data para que el SW/foreground usen EXACTO lo que vino del admin
     if (isWeb) {
-      if (resolvedTitle !== undefined && resolvedTitle !== null) payloadData.title = String(resolvedTitle);
-      if (resolvedBody  !== undefined && resolvedBody  !== null) payloadData.body  = String(resolvedBody);
+      payloadData.title   = resolvedTitle;
+      payloadData.body    = resolvedBody;
+      payloadData.__title = resolvedTitle;
+      payloadData.__body  = resolvedBody;
     }
 
     const r = await sendToFcmV1({
