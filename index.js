@@ -19,6 +19,18 @@ const app = express();
 app.use(cors({ origin: true })); // CORS permisivo
 app.use(bodyParser.json());
 
+// 👉 STATIC ADMIN PANEL (debe ir ANTES del middleware que fuerza JSON)
+app.use(express.static(path.join(__dirname, "public"), {
+  index: false,              // evita servir index por defecto
+  extensions: ["html"],      // permite /admin sin .html
+}));
+
+// Acceso directo al panel
+app.get(["/admin", "/admin.html"], (_req, res) => {
+  res.sendFile(path.join(__dirname, "public", "admin.html"));
+});
+
+
 // Forzar JSON UTF-8 en todas las respuestas (evita mojibake de acentos/¿?)
 app.use((req, res, next) => {
   res.set('Content-Type', 'application/json; charset=utf-8');
@@ -470,6 +482,7 @@ app.get("/api/heygen/config", (_req, res) => {
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
+
 
 
 
