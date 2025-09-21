@@ -5,21 +5,37 @@ const { listDevicesByUser, sendSimpleToUser } = require("../services/push.servic
 
 const router = express.Router();
 
-// ---------- util: admin key ----------
-const ADMIN_PUSH_KEY = (process.env.ADMIN_PUSH_KEY || "").toString();
+// ================= ADMIN KEY =================
+const RAW_ADMIN_KEY = process.env.ADMIN_PUSH_KEY || "";
 
-function readAdminKeyFromReq(req) {
-  // lee header, query y body; hace trim
-  const headerKey = ((req.get("x-admin-key") || "") + "").trim();
-  const queryKey  = ((req.query && req.query.admin_key) ? String(req.query.admin_key) : "").trim();
-  const bodyKey   = ((req.body && req.body.admin_key) ? String(req.body.admin_key) : "").trim();
-  return headerKey || queryKey || bodyKey || "";
+/**
+ * Normaliza una clave: trim y quita comillas envolventes accidentales.
+ */
+function normalizeKey(s) {
+  const x = String(s || "");
+  // trim espacios, tabs, \r, \n
+  let k = x.trim();
+  // quita comillas envolventes simples o dobles si las hay
+  if ((k.startsWith('"') && k.endsWith('"')) || (k.startsWith("'") && k.endsWith("'"))) {
+    k = k.slice(1, -1).trim();
+  }
+  return k;
+}
+
+const ADMIN_KEY = normalizeKey(RAW_ADMIN_KEY);
+
+function readProvidedKey(req) {
+  const headerKey = (req.get("x-admin-key") || "").toString();
+  const qsKey = (req.query && req.query.admin_key) ? String(req.query.admin_key) : "";
+  const bodyKey = (req.body && req.body.admin_key) ? String(req.body.admin_key) : "";
+  // prioridad: header > query > body
+  const provided = headerKey || qsKey || bodyKey || "";
+  return normalizeKey(provided);
 }
 
 function okAdmin(req) {
-  const provided = readAdminKeyFromReq(req);
-  // ambas con trim; comparación estricta
-  return ADMIN_PUSH_KEY.length > 0 && provided === ADMIN_PUSH_KEY.trim();
+  const provided = readProvidedKey(req);
+  return ADMIN_KEY && provided && provided === ADMIN_KEY;
 }
 
 // ---------- headers JSON ----------
@@ -28,15 +44,17 @@ router.use((req, res, next) => {
   next();
 });
 
-/**
- * GET /push/admin-ping?admin_key=XXXX
- * Verifica que la key matchee sin exponerla.
- */
+// ---------- diagnóstico: ping admin ----------
 router.get("/admin-ping", (req, res) => {
-  const provided = readAdminKeyFromReq(req);
-  const hasEnv   = ADMIN_PUSH_KEY.length > 0;
-  const match    = hasEnv && provided === ADMIN_PUSH_KEY.trim();
-  return res.json({ ok: match, has_env: hasEnv, provided_len: provided.length });
+  const provided = readProvidedKey(req);
+  res.json({
+    ok: okAdmin(req),
+    has_env: !!ADMIN_KEY,
+    env_len: ADMIN_KEY.length,
+    provided_len: provided.length,
+    // helpful: true/false (no exponemos la clave)
+    matches: ADMIN_KEY && provided ? (provided === ADMIN_KEY) : false,
+  });
 });
 
 /**
@@ -145,11 +163,8 @@ router.post("/admin-broadcast", async (req, res) => {
 });
 
 /**
- * LIMPIEZA de devices (expuesta para correr desde el navegador).
- * Requiere admin key. Acepta GET (con ?admin_key=) y POST (header X-Admin-Key o body.admin_key).
- *
- * GET/POST /push/cleanup-devices
- * Respuesta: { ok:true, steps:{...} }
+ * Limpieza de devices (expuesta). Requiere admin key.
+ * GET/POST /push/cleanup-devices?admin_key=XXX   o header X-Admin-Key
  */
 async function runCleanup() {
   // 1) duplicados exactos por token (deja el más nuevo)
