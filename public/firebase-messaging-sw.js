@@ -1,19 +1,19 @@
 // public/firebase-messaging-sw.js
-// v5 — data-only primero, fallback a 'push', auto-update del SW
+// v5 — data-only first, fallback a 'push', auto-update SW
 
 importScripts('https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js');
 importScripts('https://www.gstatic.com/firebasejs/10.12.2/firebase-messaging-compat.js');
 
-const SW_VERSION = "2025-09-21_06";
+// --- Forzar update del SW cada vez que cambie este valor ---
+const SW_VERSION = "2025-09-21_09"; // súbelo cuando quieras forzar otro update
 self.addEventListener('install', () => self.skipWaiting());
-self.addEventListener('activate', (evt) => evt.waitUntil(self.clients.claim()));
+self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
 
 firebase.initializeApp({
   apiKey: "AIzaSyCWIev2L18k_TugAAIDEYREwsfFn0chdpQ",
   authDomain: "jesus-e7711.firebaseapp.com",
   projectId: "jesus-e7711",
-  // (Messaging no usa el bucket, pero este es el formato estándar:)
-  storageBucket: "jesus-e7711.appspot.com",
+  storageBucket: "jesus-e7711.firebasestorage.app",
   messagingSenderId: "228736362294",
   appId: "1:228736362294:web:d34485861f9daccb9cf597",
   measurementId: "G-9QVKVW3YVD"
@@ -22,11 +22,12 @@ firebase.initializeApp({
 const messaging = firebase.messaging();
 
 /**
- * Handler Firebase — SOLO dibuja si el payload es "data-only".
- * Si llega payload.notification, dejamos que el navegador lo muestre (evita duplicados).
+ * BACKGROUND (Firebase) — pensado para payloads "data-only".
+ * Si viene payload.notification, dejamos que el navegador lo dibuje (evita duplicados).
  */
 messaging.onBackgroundMessage((payload) => {
-  if (payload && payload.notification) return; // evitar doble notificación
+  // Si el backend llegara a mandar "notification", no hacemos nada aquí
+  if (payload && payload.notification) return;
 
   const d = payload?.data || {};
   const title = d.__title || d.title || 'Notificación';
@@ -35,7 +36,7 @@ messaging.onBackgroundMessage((payload) => {
   const badge = d.badge   || '/badge-72.png';
   const tag   = d.tag     || 'general';
 
-  self.registration.showNotification(title, {
+  const options = {
     body,
     icon,
     badge,
@@ -46,19 +47,22 @@ messaging.onBackgroundMessage((payload) => {
       raw: d,
       swv: SW_VERSION,
     },
-  });
+  };
+
+  self.registration.showNotification(title, options);
 });
 
 /**
- * Fallback (evento 'push'): si por algún motivo el handler anterior no corre,
- * mostramos la notificación para payloads data-only.
+ * Fallback robusto (evento 'push'): si por algún motivo el handler anterior no corre,
+ * mostramos la notificación para payloads data-only que lleguen como push crudo.
+ * Nota: si el push trae "notification", dejamos que el navegador lo muestre (para no duplicar).
  */
 self.addEventListener('push', (event) => {
   if (!event.data) return;
   let raw = {};
   try { raw = event.data.json() || {}; } catch {}
 
-  if (raw && raw.notification) return; // si trae notification, que lo dibuje el navegador
+  if (raw && raw.notification) return; // evitar duplicados cuando FCM ya dibuja
 
   const d = raw?.data || raw || {};
   const title = d.__title || d.title || 'Notificación';
@@ -84,7 +88,7 @@ self.addEventListener('push', (event) => {
 });
 
 /**
- * Click en la notificación: enfocar/abrir la app y navegar a data.url (mismo origen).
+ * Click: enfocar o abrir la app y navegar a data.url (si es del mismo origen).
  */
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
@@ -101,6 +105,8 @@ self.addEventListener('notificationclick', (event) => {
       } catch {}
 
       const clientList = await clients.matchAll({ type: 'window', includeUncontrolled: true });
+
+      // Reutiliza una pestaña del mismo origen si existe
       for (const client of clientList) {
         try {
           const cu = new URL(client.url);
@@ -113,6 +119,8 @@ self.addEventListener('notificationclick', (event) => {
           }
         } catch {}
       }
+
+      // O abre una ventana nueva
       if (clients.openWindow) await clients.openWindow(targetUrl);
     } catch {
       if (clients.openWindow) await clients.openWindow('/');
