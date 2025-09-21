@@ -2,453 +2,210 @@
 <html lang="es">
 <head>
   <meta charset="utf-8" />
-  <title>Admin — Notificaciones & Estadísticas</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Push Admin</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    :root { color-scheme: light dark; }
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, 'Helvetica Neue', Arial, 'Noto Sans', 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji'; margin: 16px; }
-    h1 { margin: 0 0 12px; font-size: 20px; }
-    h2 { margin: 24px 0 8px; font-size: 18px; }
-    .row { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); align-items: end; }
-    .box { border: 1px solid #0003; border-radius: 10px; padding: 12px; background: #fff; }
-    .stack { display: grid; gap: 8px; }
-    label { display:block; font-size:12px; opacity: .8; margin-bottom: 4px; }
-    input[type="text"], input[type="number"], input[type="url"], textarea, select {
-      width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid #0003; background: #fff;
-      font-family: inherit; font-size: 14px;
-    }
-    textarea { min-height: 84px; }
-    button { padding: 10px 14px; border-radius: 999px; border: 0; background: #0d6efd; color: #fff; cursor: pointer; }
-    button:disabled { opacity:.6; cursor: default; }
-    .muted { opacity:.8; font-size: 12px; }
-    .ok { color: #137b13; }
-    .err { color: #b00020; white-space: pre-wrap; }
-    .grid-2 { display:grid; gap: 12px; grid-template-columns: 1fr 1fr; }
-    .cards { display:grid; gap:12px; grid-template-columns: repeat(auto-fit, minmax(160px,1fr)); }
-    .card { border:1px solid #0002; border-radius:12px; padding:12px; background:#fff; }
-    .card h3 { margin:0 0 6px; font-size:13px; opacity:.7; }
-    .big { font-size:24px; font-weight:600; }
-    .footer-note { margin-top: 8px; font-size: 12px; opacity: .8; }
-    .kbd { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; font-size: 12px; background: #00000012; padding: 2px 6px; border-radius: 6px; }
-    canvas { max-width:100%; }
-    @media (prefers-color-scheme: dark) {
-      body, .box, input, textarea, select, .card { background:#0b0c0e; color:#f6f7f9; border-color:#ffffff22; }
-      .kbd{ background:#ffffff14; }
-    }
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;padding:16px;max-width:800px;margin:0 auto;background:#111;color:#eee}
+    h1{font-size:20px;margin:0 0 12px}
+    fieldset{border:1px solid #333;border-radius:10px;margin:0 0 12px;padding:12px}
+    label{display:block;font-size:13px;margin:6px 0}
+    input[type="text"], textarea, select{width:100%;box-sizing:border-box;padding:8px;border-radius:8px;border:1px solid #333;background:#000;color:#eee}
+    textarea{min-height:90px;resize:vertical}
+    .row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+    .row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
+    button{background:#6d28d9;color:#fff;border:0;padding:10px 14px;border-radius:10px;cursor:pointer}
+    button:disabled{opacity:.5;cursor:default}
+    .muted{color:#aaa;font-size:12px}
+    pre{white-space:pre-wrap;background:#0a0a0a;border:1px solid #222;padding:10px;border-radius:10px}
+    .inline{display:inline-flex;gap:8px;align-items:center}
   </style>
-  <!-- Charts (solo para el panel de estadísticas) -->
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js" integrity="sha384-FYjNQGmJKy1Gm3QKx6C8QfEChlLzCy0z2R7nbm4Q2k5s3sLQO2T5k1dO3GqX4wqZ" crossorigin="anonymous"></script>
 </head>
 <body>
-  <h1>Panel Administrador — Notificaciones & Estadísticas</h1>
+  <h1>Push Admin</h1>
 
-  <!-- =================== Ajustes de conexión =================== -->
-  <div class="box stack">
-    <h2>Conexión</h2>
+  <fieldset>
+    <legend>Servidor</legend>
     <div class="row">
-      <div>
-        <label>Backend Base URL</label>
-        <input id="baseUrl" type="url" placeholder="https://jesus-backend-production-1098.up.railway.app" />
-        <div class="muted">Si lo dejas vacío, se usa el mismo origen (<span id="hintOrigin"></span>).</div>
-      </div>
-      <div>
-        <label>Admin Key (para Broadcast/Stats protegidos)</label>
-        <input id="adminKey" type="text" placeholder="ADMIN_PUSH_KEY" />
-      </div>
+      <label>Backend URL
+        <input id="base" type="text" value="https://jesus-backend-production-1098.up.railway.app" />
+      </label>
+      <label>X-Admin-Key
+        <input id="adm" type="text" placeholder="abc123" />
+      </label>
     </div>
+    <div class="muted">Asegurate de pegar la clave correcta (la misma que probaste con /users/push/diag-admin-key).</div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Mensaje</legend>
+    <label>Título
+      <input id="title" type="text" placeholder="Título del mensaje" />
+    </label>
+    <label>Texto
+      <textarea id="body" placeholder="Texto del mensaje"></textarea>
+    </label>
     <div class="row">
-      <div>
-        <button id="btnSaveCfg">Guardar</button>
-        <span class="muted">Se guarda en <span class="kbd">localStorage</span>.</span>
-      </div>
+      <label>URL (al hacer click)
+        <input id="url" type="text" placeholder="/ o https://…" value="/" />
+      </label>
+      <label>Idioma (opcional, override)
+        <input id="lang" type="text" placeholder="es, en, pt…" />
+      </label>
     </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Segmentación</legend>
+    <div class="row3">
+      <label>Plataforma
+        <select id="platform">
+          <option value="all">Todas</option>
+          <option value="web">Web</option>
+          <option value="android">Android</option>
+          <option value="ios">iOS</option>
+        </select>
+      </label>
+      <label>Última actividad (días)
+        <input id="last" type="text" value="30" />
+      </label>
+      <label>Límite de dispositivos
+        <input id="limit" type="text" value="500" />
+      </label>
+    </div>
+
+    <div class="row">
+      <label class="inline">
+        <input id="group" type="checkbox" checked />
+        Agrupar por usuario (1 device por usuario)
+      </label>
+      <label>Preferir prefijo (si agrupa)
+        <input id="prefer" type="text" value="ANDROID_CHROME" />
+      </label>
+    </div>
+
+    <div class="row">
+      <label>Emails específicos (opcional; coma-separado)
+        <input id="emails" type="text" placeholder="user@dominio.com, otro@dominio.com" />
+      </label>
+      <label class="inline">
+        <input id="onlyWebMode" type="checkbox" />
+        Forzar webDataOnly (solo útil si plataforma=web)
+      </label>
+    </div>
+  </fieldset>
+
+  <div class="row" style="align-items:center">
+    <button id="send">Enviar</button>
+    <div class="muted">Si plataforma=Web ⇒ se envían como <b>data-only</b>; Android/iOS ⇒ con <b>notification</b>.</div>
   </div>
 
-  <!-- =================== Envío dirigido =================== -->
-  <div class="box stack">
-    <h2>Enviar dirigido (usuario/dispositivo)</h2>
-    <div class="row">
-      <div>
-        <label>Email</label>
-        <input id="tEmail" type="text" placeholder="usuario@dominio.com" />
-      </div>
-      <div>
-        <label>Platform</label>
-        <select id="tPlatform">
-          <option value="">(cualquiera)</option>
-          <option value="web" selected>web</option>
-          <option value="android">android</option>
-          <option value="ios">ios</option>
-        </select>
-      </div>
-      <div>
-        <label>Device ID (opcional)</label>
-        <input id="tDeviceId" type="text" placeholder="ANDROID_CHROME_XXXXXX / WEB_DESKTOP_XXXXXX" />
-      </div>
-      <div>
-        <label>FCM Token (opcional)</label>
-        <input id="tToken" type="text" placeholder="e.g. d0KOhD...:APA91..." />
-      </div>
-    </div>
+  <h3>Respuesta</h3>
+  <pre id="out">{ }</pre>
 
-    <div class="row">
-      <div>
-        <label>Título</label>
-        <input id="tTitle" type="text" value="Ping" />
-      </div>
-      <div>
-        <label>Cuerpo</label>
-        <input id="tBody" type="text" value="Hola desde admin" />
-      </div>
-      <div>
-        <label>Data JSON</label>
-        <input id="tData" type="text" value='{"action":"open_app","url":"/"}' />
-      </div>
-      <div>
-        <label>webDataOnly</label>
-        <select id="tWebDataOnly">
-          <option value="true" selected>true</option>
-          <option value="false">false</option>
-        </select>
-      </div>
-    </div>
+<script>
+(function(){
+  const $ = (id) => document.getElementById(id);
+  const base = $("base");
+  const adm  = $("adm");
+  const title= $("title");
+  const body = $("body");
+  const url  = $("url");
+  const lang = $("lang");
+  const platform = $("platform");
+  const last = $("last");
+  const limit= $("limit");
+  const group= $("group");
+  const prefer=$("prefer");
+  const emails=$("emails");
+  const onlyWebMode=$("onlyWebMode");
+  const out  = $("out");
+  const btn  = $("send");
 
-    <div class="row">
-      <div>
-        <button id="btnSendTarget">Enviar dirigido</button>
-      </div>
-      <div>
-        <div id="tResult" class="muted"></div>
-      </div>
-    </div>
-  </div>
+  function log(o){ out.textContent = JSON.stringify(o, null, 2); }
 
-  <!-- =================== Broadcast =================== -->
-  <div class="box stack">
-    <h2>Broadcast (campaña / aviso masivo)</h2>
-    <div class="row">
-      <div>
-        <label>Título</label>
-        <input id="bTitle" type="text" value="Notificación" />
-      </div>
-      <div>
-        <label>Cuerpo</label>
-        <input id="bBody" type="text" value="Tienes un mensaje." />
-      </div>
-      <div>
-        <label>Data JSON</label>
-        <input id="bData" type="text" value='{"action":"open_app","url":"/"}' />
-      </div>
-      <div>
-        <label>Platform</label>
-        <select id="bPlatform">
-          <option value="">(todas)</option>
-          <option value="web" selected>web</option>
-          <option value="android">android</option>
-          <option value="ios">ios</option>
-        </select>
-      </div>
-    </div>
+  async function adminBroadcast(payload){
+    const r = await fetch(`${base.value.replace(/\/+$/,'')}/users/push/admin-broadcast`,{
+      method:"POST",
+      headers:{
+        "Content-Type":"application/json",
+        "X-Admin-Key": adm.value.trim()
+      },
+      body: JSON.stringify(payload)
+    });
+    const j = await r.json().catch(()=>({ok:false,error:"bad_json"}));
+    return j;
+  }
 
-    <div class="row">
-      <div>
-        <label>Últimos N días activos</label>
-        <input id="bDays" type="number" min="1" value="30" />
-      </div>
-      <div>
-        <label>Agrupar por usuario</label>
-        <select id="bGroup">
-          <option value="true" selected>true (1 device por usuario)</option>
-          <option value="false">false (todos los devices)</option>
-        </select>
-      </div>
-      <div>
-        <label>Preferir device_id con prefijo</label>
-        <input id="bPrefix" type="text" value="ANDROID_CHROME" />
-      </div>
-      <div>
-        <label>Límite</label>
-        <input id="bLimit" type="number" min="1" value="1000" />
-      </div>
-    </div>
+  async function adminSendToEmails(payload){
+    const r = await fetch(`${base.value.replace(/\/+$/,'')}/users/push/admin-send`,{
+      method:"POST",
+      headers:{
+        "Content-Type":"application/json",
+        "X-Admin-Key": adm.value.trim()
+      },
+      body: JSON.stringify(payload)
+    });
+    const j = await r.json().catch(()=>({ok:false,error:"bad_json"}));
+    return j;
+  }
 
-    <!-- >>> NUEVO: idioma en broadcast -->
-    <div class="row">
-      <div>
-        <label>Idioma (prefijo, p.ej. en / es / pt-BR)</label>
-        <input id="bLang" type="text" placeholder="en, es, pt-BR..." />
-      </div>
-      <div>
-        <label>lang_scope</label>
-        <select id="bLangScope">
-          <option value="either" selected>either (device.lang OR user.lang)</option>
-          <option value="device">device</option>
-          <option value="user">user</option>
-        </select>
-      </div>
-      <div>
-        <label>webDataOnly</label>
-        <select id="bWebDataOnly">
-          <option value="true" selected>true</option>
-          <option value="false">false</option>
-        </select>
-      </div>
-    </div>
+  btn.onclick = async () => {
+    btn.disabled = true; log({ sending:true });
 
-    <div class="row">
-      <div>
-        <button id="btnBroadcast">Enviar Broadcast</button>
-      </div>
-      <div>
-        <div id="bResult" class="muted"></div>
-      </div>
-    </div>
-  </div>
-
-  <!-- =================== Estadísticas =================== -->
-  <div class="box stack">
-    <h2>Estadísticas</h2>
-    <div class="row">
-      <div>
-        <label>Últimos N días</label>
-        <input id="sDays" type="number" min="1" value="30" />
-      </div>
-      <div>
-        <button id="btnLoadStats">Actualizar estadísticas</button>
-      </div>
-      <div>
-        <span class="muted">Los endpoints de stats requieren <span class="kbd">admin_key</span>.</span>
-      </div>
-    </div>
-
-    <!-- KPIs -->
-    <div class="cards" id="kpiCards">
-      <div class="card"><h3>Usuarios</h3><div id="kUsers" class="big">—</div></div>
-      <div class="card"><h3>Dispositivos</h3><div id="kDevices" class="big">—</div></div>
-      <div class="card"><h3>DAU (ayer)</h3><div id="kDAU" class="big">—</div></div>
-      <div class="card"><h3>Mensajes</h3><div id="kMsgs" class="big">—</div></div>
-      <div class="card"><h3>Ingresos</h3><div id="kRevenue" class="big">—</div></div>
-      <div class="card"><h3>Pagos a proveedores</h3><div id="kPayouts" class="big">—</div></div>
-    </div>
-
-    <div class="grid-2">
-      <div class="card">
-        <h3>Dispositivos por idioma</h3>
-        <canvas id="chartLang"></canvas>
-        <div id="warnLang" class="footer-note"></div>
-      </div>
-      <div class="card">
-        <h3>Dispositivos por plataforma</h3>
-        <canvas id="chartPlat"></canvas>
-        <div id="warnPlat" class="footer-note"></div>
-      </div>
-    </div>
-
-    <div class="card">
-      <h3>Top preguntas</h3>
-      <div id="topQ"></div>
-      <div id="warnTopQ" class="footer-note"></div>
-    </div>
-  </div>
-
-  <script>
-    // ===== Helpers =====
-    const $ = (id) => document.getElementById(id);
-    const originBase = location.origin;
-    $("hintOrigin").textContent = originBase;
-
-    // Load saved config
-    (function loadCfg() {
-      $("baseUrl").value = localStorage.getItem("admin.baseUrl") || "";
-      $("adminKey").value = localStorage.getItem("admin.key") || "";
-      // defaults útiles
-      if (!$("baseUrl").value) $("baseUrl").placeholder = originBase;
-    })();
-
-    $("btnSaveCfg").onclick = () => {
-      localStorage.setItem("admin.baseUrl", $("baseUrl").value.trim());
-      localStorage.setItem("admin.key", $("adminKey").value.trim());
-      alert("Guardado.");
+    const msg = {
+      title: title.value || "",
+      body:  body.value  || "",
+      data:  { url: (url.value || "/") }
     };
 
-    function getBase() {
-      const v = $("baseUrl").value.trim();
-      return v || originBase;
-    }
-    function getAdminKey() {
-      return $("adminKey").value.trim() || null;
-    }
-    function parseJSONLoose(s, fallback=null) {
-      try { return s ? JSON.parse(s) : fallback; } catch { return fallback; }
-    }
-    async function fetchJSON(url, opts = {}) {
-      const r = await fetch(url, opts);
-      let j = null;
-      try { j = await r.json(); } catch {}
-      if (!r.ok) {
-        const err = (j && (j.error || j.detail)) ? (j.error + (j.detail ? (": " + j.detail) : "")) : ("HTTP " + r.status);
-        throw new Error(err);
-      }
-      return j;
-    }
+    // ← plataforma seleccionada
+    const p = platform.value; // "all"|"web"|"android"|"ios"
 
-    // ===== Envío dirigido =====
-    $("btnSendTarget").onclick = async () => {
-      const base = getBase();
-      const email = $("tEmail").value.trim();
-      const platform = $("tPlatform").value || null;
-      const device_id = $("tDeviceId").value.trim() || null;
-      const fcm_token = $("tToken").value.trim() || null;
-      const title = $("tTitle").value;
-      const body  = $("tBody").value;
-      const data  = parseJSONLoose($("tData").value, null);
-      const webDataOnly = $("tWebDataOnly").value === "true";
+    // webDataOnly: SOLO para web
+    const webDataOnly = (p === "web") ? true : false;
+    // si tildaste el toggle, lo fuerza (útil para pruebas)
+    const webDataOnlyFinal = (p === "web") ? (onlyWebMode.checked ? true : webDataOnly) : false;
 
-      $("tResult").textContent = "Enviando...";
-      try {
-        const payload = {
-          email: email || undefined,
-          platform: platform || undefined,
-          device_id: device_id || undefined,
-          fcm_token: fcm_token || undefined,
-          title, body, data, webDataOnly
-        };
-        const j = await fetchJSON(base + "/users/push/send-simple", {
-          method: "POST",
-          headers: { "Content-Type": "application/json; charset=utf-8" },
-          body: JSON.stringify(payload),
+    // override idioma (opcional)
+    const langOverride = lang.value.trim() ? lang.value.trim() : null;
+
+    try{
+      let resp;
+      const emailsList = emails.value.split(",").map(x=>x.trim().toLowerCase()).filter(Boolean);
+
+      if (emailsList.length){
+        // Envío dirigido a emails (admin-send), respeta plataforma si se elige (y device_id/fcm_token si quisieras agregar)
+        resp = await adminSendToEmails({
+          emails: emailsList,
+          platform: (p === "all" ? null : p),
+          title: msg.title,
+          body:  msg.body,
+          data:  msg.data,
+          webDataOnly: webDataOnlyFinal,
         });
-        $("tResult").innerHTML = '<span class="ok">OK</span> ' + JSON.stringify(j);
-      } catch (e) {
-        $("tResult").innerHTML = '<span class="err">Error: ' + e.message + '</span>';
-      }
-    };
-
-    // ===== Broadcast con idioma =====
-    $("btnBroadcast").onclick = async () => {
-      const base = getBase();
-      const adminKey = getAdminKey();
-
-      const title = $("bTitle").value;
-      const body  = $("bBody").value;
-      const data  = parseJSONLoose($("bData").value, null);
-
-      const platform = $("bPlatform").value.trim() || null;
-      const last_seen_days = parseInt($("bDays").value || "30", 10);
-      const group_by_user  = $("bGroup").value === "true";
-      const prefer_prefix  = $("bPrefix").value.trim() || "ANDROID_CHROME";
-      const limit          = parseInt($("bLimit").value || "1000", 10);
-      const webDataOnly    = $("bWebDataOnly").value === "true";
-
-      // NUEVO idioma
-      const lang       = ($("bLang").value || "").trim() || null; // prefijo: "en", "es", "pt-BR"
-      const lang_scope = $("bLangScope").value; // "either" | "device" | "user"
-
-      $("bResult").textContent = "Enviando broadcast...";
-      try {
-        const payload = {
-          admin_key: adminKey || undefined,
-          title, body, data,
-          platform, last_seen_days, group_by_user, prefer_prefix, limit,
-          webDataOnly,
-          // idioma
-          lang, lang_scope
-        };
-        const j = await fetchJSON(base + "/users/push/broadcast", {
-          method: "POST",
-          headers: { "Content-Type": "application/json; charset=utf-8" },
-          body: JSON.stringify(payload),
+      } else {
+        // Broadcast segmentado (admin-broadcast)
+        resp = await adminBroadcast({
+          platform: (p === "all" ? null : p),
+          lastSeenDays: Number.isFinite(+last.value) ? +last.value : 30,
+          groupByUser: !!group.checked,
+          preferPrefix: prefer.value || "ANDROID_CHROME",
+          limit: Number.isFinite(+limit.value) ? +limit.value : 500,
+          title: msg.title,
+          body:  msg.body,
+          data:  msg.data,
+          webDataOnly: webDataOnlyFinal
         });
-        $("bResult").innerHTML = '<span class="ok">OK</span> ' + JSON.stringify(j);
-      } catch (e) {
-        $("bResult").innerHTML = '<span class="err">Error: ' + e.message + '</span>';
       }
-    };
 
-    // ===== Estadísticas =====
-    let chartLang = null, chartPlat = null;
-
-    function setKPI(id, v) { $(id).textContent = (v == null) ? "—" : v; }
-    function renderBarChart(canvasId, labels, values) {
-      const ctx = $(canvasId).getContext("2d");
-      if (canvasId === "chartLang" && chartLang) { chartLang.destroy(); }
-      if (canvasId === "chartPlat" && chartPlat) { chartPlat.destroy(); }
-      const c = new Chart(ctx, {
-        type: "bar",
-        data: { labels, datasets: [{ label: "Cantidad", data: values }] },
-        options: {
-          responsive: true,
-          plugins: { legend: { display: false } },
-          scales: { y: { beginAtZero: true, ticks: { precision:0 } } }
-        }
-      });
-      if (canvasId === "chartLang") chartLang = c;
-      if (canvasId === "chartPlat") chartPlat = c;
+      log(resp);
+    }catch(e){
+      log({ ok:false, error: e && e.message || String(e) });
+    }finally{
+      btn.disabled = false;
     }
-
-    async function loadStats() {
-      const base = getBase();
-      const adminKey = getAdminKey();
-      const days = parseInt($("sDays").value || "30", 10);
-
-      // 1) Overview
-      try {
-        const j = await fetchJSON(`${base}/admin/stats/overview?days=${days}&admin_key=${encodeURIComponent(adminKey||"")}`);
-        setKPI("kUsers", j.users_total ?? "—");
-        setKPI("kDevices", j.devices_total ?? "—");
-        setKPI("kDAU", j.dau ?? "—");
-        setKPI("kMsgs", j.messages_total ?? "—");
-        setKPI("kRevenue", j.revenue_total ?? "—");
-        setKPI("kPayouts", j.provider_payouts_total ?? "—");
-      } catch (e) {
-        // endpoints aún no implementados
-        setKPI("kUsers", "—"); setKPI("kDevices", "—"); setKPI("kDAU","—");
-        setKPI("kMsgs","—"); setKPI("kRevenue","—"); setKPI("kPayouts","—");
-        console.warn("overview:", e.message);
-      }
-
-      // 2) Devices by language
-      try {
-        const j = await fetchJSON(`${base}/admin/stats/by-language?days=${days}&admin_key=${encodeURIComponent(adminKey||"")}`);
-        const labels = (j.items || []).map(x => x.lang || "(sin)");
-        const values = (j.items || []).map(x => x.devices || 0);
-        renderBarChart("chartLang", labels, values);
-        $("warnLang").textContent = "";
-      } catch (e) {
-        $("warnLang").textContent = "Endpoint /admin/stats/by-language no disponible.";
-        renderBarChart("chartLang", ["—"], [0]);
-      }
-
-      // 3) Devices by platform
-      try {
-        const j = await fetchJSON(`${base}/admin/stats/by-platform?days=${days}&admin_key=${encodeURIComponent(adminKey||"")}`);
-        const labels = (j.items || []).map(x => x.platform || "(sin)");
-        const values = (j.items || []).map(x => x.devices || 0);
-        renderBarChart("chartPlat", labels, values);
-        $("warnPlat").textContent = "";
-      } catch (e) {
-        $("warnPlat").textContent = "Endpoint /admin/stats/by-platform no disponible.";
-        renderBarChart("chartPlat", ["—"], [0]);
-      }
-
-      // 4) Top questions (texto más frecuente)
-      try {
-        const j = await fetchJSON(`${base}/admin/stats/top-questions?days=${days}&limit=10&admin_key=${encodeURIComponent(adminKey||"")}`);
-        const items = (j.items || []).map((x)=> `<div><span class="kbd">${(x.text||"").slice(0,120)}</span> — <b>${x.count}</b></div>`).join("");
-        $("topQ").innerHTML = items || "<div class='muted'>—</div>";
-        $("warnTopQ").textContent = "";
-      } catch (e) {
-        $("warnTopQ").textContent = "Endpoint /admin/stats/top-questions no disponible.";
-        $("topQ").innerHTML = "<div class='muted'>—</div>";
-      }
-    }
-
-    $("btnLoadStats").onclick = loadStats;
-
-    // auto-cargar al abrir si hay adminKey
-    if (getAdminKey()) {
-      loadStats().catch(() => {});
-    }
-  </script>
+  };
+})();
+</script>
 </body>
 </html>
