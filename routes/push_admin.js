@@ -6,17 +6,37 @@ const { listDevicesByUser, sendSimpleToUser } = require("../services/push.servic
 const router = express.Router();
 
 // ---------- util: admin key ----------
-const ADMIN_PUSH_KEY = process.env.ADMIN_PUSH_KEY || null;
+const ADMIN_PUSH_KEY = (process.env.ADMIN_PUSH_KEY || "").toString();
+
+function readAdminKeyFromReq(req) {
+  // lee header, query y body; hace trim
+  const headerKey = ((req.get("x-admin-key") || "") + "").trim();
+  const queryKey  = ((req.query && req.query.admin_key) ? String(req.query.admin_key) : "").trim();
+  const bodyKey   = ((req.body && req.body.admin_key) ? String(req.body.admin_key) : "").trim();
+  return headerKey || queryKey || bodyKey || "";
+}
+
 function okAdmin(req) {
-  const headerKey = (req.get("x-admin-key") || "").toString();
-  const paramKey  = (req.query && req.query.admin_key) ? String(req.query.admin_key) : "";
-  return ADMIN_PUSH_KEY && (headerKey === ADMIN_PUSH_KEY || paramKey === ADMIN_PUSH_KEY);
+  const provided = readAdminKeyFromReq(req);
+  // ambas con trim; comparación estricta
+  return ADMIN_PUSH_KEY.length > 0 && provided === ADMIN_PUSH_KEY.trim();
 }
 
 // ---------- headers JSON ----------
 router.use((req, res, next) => {
   res.set("Content-Type", "application/json; charset=utf-8");
   next();
+});
+
+/**
+ * GET /push/admin-ping?admin_key=XXXX
+ * Verifica que la key matchee sin exponerla.
+ */
+router.get("/admin-ping", (req, res) => {
+  const provided = readAdminKeyFromReq(req);
+  const hasEnv   = ADMIN_PUSH_KEY.length > 0;
+  const match    = hasEnv && provided === ADMIN_PUSH_KEY.trim();
+  return res.json({ ok: match, has_env: hasEnv, provided_len: provided.length });
 });
 
 /**
@@ -126,7 +146,7 @@ router.post("/admin-broadcast", async (req, res) => {
 
 /**
  * LIMPIEZA de devices (expuesta para correr desde el navegador).
- * Requiere admin key. Acepta GET (con ?admin_key=) y POST (header X-Admin-Key).
+ * Requiere admin key. Acepta GET (con ?admin_key=) y POST (header X-Admin-Key o body.admin_key).
  *
  * GET/POST /push/cleanup-devices
  * Respuesta: { ok:true, steps:{...} }
@@ -206,7 +226,6 @@ async function runCleanup() {
 router.all("/cleanup-devices", async (req, res) => {
   try {
     if (!okAdmin(req)) return res.status(401).json({ ok: false, error: "unauthorized_admin" });
-
     const steps = await runCleanup();
     return res.json({ ok: true, steps });
   } catch (e) {
