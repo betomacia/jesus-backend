@@ -27,9 +27,11 @@ const {
   registerDevice,
   listDevicesByUser,
   sendSimpleToUser,
+  listDevicesForBroadcast, // 👈 NUEVO
 } = require("../services/push.service");
 
 const router = express.Router();
+const ADMIN_PUSH_KEY = process.env.ADMIN_PUSH_KEY || null;
 
 /* ====== CORS para TODO /users (incluye preflight) ====== */
 router.use((req, res, next) => {
@@ -258,7 +260,7 @@ router.post("/message/delete", async (req, res) => {
 });
 
 /* ============== Dispositivos & Push ============== */
-// ✅ Actualizado: registra aunque la app no mande email, usando fallback.
+// ✅ Registra aunque la app no mande email, usando fallback.
 //    Normaliza platform a 'web' si no viene (Android Chrome WebPush suele ser web).
 router.post("/push/register", async (req, res) => {
   try {
@@ -340,10 +342,7 @@ router.get("/push/devices", async (req, res) => {
   }
 });
 
-/* === NUEVO: Desregistrar token/dispositivo ===
-   POST /users/push/unregister
-   Body: { email|user_id (opcional), platform (opcional), fcm_token | device_id (obligatorio uno) }
-*/
+/* === Desregistrar token/dispositivo === */
 router.post("/push/unregister", async (req, res) => {
   try {
     await ensureDevicesTable();
@@ -487,6 +486,93 @@ router.post("/push/send-simple", async (req, res) => {
     res.json({ ok: true, user_id: uid, targeted: devices.length, ...report });
   } catch (e) {
     res.status(500).json({ ok: false, error: "push_send_failed", detail: e.message || String(e) });
+  }
+});
+
+/* ============== Broadcast admin (campañas / avisos) ============== */
+/**
+ * POST /users/push/broadcast  (solo admins)
+ * Body:
+ *  admin_key: string (debe igualar process.env.ADMIN_PUSH_KEY si está seteada)
+ *  title, body, data
+ *  platform?: 'web'|'android'|'ios' (default: null = todas)
+ *  last_seen_days?: number (default: 30)
+ *  group_by_user?: boolean (default: true)   // 1 device por usuario
+ *  prefer_prefix?: string (default: 'ANDROID_CHROME') // prioridad por device_id
+ *  limit?: number (default: 1000)
+ *  webDataOnly?: boolean (default: true)
+ */
+router.post("/push/broadcast", async (req, res) => {
+  try {
+    if (ADMIN_PUSH_KEY && req.body?.admin_key !== ADMIN_PUSH_KEY) {
+      return res.status(403).json({ ok: false, error: "forbidden" });
+    }
+
+    await ensureDevicesTable();
+
+    const {
+      title = "Notificación",
+      body  = "Tienes un mensaje.",
+      data  = null,
+
+      platform       = null,
+      last_seen_days = 30,
+      group_by_user  = true,
+      prefer_prefix  = "ANDROID_CHROME",
+      limit          = 1000,
+      webDataOnly    = true,
+    } = req.body || {};
+
+    const devices = await listDevicesForBroadcast({
+      platform: platform ? String(platform).trim().toLowerCase() : null,
+      lastSeenDays: Number.isFinite(+last_seen_days) ? +last_seen_days : 30,
+      groupByUser: !!group_by_user,
+      preferPrefix: String(prefer_prefix || "ANDROID_CHROME"),
+      limit: Math.min(Math.max(parseInt(limit, 10) || 1000, 1), 10000),
+    });
+
+    if (!devices.length) {
+      return res.json({ ok: true, targeted: 0, sent: 0, failed: 0, results: [] });
+    }
+
+    // Mapear usuarios y traer sus langs
+    const userIds = [...new Set(devices.map(d => d.user_id))];
+    const users = await query(`SELECT id, lang FROM users WHERE id = ANY($1)`, [userIds]);
+    const userMap = new Map(users.map(u => [u.id, u]));
+
+    let sent = 0, failed = 0;
+    const sample = [];
+
+    // Enviar usuario por usuario (permite i18n por user.lang)
+    for (const uid of userIds) {
+      const user = userMap.get(uid) || { id: uid, lang: 'es' };
+      const devs = devices.filter(d => d.user_id === uid);
+
+      const report = await sendSimpleToUser({
+        user,
+        devices: devs,
+        title,
+        body,
+        data,
+        overrideLang: null,
+        webDataOnly: !!webDataOnly,
+        title_i18n: null,
+        body_i18n: null,
+      });
+
+      sent   += report.sent;
+      failed += report.failed;
+
+      for (const r of report.results) {
+        if (sample.length < 100) {
+          sample.push({ user_id: uid, ...r });
+        }
+      }
+    }
+
+    return res.json({ ok: true, targeted: devices.length, sent, failed, sample });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: "broadcast_failed", detail: e.message || String(e) });
   }
 });
 
