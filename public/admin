@@ -2,210 +2,246 @@
 <html lang="es">
 <head>
   <meta charset="utf-8" />
-  <title>Push Admin</title>
+  <title>Admin Push</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;padding:16px;max-width:800px;margin:0 auto;background:#111;color:#eee}
-    h1{font-size:20px;margin:0 0 12px}
-    fieldset{border:1px solid #333;border-radius:10px;margin:0 0 12px;padding:12px}
-    label{display:block;font-size:13px;margin:6px 0}
-    input[type="text"], textarea, select{width:100%;box-sizing:border-box;padding:8px;border-radius:8px;border:1px solid #333;background:#000;color:#eee}
-    textarea{min-height:90px;resize:vertical}
-    .row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-    .row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
-    button{background:#6d28d9;color:#fff;border:0;padding:10px 14px;border-radius:10px;cursor:pointer}
-    button:disabled{opacity:.5;cursor:default}
-    .muted{color:#aaa;font-size:12px}
-    pre{white-space:pre-wrap;background:#0a0a0a;border:1px solid #222;padding:10px;border-radius:10px}
-    .inline{display:inline-flex;gap:8px;align-items:center}
+    body { font-family: system-ui, sans-serif; padding:16px; max-width:980px; margin:0 auto; }
+    h1 { margin: 0 0 12px; }
+    .row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
+    .card { border:1px solid #e5e7eb; border-radius:12px; padding:12px; background:#fff; }
+    table { width:100%; border-collapse: collapse; }
+    th, td { border-bottom:1px solid #eee; padding:8px; text-align:left; font-size:13px; }
+    th { background:#fafafa; position: sticky; top: 0; }
+    .btn { padding:8px 12px; border-radius:10px; border:none; cursor:pointer; }
+    .btn:disabled { opacity:.6; cursor:not-allowed; }
+    .btn-primary { background:#2563eb; color:#fff; }
+    .btn-green { background:#16a34a; color:#fff; }
+    .btn-gray { background:#111827; color:#fff; }
+    .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; background:#f3f4f6; }
+    .muted { color:#6b7280; font-size:12px }
+    textarea, input[type="text"] { width:100%; padding:8px; border:1px solid #ddd; border-radius:8px; }
+    .hint { font-size:12px; color:#6b7280; }
+    .ok { color:#16a34a; }
+    .err { color:#dc2626; }
+    .scroll { max-height: 340px; overflow: auto; }
   </style>
 </head>
 <body>
-  <h1>Push Admin</h1>
 
-  <fieldset>
-    <legend>Servidor</legend>
+  <h1>Admin Push</h1>
+
+  <div class="card" style="margin-bottom:12px">
     <div class="row">
-      <label>Backend URL
-        <input id="base" type="text" value="https://jesus-backend-production-1098.up.railway.app" />
-      </label>
-      <label>X-Admin-Key
-        <input id="adm" type="text" placeholder="abc123" />
-      </label>
+      <label>Email:&nbsp;<input id="email" type="text" value="info@movilive.com" style="min-width:260px"></label>
+      <label>Admin Key:&nbsp;<input id="admkey" type="text" value="abc123" style="min-width:180px"></label>
+      <button id="btnLoad" class="btn btn-gray">Cargar dispositivos</button>
     </div>
-    <div class="muted">Asegurate de pegar la clave correcta (la misma que probaste con /users/push/diag-admin-key).</div>
-  </fieldset>
-
-  <fieldset>
-    <legend>Mensaje</legend>
-    <label>Título
-      <input id="title" type="text" placeholder="Título del mensaje" />
-    </label>
-    <label>Texto
-      <textarea id="body" placeholder="Texto del mensaje"></textarea>
-    </label>
-    <div class="row">
-      <label>URL (al hacer click)
-        <input id="url" type="text" placeholder="/ o https://…" value="/" />
-      </label>
-      <label>Idioma (opcional, override)
-        <input id="lang" type="text" placeholder="es, en, pt…" />
-      </label>
-    </div>
-  </fieldset>
-
-  <fieldset>
-    <legend>Segmentación</legend>
-    <div class="row3">
-      <label>Plataforma
-        <select id="platform">
-          <option value="all">Todas</option>
-          <option value="web">Web</option>
-          <option value="android">Android</option>
-          <option value="ios">iOS</option>
-        </select>
-      </label>
-      <label>Última actividad (días)
-        <input id="last" type="text" value="30" />
-      </label>
-      <label>Límite de dispositivos
-        <input id="limit" type="text" value="500" />
-      </label>
-    </div>
-
-    <div class="row">
-      <label class="inline">
-        <input id="group" type="checkbox" checked />
-        Agrupar por usuario (1 device por usuario)
-      </label>
-      <label>Preferir prefijo (si agrupa)
-        <input id="prefer" type="text" value="ANDROID_CHROME" />
-      </label>
-    </div>
-
-    <div class="row">
-      <label>Emails específicos (opcional; coma-separado)
-        <input id="emails" type="text" placeholder="user@dominio.com, otro@dominio.com" />
-      </label>
-      <label class="inline">
-        <input id="onlyWebMode" type="checkbox" />
-        Forzar webDataOnly (solo útil si plataforma=web)
-      </label>
-    </div>
-  </fieldset>
-
-  <div class="row" style="align-items:center">
-    <button id="send">Enviar</button>
-    <div class="muted">Si plataforma=Web ⇒ se envían como <b>data-only</b>; Android/iOS ⇒ con <b>notification</b>.</div>
+    <div id="loadMsg" class="muted" style="margin-top:6px"></div>
   </div>
 
-  <h3>Respuesta</h3>
-  <pre id="out">{ }</pre>
+  <div class="card" style="margin-bottom:12px">
+    <div class="row" style="align-items:flex-start; gap:16px">
+      <div style="flex:1; min-width:260px">
+        <label>Título<br><input id="title" type="text" placeholder="Título" value="Hola 👋"></label>
+      </div>
+      <div style="flex:2; min-width:280px">
+        <label>Mensaje<br><textarea id="body" rows="3" placeholder="Texto a mostrar">Prueba push desde admin</textarea></label>
+      </div>
+      <div style="flex:1; min-width:220px">
+        <label>Destino<br>
+          <select id="aud" style="width:100%; padding:8px; border:1px solid #ddd; border-radius:8px;">
+            <option value="all">Todos</option>
+            <option value="web">Solo Desktop/Web</option>
+            <option value="android">Solo Android</option>
+            <option value="selected">Seleccionados (checkbox)</option>
+          </select>
+        </label>
+      </div>
+    </div>
+
+    <div class="row" style="margin-top:10px">
+      <button id="btnSend" class="btn btn-primary">Enviar</button>
+      <div class="hint">Android recibirá **notificación visible**. Desktop/Web recibirá **data-only** para evitar duplicados.</div>
+    </div>
+    <div id="sendMsg" style="margin-top:6px"></div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <div><b>Dispositivos</b> <span class="muted">(se actualiza con “Cargar dispositivos”)</span></div>
+      <div class="muted">Tip: Android también aparece como plataforma “web” (PWA/Chrome)</div>
+    </div>
+    <div class="scroll">
+      <table id="devTable">
+        <thead>
+          <tr>
+            <th><input type="checkbox" id="chkAll"></th>
+            <th>ID</th>
+            <th>device_id</th>
+            <th>platform</th>
+            <th>last_seen</th>
+            <th>token (inicio)</th>
+          </tr>
+        </thead>
+        <tbody id="devBody">
+          <!-- filas dinámicas -->
+        </tbody>
+      </table>
+    </div>
+  </div>
 
 <script>
-(function(){
-  const $ = (id) => document.getElementById(id);
-  const base = $("base");
-  const adm  = $("adm");
-  const title= $("title");
-  const body = $("body");
-  const url  = $("url");
-  const lang = $("lang");
-  const platform = $("platform");
-  const last = $("last");
-  const limit= $("limit");
-  const group= $("group");
-  const prefer=$("prefer");
-  const emails=$("emails");
-  const onlyWebMode=$("onlyWebMode");
-  const out  = $("out");
-  const btn  = $("send");
+  const BACKEND = "https://jesus-backend-production-1098.up.railway.app";
 
-  function log(o){ out.textContent = JSON.stringify(o, null, 2); }
+  const el = (id) => document.getElementById(id);
+  const emailEl = el("email");
+  const keyEl = el("admkey");
+  const loadMsg = el("loadMsg");
+  const sendMsg = el("sendMsg");
+  const devBody = el("devBody");
+  const chkAll = el("chkAll");
+  const audEl = el("aud");
+  const titleEl = el("title");
+  const bodyEl = el("body");
 
-  async function adminBroadcast(payload){
-    const r = await fetch(`${base.value.replace(/\/+$/,'')}/users/push/admin-broadcast`,{
-      method:"POST",
-      headers:{
-        "Content-Type":"application/json",
-        "X-Admin-Key": adm.value.trim()
-      },
-      body: JSON.stringify(payload)
-    });
-    const j = await r.json().catch(()=>({ok:false,error:"bad_json"}));
-    return j;
+  let devices = [];
+
+  function rowHTML(d, idx){
+    const token20 = (d.fcm_token||"").slice(0,20) + "…";
+    const platPill = `<span class="pill">${d.platform||"?"}</span>`;
+    return `
+      <tr>
+        <td><input type="checkbox" data-idx="${idx}"></td>
+        <td>${d.id}</td>
+        <td>${d.device_id||""}</td>
+        <td>${platPill}</td>
+        <td class="muted">${d.last_seen||""}</td>
+        <td class="muted" title="${d.fcm_token||""}">${token20}</td>
+      </tr>
+    `;
   }
 
-  async function adminSendToEmails(payload){
-    const r = await fetch(`${base.value.replace(/\/+$/,'')}/users/push/admin-send`,{
-      method:"POST",
-      headers:{
-        "Content-Type":"application/json",
-        "X-Admin-Key": adm.value.trim()
-      },
-      body: JSON.stringify(payload)
-    });
-    const j = await r.json().catch(()=>({ok:false,error:"bad_json"}));
-    return j;
+  function renderTable(){
+    devBody.innerHTML = devices.map((d,i)=>rowHTML(d,i)).join("");
   }
 
-  btn.onclick = async () => {
-    btn.disabled = true; log({ sending:true });
-
-    const msg = {
-      title: title.value || "",
-      body:  body.value  || "",
-      data:  { url: (url.value || "/") }
-    };
-
-    // ← plataforma seleccionada
-    const p = platform.value; // "all"|"web"|"android"|"ios"
-
-    // webDataOnly: SOLO para web
-    const webDataOnly = (p === "web") ? true : false;
-    // si tildaste el toggle, lo fuerza (útil para pruebas)
-    const webDataOnlyFinal = (p === "web") ? (onlyWebMode.checked ? true : webDataOnly) : false;
-
-    // override idioma (opcional)
-    const langOverride = lang.value.trim() ? lang.value.trim() : null;
-
+  async function loadDevices(){
+    sendMsg.textContent = "";
+    devBody.innerHTML = "";
+    devices = [];
+    chkAll.checked = false;
+    loadMsg.textContent = "Cargando…";
     try{
-      let resp;
-      const emailsList = emails.value.split(",").map(x=>x.trim().toLowerCase()).filter(Boolean);
-
-      if (emailsList.length){
-        // Envío dirigido a emails (admin-send), respeta plataforma si se elige (y device_id/fcm_token si quisieras agregar)
-        resp = await adminSendToEmails({
-          emails: emailsList,
-          platform: (p === "all" ? null : p),
-          title: msg.title,
-          body:  msg.body,
-          data:  msg.data,
-          webDataOnly: webDataOnlyFinal,
-        });
-      } else {
-        // Broadcast segmentado (admin-broadcast)
-        resp = await adminBroadcast({
-          platform: (p === "all" ? null : p),
-          lastSeenDays: Number.isFinite(+last.value) ? +last.value : 30,
-          groupByUser: !!group.checked,
-          preferPrefix: prefer.value || "ANDROID_CHROME",
-          limit: Number.isFinite(+limit.value) ? +limit.value : 500,
-          title: msg.title,
-          body:  msg.body,
-          data:  msg.data,
-          webDataOnly: webDataOnlyFinal
-        });
-      }
-
-      log(resp);
+      const r = await fetch(`${BACKEND}/users/push/devices?email=` + encodeURIComponent(emailEl.value.trim()));
+      const j = await r.json();
+      if(!j || j.ok === false){ throw new Error(j?.error || "Error al cargar"); }
+      devices = Array.isArray(j.devices) ? j.devices : [];
+      // Normalizamos posibles typos en device_id VISUALMENTE (no cambia backend)
+      devices = devices.map(d => {
+        let device_id = d.device_id || "";
+        if(/^ANDRID_CRHOME_/i.test(device_id)){
+          device_id = device_id.replace(/^ANDRID_CRHOME_/i, "ANDROID_CHROME_");
+        }
+        return { ...d, device_id };
+      });
+      renderTable();
+      loadMsg.innerHTML = `<span class="ok">OK</span> ${devices.length} dispositivos`;
     }catch(e){
-      log({ ok:false, error: e && e.message || String(e) });
-    }finally{
-      btn.disabled = false;
+      loadMsg.innerHTML = `<span class="err">Fallo</span> ${(e && e.message) || e}`;
     }
-  };
-})();
+  }
+
+  function selectedDevices(){
+    if(audEl.value !== "selected") return devices;
+    const checks = devBody.querySelectorAll('input[type="checkbox"][data-idx]');
+    const out = [];
+    checks.forEach(c => { if(c.checked){ out.push(devices[Number(c.dataset.idx)]); } });
+    return out;
+  }
+
+  function audienceFilter(list){
+    const mode = audEl.value;
+    if(mode === "all" || mode === "selected") return list;
+    if(mode === "web"){
+      // Desktop/web: mantenemos todo lo que *no huela* a Android userAgent en device_id (heurística)
+      return list.filter(d => !/ANDROID_CHROME_/i.test(d.device_id||""));
+    }
+    if(mode === "android"){
+      // Android registrados como "web" pero device_id con ANDROID_CHROME_
+      return list.filter(d => /ANDROID_CHROME_/i.test(d.device_id||""));
+    }
+    return list;
+  }
+
+  async function adminSendByToken(token, platform, title, body, webDataOnly){
+    // envía directo por token; platform “web” en ambos casos (así está en tu backend)
+    const payload = {
+      fcm_token: token,
+      platform: "web",
+      title,
+      body,
+      data: { act: "open_app" },
+      webDataOnly
+    };
+    const r = await fetch(`${BACKEND}/users/push/admin-send`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        "X-Admin-Key": keyEl.value.trim()
+      },
+      body: JSON.stringify(payload)
+    });
+    return r.json();
+  }
+
+  async function handleSend(){
+    sendMsg.textContent = "Enviando…";
+    const title = titleEl.value.trim() || "Notificación";
+    const body  = bodyEl.value.trim() || "";
+
+    const baseList = selectedDevices();
+    const list = audienceFilter(baseList);
+
+    if(list.length === 0){
+      sendMsg.innerHTML = `<span class="err">No hay dispositivos para ese destino.</span>`;
+      return;
+    }
+
+    let targeted = 0, sent = 0, failed = 0;
+    for(const d of list){
+      if(!d.fcm_token) continue;
+      targeted++;
+      // Heurística: si el device_id contiene ANDROID_CHROME_ => queremos notificación visible (webDataOnly=false)
+      const isAndroid = /ANDROID_CHROME_/i.test(d.device_id||"");
+      const webDataOnly = !isAndroid; // desktop/web => data-only; android => visible
+      try{
+        const resp = await adminSendByToken(d.fcm_token, d.platform, title, body, webDataOnly);
+        if(resp && resp.ok !== false){
+          // resp.sent puede venir a nivel agregado; contamos por intento
+          if(resp.sent > 0 || (resp.results && resp.results[0]?.ok)) sent++;
+          else failed++;
+        }else{
+          failed++;
+        }
+      }catch{
+        failed++;
+      }
+    }
+
+    sendMsg.innerHTML = `<b>Resultado:</b> targeted=${targeted} · sent=${sent} · failed=${failed}`;
+  }
+
+  // Eventos
+  el("btnLoad").addEventListener("click", loadDevices);
+  el("btnSend").addEventListener("click", handleSend);
+  chkAll.addEventListener("change", () => {
+    const checks = devBody.querySelectorAll('input[type="checkbox"][data-idx]');
+    checks.forEach(c => c.checked = chkAll.checked);
+  });
+
+  // Carga inicial
+  loadDevices();
 </script>
+
 </body>
 </html>
