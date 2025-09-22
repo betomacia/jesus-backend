@@ -61,7 +61,7 @@
 
     <div class="row" style="margin-top:10px">
       <button id="btnSend" class="btn btn-primary">Enviar</button>
-      <div class="hint">Android recibirá **notificación visible**. Desktop/Web recibirá **data-only** para evitar duplicados.</div>
+      <div class="hint">Android recibirá <b>notificación visible</b>. Desktop/Web recibirá <b>data-only</b> para evitar duplicados.</div>
     </div>
     <div id="sendMsg" style="margin-top:6px"></div>
   </div>
@@ -136,7 +136,7 @@
       const j = await r.json();
       if(!j || j.ok === false){ throw new Error(j?.error || "Error al cargar"); }
       devices = Array.isArray(j.devices) ? j.devices : [];
-      // Normalizamos posibles typos en device_id VISUALMENTE (no cambia backend)
+      // Normalizamos typos de device_id VISUALMENTE (no cambia backend)
       devices = devices.map(d => {
         let device_id = d.device_id || "";
         if(/^ANDRID_CRHOME_/i.test(device_id)){
@@ -163,18 +163,15 @@
     const mode = audEl.value;
     if(mode === "all" || mode === "selected") return list;
     if(mode === "web"){
-      // Desktop/web: mantenemos todo lo que *no huela* a Android userAgent en device_id (heurística)
       return list.filter(d => !/ANDROID_CHROME_/i.test(d.device_id||""));
     }
     if(mode === "android"){
-      // Android registrados como "web" pero device_id con ANDROID_CHROME_
       return list.filter(d => /ANDROID_CHROME_/i.test(d.device_id||""));
     }
     return list;
   }
 
   async function adminSendByToken(token, platform, title, body, webDataOnly){
-    // envía directo por token; platform “web” en ambos casos (así está en tu backend)
     const payload = {
       fcm_token: token,
       platform: "web",
@@ -211,13 +208,11 @@
     for(const d of list){
       if(!d.fcm_token) continue;
       targeted++;
-      // Heurística: si el device_id contiene ANDROID_CHROME_ => queremos notificación visible (webDataOnly=false)
       const isAndroid = /ANDROID_CHROME_/i.test(d.device_id||"");
       const webDataOnly = !isAndroid; // desktop/web => data-only; android => visible
       try{
         const resp = await adminSendByToken(d.fcm_token, d.platform, title, body, webDataOnly);
         if(resp && resp.ok !== false){
-          // resp.sent puede venir a nivel agregado; contamos por intento
           if(resp.sent > 0 || (resp.results && resp.results[0]?.ok)) sent++;
           else failed++;
         }else{
@@ -242,6 +237,34 @@
   // Carga inicial
   loadDevices();
 </script>
+
+<!-- ====== DEBUG NO INTRUSIVO: quién dispara las notificaciones ====== -->
+<script>
+// Mensajes que envía el SW cuando muestra una notificación
+navigator.serviceWorker?.addEventListener?.("message", (ev) => {
+  if (ev?.data?.type === "SW_NOTIFY") {
+    console.log("[DBG SW_NOTIFY] →", ev.data.title, ev.data.options);
+  }
+});
+
+// Interceptor de new Notification(...) en la PÁGINA (para ver si la página crea toasts)
+(function () {
+  if (!("Notification" in window)) return;
+  const Native = window.Notification;
+  function WrappedNotification(title, options) {
+    try { console.log("[DBG PAGE_NOTIFY] →", title, options); } catch {}
+    return new Native(title, options);
+  }
+  WrappedNotification.requestPermission = Native.requestPermission.bind(Native);
+  Object.defineProperty(WrappedNotification, "permission", {
+    get() { return Native.permission; }
+  });
+  WrappedNotification.prototype = Native.prototype;
+  Object.setPrototypeOf(WrappedNotification, Native);
+  window.Notification = WrappedNotification;
+})();
+</script>
+<!-- ================================================================ -->
 
 </body>
 </html>
