@@ -24,6 +24,10 @@
     .ok { color:#16a34a; }
     .err { color:#dc2626; }
     .scroll { max-height: 340px; overflow: auto; }
+    .badge { padding:2px 8px; border-radius:999px; font-size:12px; background:#eef2ff; color:#1d4ed8; }
+    .badge-android { background:#ecfeff; color:#0891b2; }
+    .badge-desktop { background:#fef3c7; color:#b45309; }
+    pre { background:#0b1020; color:#c7d2fe; padding:10px; border-radius:8px; font-size:12px; overflow:auto; }
   </style>
 </head>
 <body>
@@ -35,6 +39,7 @@
       <label>Email:&nbsp;<input id="email" type="text" value="info@movilive.com" style="min-width:260px"></label>
       <label>Admin Key:&nbsp;<input id="admkey" type="text" value="abc123" style="min-width:180px"></label>
       <button id="btnLoad" class="btn btn-gray">Cargar dispositivos</button>
+      <span id="counters" class="muted"></span>
     </div>
     <div id="loadMsg" class="muted" style="margin-top:6px"></div>
   </div>
@@ -66,10 +71,13 @@
     <div id="sendMsg" style="margin-top:6px"></div>
   </div>
 
-  <div class="card">
+  <div class="card" style="margin-bottom:12px">
     <div class="row" style="justify-content:space-between">
-      <div><b>Dispositivos</b> <span class="muted">(se actualiza con “Cargar dispositivos”)</span></div>
-      <div class="muted">Tip: Android también aparece como plataforma “web” (PWA/Chrome)</div>
+      <div>
+        <b>Dispositivos</b>
+        <span class="muted">(Usá “Cargar dispositivos” para refrescar)</span>
+      </div>
+      <div class="muted">Android PWA aparece como plataforma “web”, lo distinguimos por <code>device_id</code> (empieza con <b>ANDROID_CHROME_</b>).</div>
     </div>
     <div class="scroll">
       <table id="devTable">
@@ -83,11 +91,18 @@
             <th>token (inicio)</th>
           </tr>
         </thead>
-        <tbody id="devBody">
-          <!-- filas dinámicas -->
-        </tbody>
+        <tbody id="devBody"></tbody>
       </table>
     </div>
+  </div>
+
+  <div class="card">
+    <div><b>Diagnóstico</b> <span class="muted">(ayuda a ver qué devuelve el backend)</span></div>
+    <div class="row" style="margin-top:8px">
+      <button id="btnDiag" class="btn btn-green">Volcar respuesta cruda</button>
+      <span class="muted">Si “Desktop/Web” da <code>targeted: 0</code>, revisá que acá aparezca un device con <b>WEB_DESKTOP_…</b></span>
+    </div>
+    <pre id="diagBox" style="margin-top:8px; display:none"></pre>
   </div>
 
 <script>
@@ -103,12 +118,16 @@
   const audEl = el("aud");
   const titleEl = el("title");
   const bodyEl = el("body");
+  const countersEl = el("counters");
+  const diagBox = el("diagBox");
+  const btnDiag = el("btnDiag");
 
   let devices = [];
 
   function rowHTML(d, idx){
     const token20 = (d.fcm_token||"").slice(0,20) + "…";
-    const platPill = `<span class="pill">${d.platform||"?"}</span>`;
+    const isAndroid = /ANDROID_CHROME_/i.test(d.device_id||"");
+    const platPill = `<span class="pill">${d.platform||"?"}</span> ${isAndroid ? '<span class="badge badge-android">ANDROID</span>' : '<span class="badge badge-desktop">DESKTOP</span>'}`;
     return `
       <tr>
         <td><input type="checkbox" data-idx="${idx}"></td>
@@ -123,6 +142,13 @@
 
   function renderTable(){
     devBody.innerHTML = devices.map((d,i)=>rowHTML(d,i)).join("");
+    const androidCount = devices.filter(d => /ANDROID_CHROME_/i.test(d.device_id||"")).length;
+    const desktopCount = devices.length - androidCount;
+    countersEl.innerHTML = `
+      <span class="badge badge-desktop">Desktop/Web: ${desktopCount}</span>
+      &nbsp;
+      <span class="badge badge-android">Android: ${androidCount}</span>
+    `;
   }
 
   async function loadDevices(){
@@ -131,19 +157,24 @@
     devices = [];
     chkAll.checked = false;
     loadMsg.textContent = "Cargando…";
+    diagBox.style.display = "none";
     try{
-      const r = await fetch(`${BACKEND}/users/push/devices?email=` + encodeURIComponent(emailEl.value.trim()));
+      // ⚠️ no-cache para evitar listas viejas
+      const url = `${BACKEND}/users/push/devices?email=${encodeURIComponent(emailEl.value.trim())}&t=${Date.now()}`;
+      const r = await fetch(url, { cache: "no-store" });
       const j = await r.json();
       if(!j || j.ok === false){ throw new Error(j?.error || "Error al cargar"); }
-      devices = Array.isArray(j.devices) ? j.devices : [];
-      // Normalizamos typos de device_id VISUALMENTE (no cambia backend)
-      devices = devices.map(d => {
+      const raw = Array.isArray(j.devices) ? j.devices : [];
+
+      // Normalizamos typos visibles (no cambia backend)
+      devices = raw.map(d => {
         let device_id = d.device_id || "";
         if(/^ANDRID_CRHOME_/i.test(device_id)){
           device_id = device_id.replace(/^ANDRID_CRHOME_/i, "ANDROID_CHROME_");
         }
         return { ...d, device_id };
       });
+
       renderTable();
       loadMsg.innerHTML = `<span class="ok">OK</span> ${devices.length} dispositivos`;
     }catch(e){
@@ -163,6 +194,7 @@
     const mode = audEl.value;
     if(mode === "all" || mode === "selected") return list;
     if(mode === "web"){
+      // Desktop/Web = todo lo que NO tenga ANDROID_CHROME_
       return list.filter(d => !/ANDROID_CHROME_/i.test(d.device_id||""));
     }
     if(mode === "android"){
@@ -171,7 +203,7 @@
     return list;
   }
 
-  async function adminSendByToken(token, platform, title, body, webDataOnly){
+  async function adminSendByToken(token, title, body, webDataOnly){
     const payload = {
       fcm_token: token,
       platform: "web",
@@ -204,14 +236,17 @@
       return;
     }
 
+    // 👇 Log de qué device_ids se intentan (ayuda a ver si hay desktops)
+    console.log("[ADMIN] Enviando a device_ids:", list.map(d => d.device_id));
+
     let targeted = 0, sent = 0, failed = 0;
     for(const d of list){
       if(!d.fcm_token) continue;
       targeted++;
       const isAndroid = /ANDROID_CHROME_/i.test(d.device_id||"");
-      const webDataOnly = !isAndroid; // desktop/web => data-only; android => visible
+      const webDataOnly = !isAndroid; // desktop=data-only, android=visible
       try{
-        const resp = await adminSendByToken(d.fcm_token, d.platform, title, body, webDataOnly);
+        const resp = await adminSendByToken(d.fcm_token, title, body, webDataOnly);
         if(resp && resp.ok !== false){
           if(resp.sent > 0 || (resp.results && resp.results[0]?.ok)) sent++;
           else failed++;
@@ -226,6 +261,19 @@
     sendMsg.innerHTML = `<b>Resultado:</b> targeted=${targeted} · sent=${sent} · failed=${failed}`;
   }
 
+  async function dumpRaw(){
+    try{
+      const url = `${BACKEND}/users/push/devices?email=${encodeURIComponent(emailEl.value.trim())}&t=${Date.now()}`;
+      const r = await fetch(url, { cache: "no-store" });
+      const j = await r.json();
+      diagBox.style.display = "block";
+      diagBox.textContent = JSON.stringify(j, null, 2);
+    }catch(e){
+      diagBox.style.display = "block";
+      diagBox.textContent = "Error dump: " + (e?.message || e);
+    }
+  }
+
   // Eventos
   el("btnLoad").addEventListener("click", loadDevices);
   el("btnSend").addEventListener("click", handleSend);
@@ -233,38 +281,11 @@
     const checks = devBody.querySelectorAll('input[type="checkbox"][data-idx]');
     checks.forEach(c => c.checked = chkAll.checked);
   });
+  btnDiag.addEventListener("click", dumpRaw);
 
   // Carga inicial
   loadDevices();
 </script>
-
-<!-- ====== DEBUG NO INTRUSIVO: quién dispara las notificaciones ====== -->
-<script>
-// Mensajes que envía el SW cuando muestra una notificación
-navigator.serviceWorker?.addEventListener?.("message", (ev) => {
-  if (ev?.data?.type === "SW_NOTIFY") {
-    console.log("[DBG SW_NOTIFY] →", ev.data.title, ev.data.options);
-  }
-});
-
-// Interceptor de new Notification(...) en la PÁGINA (para ver si la página crea toasts)
-(function () {
-  if (!("Notification" in window)) return;
-  const Native = window.Notification;
-  function WrappedNotification(title, options) {
-    try { console.log("[DBG PAGE_NOTIFY] →", title, options); } catch {}
-    return new Native(title, options);
-  }
-  WrappedNotification.requestPermission = Native.requestPermission.bind(Native);
-  Object.defineProperty(WrappedNotification, "permission", {
-    get() { return Native.permission; }
-  });
-  WrappedNotification.prototype = Native.prototype;
-  Object.setPrototypeOf(WrappedNotification, Native);
-  window.Notification = WrappedNotification;
-})();
-</script>
-<!-- ================================================================ -->
 
 </body>
 </html>
