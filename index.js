@@ -3,35 +3,17 @@
 // - Bible SIEMPRE presente en /api/ask (anti-repetición + ban Mateo 11:28 + fallback por idioma)
 // - OFFTOPIC reforzado para gastronomía/comidas
 
-const contactRouter = require("./routes/contact");
-const usersRouter = require("./routes/users");
-const { router: dbRouter } = require("./routes/db");
 const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
 const OpenAI = require("openai");
 const path = require("path");
 const fs = require("fs/promises");
-const pushAdminRouter = require("./routes/push_admin");
 require("dotenv").config();
 
 const app = express();
 app.use(cors({ origin: true })); // CORS permisivo
 app.use(bodyParser.json());
-
-// Forzar JSON UTF-8 en todas las respuestas (evita mojibake de acentos/¿?)
-app.use((req, res, next) => {
-  res.set('Content-Type', 'application/json; charset=utf-8');
-  next();
-});
-
-app.use("/db", dbRouter);
-app.use("/contact", contactRouter);
-app.use("/users", usersRouter);
-const chatRouter = require("./routes/chat");
-app.use("/chat", chatRouter);
-app.use("/push", pushAdminRouter);
-
 
 // ---------- OpenAI ----------
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -470,12 +452,3 @@ app.get("/api/heygen/config", (_req, res) => {
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
-
-
-
-
-
-
-
-
-
