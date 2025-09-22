@@ -6,7 +6,8 @@ firebase.initializeApp({
   apiKey: "AIzaSyCWIev2L18k_TugAAIDEYREwsfFn0chdpQ",
   authDomain: "jesus-e7711.firebaseapp.com",
   projectId: "jesus-e7711",
-  storageBucket: "jesus-e7711.firebasestorage.app",
+  // ✅ usar appspot.com en Web
+  storageBucket: "jesus-e7711.appspot.com",
   messagingSenderId: "228736362294",
   appId: "1:228736362294:web:d34485861f9daccb9cf597",
   measurementId: "G-9QVKVW3YVD"
@@ -14,23 +15,27 @@ firebase.initializeApp({
 
 const messaging = firebase.messaging();
 
-// Data-only o mixta: prioriza data.__title/__body; si no hay, usa notification
+/**
+ * BACKGROUND:
+ * - Soporta data-only: usa data.__title/__body si vienen.
+ * - Si no hay, usa payload.notification.
+ */
 messaging.onBackgroundMessage((payload) => {
-  const d = payload && payload.data ? payload.data : {};
+  const data = (payload && payload.data) || {};
   const title =
-    (d.__title && String(d.__title)) ||
+    (data.__title && String(data.__title)) ||
     (payload.notification && payload.notification.title) ||
     "Notificación";
 
   const body =
-    (d.__body && String(d.__body)) ||
+    (data.__body && String(data.__body)) ||
     (payload.notification && payload.notification.body) ||
     "";
 
-  const icon = d.icon || "/icon-192.png";
+  const icon = data.icon || "/icon-192.png";
 
+  // Copiamos data para usarla en el click handler
   const ndata = {};
-  // Copiamos todo data para usarlo en click
   if (payload && payload.data) {
     Object.keys(payload.data).forEach((k) => (ndata[k] = payload.data[k]));
   }
@@ -39,21 +44,53 @@ messaging.onBackgroundMessage((payload) => {
     body,
     icon,
     data: ndata,
+    // Opcionales:
+    // tag: data.tag || undefined,
+    // renotify: !!data.tag,
+    // requireInteraction: data.requireInteraction === "true",
   });
 });
 
-// Click: si viene data.url la abrimos/enfocamos
+/**
+ * CLICK:
+ * - Si llega data.url:
+ *    - Si es relativa, la convierte a absoluta con el origen.
+ *    - Enfoca una pestaña ya abierta con esa URL (o abre una nueva).
+ * - Si no llega, abre/enfoca la raíz ('/').
+ */
 self.addEventListener("notificationclick", (event) => {
-  const url = (event.notification && event.notification.data && event.notification.data.url) || "/";
   event.notification.close();
+
+  const rawUrl = (event.notification && event.notification.data && event.notification.data.url) || "/";
+  let targetUrl = rawUrl;
+
+  try {
+    // Si es relativa, que sea absoluta en este origen.
+    if (rawUrl.startsWith("/")) {
+      targetUrl = new URL(rawUrl, self.location.origin).toString();
+    } else {
+      // Si ya es absoluta y válida, la usamos tal cual
+      targetUrl = new URL(rawUrl).toString();
+    }
+  } catch {
+    // Si falló parseo, volvemos a la raíz
+    targetUrl = self.location.origin + "/";
+  }
 
   event.waitUntil((async () => {
     const allClients = await clients.matchAll({ type: "window", includeUncontrolled: true });
-    const found = allClients.find((c) => c.url.includes(url));
-    if (found) {
-      found.focus();
-      return;
+
+    // Intentamos enfocar una pestaña del mismo origen; si coincide exactamente, mejor
+    for (const client of allClients) {
+      // Mismo origen
+      if (client.url && client.url.startsWith(self.location.origin)) {
+        // Si ya está en la misma URL o es la app, enfocamos
+        if (client.url === targetUrl || client.url === self.location.origin + "/") {
+          if ("focus" in client) return client.focus();
+        }
+      }
     }
-    await clients.openWindow(url);
+    // Abrir nueva pestaña si no encontramos una para enfocar
+    if (clients.openWindow) return clients.openWindow(targetUrl);
   })());
 });
