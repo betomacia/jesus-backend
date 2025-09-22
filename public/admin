@@ -2,216 +2,132 @@
 <html lang="es">
 <head>
   <meta charset="utf-8" />
-  <title>Admin Push</title>
+  <title>Admin Push (mínimo)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    body { font-family: system-ui, sans-serif; padding:16px; max-width:980px; margin:0 auto; }
-    h1 { margin: 0 0 12px; }
+    body { font-family: system-ui, sans-serif; padding:16px; max-width:820px; margin:0 auto; }
+    h1 { margin: 0 0 16px; }
+    .card { border:1px solid #e5e7eb; border-radius:12px; padding:14px; background:#fff; margin-bottom:12px; }
     .row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
-    .card { border:1px solid #e5e7eb; border-radius:12px; padding:12px; background:#fff; }
-    table { width:100%; border-collapse: collapse; }
-    th, td { border-bottom:1px solid #eee; padding:8px; text-align:left; font-size:13px; }
-    th { background:#fafafa; position: sticky; top: 0; }
-    .btn { padding:8px 12px; border-radius:10px; border:none; cursor:pointer; }
+    .btn { padding:10px 14px; border-radius:10px; border:none; background:#2563eb; color:#fff; cursor:pointer; }
     .btn:disabled { opacity:.6; cursor:not-allowed; }
-    .btn-primary { background:#2563eb; color:#fff; }
-    .btn-green { background:#16a34a; color:#fff; }
-    .btn-gray { background:#111827; color:#fff; }
-    .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; background:#f3f4f6; }
-    .muted { color:#6b7280; font-size:12px }
-    textarea, input[type="text"] { width:100%; padding:8px; border:1px solid #ddd; border-radius:8px; }
-    .hint { font-size:12px; color:#6b7280; }
+    input[type="text"], textarea, select { width:100%; padding:10px; border:1px solid #e5e7eb; border-radius:10px; }
+    label { font-size:13px; color:#374151; display:block; }
+    .muted { color:#6b7280; font-size:12px; }
+    .result { font-size:14px; margin-top:8px; }
     .ok { color:#16a34a; }
     .err { color:#dc2626; }
-    .scroll { max-height: 340px; overflow: auto; }
-    .badge { padding:2px 8px; border-radius:999px; font-size:12px; background:#eef2ff; color:#1d4ed8; }
-    .badge-android { background:#ecfeff; color:#0891b2; }
-    .badge-desktop { background:#fef3c7; color:#b45309; }
-    pre { background:#0b1020; color:#c7d2fe; padding:10px; border-radius:8px; font-size:12px; overflow:auto; }
   </style>
 </head>
 <body>
+  <h1>Admin Push (mínimo)</h1>
 
-  <h1>Admin Push</h1>
-
-  <div class="card" style="margin-bottom:12px">
+  <div class="card">
     <div class="row">
-      <label>Email:&nbsp;<input id="email" type="text" value="info@movilive.com" style="min-width:260px"></label>
-      <label>Admin Key:&nbsp;<input id="admkey" type="text" value="abc123" style="min-width:180px"></label>
-      <button id="btnLoad" class="btn btn-gray">Cargar dispositivos</button>
-      <span id="counters" class="muted"></span>
-    </div>
-    <div id="loadMsg" class="muted" style="margin-top:6px"></div>
-  </div>
-
-  <div class="card" style="margin-bottom:12px">
-    <div class="row" style="align-items:flex-start; gap:16px">
-      <div style="flex:1; min-width:260px">
-        <label>Título<br><input id="title" type="text" placeholder="Título" value="Hola 👋"></label>
-      </div>
-      <div style="flex:2; min-width:280px">
-        <label>Mensaje<br><textarea id="body" rows="3" placeholder="Texto a mostrar">Prueba push desde admin</textarea></label>
-      </div>
       <div style="flex:1; min-width:220px">
-        <label>Destino<br>
-          <select id="aud" style="width:100%; padding:8px; border:1px solid #ddd; border-radius:8px;">
+        <label>Email de cuenta<br>
+          <input id="email" type="text" value="info@movilive.com" placeholder="email dueño de los dispositivos">
+        </label>
+      </div>
+      <div style="flex:1; min-width:180px">
+        <label>Admin Key<br>
+          <input id="admkey" type="text" value="abc123">
+        </label>
+      </div>
+      <div style="flex:1; min-width:160px">
+        <label>Idioma destino<br>
+          <select id="lang">
             <option value="all">Todos</option>
-            <option value="web">Solo Desktop/Web</option>
-            <option value="android">Solo Android</option>
-            <option value="selected">Seleccionados (checkbox)</option>
+            <option value="es">Español (es)</option>
+            <option value="en">Inglés (en)</option>
+            <option value="pt">Portugués (pt)</option>
           </select>
         </label>
       </div>
     </div>
-
-    <div class="row" style="margin-top:10px">
-      <button id="btnSend" class="btn btn-primary">Enviar</button>
-      <div class="hint">Android recibirá <b>notificación visible</b>. Desktop/Web recibirá <b>data-only</b> para evitar duplicados.</div>
-    </div>
-    <div id="sendMsg" style="margin-top:6px"></div>
-  </div>
-
-  <div class="card" style="margin-bottom:12px">
-    <div class="row" style="justify-content:space-between">
-      <div>
-        <b>Dispositivos</b>
-        <span class="muted">(Usá “Cargar dispositivos” para refrescar)</span>
+    <div class="row">
+      <div style="flex:1; min-width:240px">
+        <label>Título<br>
+          <input id="title" type="text" placeholder="Título" value="Hola 👋">
+        </label>
       </div>
-      <div class="muted">Android PWA aparece como plataforma “web”, lo distinguimos por <code>device_id</code> (empieza con <b>ANDROID_CHROME_</b>).</div>
+      <div style="flex:2; min-width:280px">
+        <label>Mensaje<br>
+          <textarea id="body" rows="3" placeholder="Texto a mostrar">Mensaje para tus usuarios</textarea>
+        </label>
+      </div>
     </div>
-    <div class="scroll">
-      <table id="devTable">
-        <thead>
-          <tr>
-            <th><input type="checkbox" id="chkAll"></th>
-            <th>ID</th>
-            <th>device_id</th>
-            <th>platform</th>
-            <th>last_seen</th>
-            <th>token (inicio)</th>
-          </tr>
-        </thead>
-        <tbody id="devBody"></tbody>
-      </table>
+    <div class="row">
+      <button id="btnSend" class="btn">Enviar</button>
+      <span class="muted">Android recibirá <b>notificación visible</b>. Desktop/Web recibirá <b>data-only</b> (el SW muestra).</span>
     </div>
+    <div id="sendMsg" class="result"></div>
   </div>
 
   <div class="card">
-    <div><b>Diagnóstico</b> <span class="muted">(ayuda a ver qué devuelve el backend)</span></div>
-    <div class="row" style="margin-top:8px">
-      <button id="btnDiag" class="btn btn-green">Volcar respuesta cruda</button>
-      <span class="muted">Si “Desktop/Web” da <code>targeted: 0</code>, revisá que acá aparezca un device con <b>WEB_DESKTOP_…</b></span>
+    <div class="row">
+      <button id="btnPreview" class="btn" style="background:#111827">Previsualizar destinatarios</button>
+      <span id="previewMsg" class="muted"></span>
     </div>
-    <pre id="diagBox" style="margin-top:8px; display:none"></pre>
   </div>
 
 <script>
+(() => {
   const BACKEND = "https://jesus-backend-production-1098.up.railway.app";
 
-  const el = (id) => document.getElementById(id);
-  const emailEl = el("email");
-  const keyEl = el("admkey");
-  const loadMsg = el("loadMsg");
-  const sendMsg = el("sendMsg");
-  const devBody = el("devBody");
-  const chkAll = el("chkAll");
-  const audEl = el("aud");
-  const titleEl = el("title");
-  const bodyEl = el("body");
-  const countersEl = el("counters");
-  const diagBox = el("diagBox");
-  const btnDiag = el("btnDiag");
+  const $ = (id) => document.getElementById(id);
+  const emailEl = $("email");
+  const keyEl = $("admkey");
+  const langEl = $("lang");
+  const titleEl = $("title");
+  const bodyEl = $("body");
+  const btnSend = $("btnSend");
+  const sendMsg = $("sendMsg");
+  const btnPreview = $("btnPreview");
+  const previewMsg = $("previewMsg");
 
-  let devices = [];
-
-  function rowHTML(d, idx){
-    const token20 = (d.fcm_token||"").slice(0,20) + "…";
-    const isAndroid = /ANDROID_CHROME_/i.test(d.device_id||"");
-    const platPill = `<span class="pill">${d.platform||"?"}</span> ${isAndroid ? '<span class="badge badge-android">ANDROID</span>' : '<span class="badge badge-desktop">DESKTOP</span>'}`;
-    return `
-      <tr>
-        <td><input type="checkbox" data-idx="${idx}"></td>
-        <td>${d.id}</td>
-        <td>${d.device_id||""}</td>
-        <td>${platPill}</td>
-        <td class="muted">${d.last_seen||""}</td>
-        <td class="muted" title="${d.fcm_token||""}">${token20}</td>
-      </tr>
-    `;
+  function isAndroidDeviceId(device_id){
+    return /ANDROID_CHROME_/i.test(device_id||"");
   }
 
-  function renderTable(){
-    devBody.innerHTML = devices.map((d,i)=>rowHTML(d,i)).join("");
-    const androidCount = devices.filter(d => /ANDROID_CHROME_/i.test(d.device_id||"")).length;
-    const desktopCount = devices.length - androidCount;
-    countersEl.innerHTML = `
-      <span class="badge badge-desktop">Desktop/Web: ${desktopCount}</span>
-      &nbsp;
-      <span class="badge badge-android">Android: ${androidCount}</span>
-    `;
+  function filterByLang(devices, lang){
+    if (lang === "all") return devices;
+    return devices.filter(d => (d.lang || "").toLowerCase().startsWith(lang.toLowerCase()));
   }
 
-  async function loadDevices(){
-    sendMsg.textContent = "";
-    devBody.innerHTML = "";
-    devices = [];
-    chkAll.checked = false;
-    loadMsg.textContent = "Cargando…";
-    diagBox.style.display = "none";
-    try{
-      // ⚠️ no-cache para evitar listas viejas
-      const url = `${BACKEND}/users/push/devices?email=${encodeURIComponent(emailEl.value.trim())}&t=${Date.now()}`;
-      const r = await fetch(url, { cache: "no-store" });
-      const j = await r.json();
-      if(!j || j.ok === false){ throw new Error(j?.error || "Error al cargar"); }
-      const raw = Array.isArray(j.devices) ? j.devices : [];
+  async function fetchDevices(email){
+    const url = `${BACKEND}/users/push/devices?email=${encodeURIComponent(email)}&t=${Date.now()}`;
+    const r = await fetch(url, { cache:"no-store" });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const j = await r.json();
+    if (!j || j.ok === false) throw new Error(j?.error || "error_backend");
+    return Array.isArray(j.devices) ? j.devices : [];
+  }
 
-      // Normalizamos typos visibles (no cambia backend)
-      devices = raw.map(d => {
-        let device_id = d.device_id || "";
-        if(/^ANDRID_CRHOME_/i.test(device_id)){
-          device_id = device_id.replace(/^ANDRID_CRHOME_/i, "ANDROID_CHROME_");
+  async function adminSendByToken(token, visibleOnAndroid){
+    // visibleOnAndroid=true => notification visible (webDataOnly=false)
+    // Desktop/Web => data-only con __title/__body (webDataOnly=true)
+    const title = titleEl.value.trim() || "Notificación";
+    const body  = bodyEl.value.trim() || "";
+
+    const payload = visibleOnAndroid
+      ? {
+          fcm_token: token,
+          platform: "web",
+          title,
+          body,
+          data: { act: "open_app", url: "/" },
+          webDataOnly: false
         }
-        return { ...d, device_id };
-      });
+      : {
+          fcm_token: token,
+          platform: "web",
+          title, // opcional, lo importante va en data
+          body,
+          data: { __title: title, __body: body, url: "/" },
+          webDataOnly: true
+        };
 
-      renderTable();
-      loadMsg.innerHTML = `<span class="ok">OK</span> ${devices.length} dispositivos`;
-    }catch(e){
-      loadMsg.innerHTML = `<span class="err">Fallo</span> ${(e && e.message) || e}`;
-    }
-  }
-
-  function selectedDevices(){
-    if(audEl.value !== "selected") return devices;
-    const checks = devBody.querySelectorAll('input[type="checkbox"][data-idx]');
-    const out = [];
-    checks.forEach(c => { if(c.checked){ out.push(devices[Number(c.dataset.idx)]); } });
-    return out;
-  }
-
-  function audienceFilter(list){
-    const mode = audEl.value;
-    if(mode === "all" || mode === "selected") return list;
-    if(mode === "web"){
-      // Desktop/Web = todo lo que NO tenga ANDROID_CHROME_
-      return list.filter(d => !/ANDROID_CHROME_/i.test(d.device_id||""));
-    }
-    if(mode === "android"){
-      return list.filter(d => /ANDROID_CHROME_/i.test(d.device_id||""));
-    }
-    return list;
-  }
-
-  async function adminSendByToken(token, title, body, webDataOnly){
-    const payload = {
-      fcm_token: token,
-      platform: "web",
-      title,
-      body,
-      data: { act: "open_app" },
-      webDataOnly
-    };
     const r = await fetch(`${BACKEND}/users/push/admin-send`, {
       method: "POST",
       headers: {
@@ -223,69 +139,65 @@
     return r.json();
   }
 
-  async function handleSend(){
-    sendMsg.textContent = "Enviando…";
-    const title = titleEl.value.trim() || "Notificación";
-    const body  = bodyEl.value.trim() || "";
-
-    const baseList = selectedDevices();
-    const list = audienceFilter(baseList);
-
-    if(list.length === 0){
-      sendMsg.innerHTML = `<span class="err">No hay dispositivos para ese destino.</span>`;
-      return;
+  async function preview(){
+    previewMsg.textContent = "Cargando…";
+    try {
+      const email = emailEl.value.trim();
+      if (!email) throw new Error("Ingresá el email de cuenta.");
+      const devs = await fetchDevices(email);
+      const filtered = filterByLang(devs, langEl.value);
+      const cntAndroid = filtered.filter(d => isAndroidDeviceId(d.device_id)).length;
+      const cntDesktop = filtered.length - cntAndroid;
+      previewMsg.textContent = `Encontrados: ${filtered.length} · Desktop/Web: ${cntDesktop} · Android: ${cntAndroid}`;
+    } catch (e) {
+      previewMsg.textContent = "Fallo: " + (e?.message || e);
     }
+  }
 
-    // 👇 Log de qué device_ids se intentan (ayuda a ver si hay desktops)
-    console.log("[ADMIN] Enviando a device_ids:", list.map(d => d.device_id));
+  async function sendAll(){
+    sendMsg.textContent = "Enviando…";
+    btnSend.disabled = true;
+    try {
+      const email = emailEl.value.trim();
+      if (!email) throw new Error("Ingresá el email de cuenta.");
+      const devices = await fetchDevices(email);
+      const list = filterByLang(devices, langEl.value);
 
-    let targeted = 0, sent = 0, failed = 0;
-    for(const d of list){
-      if(!d.fcm_token) continue;
-      targeted++;
-      const isAndroid = /ANDROID_CHROME_/i.test(d.device_id||"");
-      const webDataOnly = !isAndroid; // desktop=data-only, android=visible
-      try{
-        const resp = await adminSendByToken(d.fcm_token, title, body, webDataOnly);
-        if(resp && resp.ok !== false){
-          if(resp.sent > 0 || (resp.results && resp.results[0]?.ok)) sent++;
-          else failed++;
-        }else{
+      if (list.length === 0) {
+        sendMsg.innerHTML = `<span class="err">No hay dispositivos para ese idioma.</span>`;
+        return;
+      }
+
+      let targeted = 0, sent = 0, failed = 0;
+      for (const d of list) {
+        if (!d.fcm_token) continue;
+        targeted++;
+        const isAndroid = isAndroidDeviceId(d.device_id);
+        try {
+          const resp = await adminSendByToken(d.fcm_token, isAndroid);
+          if (resp && resp.ok !== false) {
+            if (resp.sent > 0 || (resp.results && resp.results[0]?.ok)) sent++;
+            else failed++;
+          } else {
+            failed++;
+          }
+        } catch {
           failed++;
         }
-      }catch{
-        failed++;
       }
-    }
 
-    sendMsg.innerHTML = `<b>Resultado:</b> targeted=${targeted} · sent=${sent} · failed=${failed}`;
-  }
-
-  async function dumpRaw(){
-    try{
-      const url = `${BACKEND}/users/push/devices?email=${encodeURIComponent(emailEl.value.trim())}&t=${Date.now()}`;
-      const r = await fetch(url, { cache: "no-store" });
-      const j = await r.json();
-      diagBox.style.display = "block";
-      diagBox.textContent = JSON.stringify(j, null, 2);
-    }catch(e){
-      diagBox.style.display = "block";
-      diagBox.textContent = "Error dump: " + (e?.message || e);
+      const cls = failed ? "err" : "ok";
+      sendMsg.innerHTML = `<span class="${cls}"><b>Resultado:</b> targeted=${targeted} · sent=${sent} · failed=${failed}</span>`;
+    } catch (e) {
+      sendMsg.innerHTML = `<span class="err">Fallo al enviar: ${(e?.message || e)}</span>`;
+    } finally {
+      btnSend.disabled = false;
     }
   }
 
-  // Eventos
-  el("btnLoad").addEventListener("click", loadDevices);
-  el("btnSend").addEventListener("click", handleSend);
-  chkAll.addEventListener("change", () => {
-    const checks = devBody.querySelectorAll('input[type="checkbox"][data-idx]');
-    checks.forEach(c => c.checked = chkAll.checked);
-  });
-  btnDiag.addEventListener("click", dumpRaw);
-
-  // Carga inicial
-  loadDevices();
+  btnPreview.addEventListener("click", preview);
+  btnSend.addEventListener("click", sendAll);
+})();
 </script>
-
 </body>
 </html>
