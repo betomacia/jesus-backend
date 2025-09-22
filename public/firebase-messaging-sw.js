@@ -1,4 +1,3 @@
-// public/firebase-messaging-sw.js
 importScripts('https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js');
 importScripts('https://www.gstatic.com/firebasejs/10.12.2/firebase-messaging-compat.js');
 
@@ -14,6 +13,22 @@ firebase.initializeApp({
 });
 
 const messaging = firebase.messaging();
+
+/* ===== DEBUG: informar cada notificación saliente desde el SW (NO intrusivo) ===== */
+async function __dbg_postToClients(msg) {
+  try {
+    const cs = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+    for (const c of cs) {
+      try { c.postMessage({ __fromSW: true, ...msg }); } catch {}
+    }
+  } catch {}
+}
+const __origShow = self.registration.showNotification.bind(self.registration);
+self.registration.showNotification = async (title, options) => {
+  __dbg_postToClients({ type: "SW_NOTIFY", title, options });
+  return __origShow(title, options);
+};
+/* ========================================================================= */
 
 /**
  * BACKGROUND:
@@ -44,7 +59,6 @@ messaging.onBackgroundMessage((payload) => {
     body,
     icon,
     data: ndata,
-    // Opcionales:
     // tag: data.tag || undefined,
     // renotify: !!data.tag,
     // requireInteraction: data.requireInteraction === "true",
@@ -65,32 +79,24 @@ self.addEventListener("notificationclick", (event) => {
   let targetUrl = rawUrl;
 
   try {
-    // Si es relativa, que sea absoluta en este origen.
     if (rawUrl.startsWith("/")) {
       targetUrl = new URL(rawUrl, self.location.origin).toString();
     } else {
-      // Si ya es absoluta y válida, la usamos tal cual
       targetUrl = new URL(rawUrl).toString();
     }
   } catch {
-    // Si falló parseo, volvemos a la raíz
     targetUrl = self.location.origin + "/";
   }
 
   event.waitUntil((async () => {
     const allClients = await clients.matchAll({ type: "window", includeUncontrolled: true });
-
-    // Intentamos enfocar una pestaña del mismo origen; si coincide exactamente, mejor
     for (const client of allClients) {
-      // Mismo origen
       if (client.url && client.url.startsWith(self.location.origin)) {
-        // Si ya está en la misma URL o es la app, enfocamos
         if (client.url === targetUrl || client.url === self.location.origin + "/") {
           if ("focus" in client) return client.focus();
         }
       }
     }
-    // Abrir nueva pestaña si no encontramos una para enfocar
     if (clients.openWindow) return clients.openWindow(targetUrl);
   })());
 });
