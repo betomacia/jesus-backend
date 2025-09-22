@@ -12,181 +12,13 @@ const bodyParser = require("body-parser");
 const OpenAI = require("openai");
 const path = require("path");
 const fs = require("fs/promises");
-const pushAdminRouter = require("./routes/push_admin");
+
 require("dotenv").config();
 
 const app = express();
 app.use(cors({ origin: true })); // CORS permisivo
 app.use(bodyParser.json());
 
-// 👉 ADMIN PANEL: sirve /admin desde /public si existe; si no, usa fallback embebido
-const PUBLIC_DIR = path.join(__dirname, "public");
-
-// HTML mínimo embebido (fallback) para enviar notificaciones admin
-const ADMIN_HTML_FALLBACK = `<!doctype html>
-<html lang="es">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Admin Push</title>
-<style>
-  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
-       background:#0b1220;color:#e7ecf3;margin:0;padding:24px}
-  .card{max-width:780px;margin:0 auto;background:#111827;border:1px solid #1f2937;
-        border-radius:16px;padding:20px;box-shadow:0 10px 30px rgba(0,0,0,.35)}
-  h1{margin:0 0 12px;font-size:20px}
-  label{display:block;margin-top:12px;font-size:14px;color:#cbd5e1}
-  input,select,textarea{width:100%;margin-top:6px;padding:10px;border-radius:10px;
-        border:1px solid #374151;background:#0f172a;color:#e5e7eb}
-  textarea{min-height:90px}
-  .row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-  .btns{display:flex;gap:12px;justify-content:flex-end;margin-top:16px}
-  button{padding:10px 14px;border-radius:999px;border:1px solid #334155;
-         background:#0ea5e9;color:white;cursor:pointer}
-  button:disabled{opacity:.6;cursor:not-allowed}
-  pre{white-space:pre-wrap;background:#0b1020;border:1px solid #1f2a44;
-      border-radius:12px;padding:12px;margin-top:16px}
-</style>
-</head>
-<body>
-  <div class="card">
-    <h1>Panel de notificaciones</h1>
-    <p style="margin:0 0 8px;color:#94a3b8">
-      Envía push a usuarios recientes. Requiere <code>ADMIN_PUSH_KEY</code>.
-    </p>
-
-    <label>Admin key
-      <input id="admin_key" type="password" placeholder="ADMIN_PUSH_KEY" />
-    </label>
-
-    <div class="row">
-      <label>Título
-        <input id="title" placeholder="Título de la notificación" value="Mensaje para ti" />
-      </label>
-      <label>Plataforma
-        <select id="platform">
-          <option value="">(todas)</option>
-          <option value="web" selected>web</option>
-          <option value="android">android</option>
-          <option value="ios">ios</option>
-        </select>
-      </label>
-    </div>
-
-    <label>Cuerpo
-      <textarea id="body" placeholder="Texto corto de la notificación">¿Tomamos 60 segundos para respirar y hablar?</textarea>
-    </label>
-
-    <label>Data (JSON opcional)
-      <input id="data" placeholder='{"action":"open_app","url":"/"}' value='{"action":"open_app","url":"/"}' />
-    </label>
-
-    <div class="row">
-      <label>Última actividad (días)
-        <input id="last_seen_days" type="number" min="1" max="365" value="30" />
-      </label>
-      <label>Límite de dispositivos
-        <input id="limit" type="number" min="1" max="10000" value="1000" />
-      </label>
-    </div>
-
-    <div class="row">
-      <label>Preferir device_id que comience con…
-        <input id="prefer_prefix" value="ANDROID_CHROME" />
-      </label>
-      <label>Agrupar por usuario (1 device por user)
-        <select id="group_by_user">
-          <option value="true" selected>sí</option>
-          <option value="false">no</option>
-        </select>
-      </label>
-    </div>
-
-    <label>Web data-only (lo dibuja el Service Worker; evita duplicados)
-      <select id="webDataOnly">
-        <option value="true" selected>true</option>
-        <option value="false">false</option>
-      </select>
-    </label>
-
-    <div class="btns">
-      <button id="sendBtn">Enviar</button>
-    </div>
-
-    <pre id="out" hidden></pre>
-  </div>
-
-<script>
-const $ = (id) => document.getElementById(id);
-const out = $("out");
-$("sendBtn").onclick = async () => {
-  out.hidden = true;
-  const admin_key = $("admin_key").value.trim();
-  const title = $("title").value.trim();
-  const body  = $("body").value.trim();
-  const platform = $("platform").value || null;
-  const last_seen_days = parseInt($("last_seen_days").value || "30", 10);
-  const limit = parseInt($("limit").value || "1000", 10);
-  const prefer_prefix = $("prefer_prefix").value.trim() || "ANDROID_CHROME";
-  const group_by_user = $("group_by_user").value === "true";
-  const webDataOnly   = $("webDataOnly").value === "true";
-
-  let data = null;
-  const raw = $("data").value.trim();
-  if (raw) { try { data = JSON.parse(raw); } catch { alert("Data no es JSON válido"); return; } }
-
-  const payload = {
-    admin_key, title, body, data,
-    platform, last_seen_days, limit, prefer_prefix,
-    group_by_user, webDataOnly,
-  };
-
-  $("sendBtn").disabled = true;
-  try {
-    const r = await fetch("/users/push/broadcast", {
-      method: "POST",
-      headers: { "Content-Type": "application/json; charset=utf-8" },
-      body: JSON.stringify(payload),
-    });
-    const j = await r.json().catch(() => ({}));
-    out.hidden = false;
-    out.textContent = JSON.stringify(j, null, 2);
-  } catch (e) {
-    out.hidden = false;
-    out.textContent = "Error: " + (e && e.message || e);
-  } finally {
-    $("sendBtn").disabled = false;
-  }
-};
-</script>
-</body>
-</html>`;
-
-app.get(["/admin", "/admin.html"], async (req, res) => {
-  try {
-    const file = path.join(PUBLIC_DIR, "admin.html");
-    await fs.access(file);              // existe? sirve archivo real
-    return res.sendFile(file);
-  } catch {
-    // fallback embebido
-    res.type("html").send(ADMIN_HTML_FALLBACK);
-  }
-});
-
-// (opcional) servir activos extra si pones CSS/JS en /public más adelante
-app.use("/admin-assets", express.static(PUBLIC_DIR, { index: false }));
-
-
-// 👉 STATIC ADMIN PANEL (debe ir ANTES del middleware que fuerza JSON)
-app.use(express.static(path.join(__dirname, "public"), {
-  index: false,              // evita servir index por defecto
-  extensions: ["html"],      // permite /admin sin .html
-}));
-
-// Acceso directo al panel
-app.get(["/admin", "/admin.html"], (_req, res) => {
-  res.sendFile(path.join(__dirname, "public", "admin.html"));
-});
 
 
 // Forzar JSON UTF-8 en todas las respuestas (evita mojibake de acentos/¿?)
@@ -200,7 +32,7 @@ app.use("/contact", contactRouter);
 app.use("/users", usersRouter);
 const chatRouter = require("./routes/chat");
 app.use("/chat", chatRouter);
-app.use("/push", pushAdminRouter);
+
 
 
 // ---------- OpenAI ----------
@@ -640,6 +472,7 @@ app.get("/api/heygen/config", (_req, res) => {
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
+
 
 
 
