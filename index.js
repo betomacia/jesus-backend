@@ -12,7 +12,7 @@ const fs = require("fs/promises");
 require("dotenv").config();
 
 
-const { logAskEvent } = require("./services/analytics"); // <- logger de /api/ask
+
 
 const app = express();
 app.use(cors({ origin: true })); // CORS permisivo
@@ -457,6 +457,7 @@ app.get("/api/heygen/config", (_req, res) => {
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
+
 
 
 
