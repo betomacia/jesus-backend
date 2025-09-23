@@ -15,6 +15,7 @@ const path = require("path");
 const fs = require("fs/promises");
 const { query, ping } = require("./db/pg");
 require("dotenv").config();
+const { getWelcomeText } = require("./service/welcometext");
 
 const app = express();
 app.use(cors({ origin: true }));
@@ -270,40 +271,51 @@ app.get("/db/test", async (_req, res) => {
 // ---------- /api/welcome ----------
 app.post("/api/welcome", async (req, res) => {
   try {
-    const { lang = "es", name = "", sex = "", hour = null, tzOffsetMinutes = null, userId = "anon" } = req.body || {};
+    const {
+      lang = "es",
+      name = "",
+      sex = "",
+      userId = "anon",
+      history = [],
+      // compatibilidad: aceptamos localHour directo, o bien hour/tzOffsetMinutes
+      localHour = null,
+      hour = null,
+      tzOffsetMinutes = null,
+    } = req.body || {};
 
-    // Hora local preferida del móvil
-    const localHour = resolveLocalHour({ hour, tzOffsetMinutes });
-    const hi = greetingByHour(lang, localHour);
+    // Si no viene localHour, resolvemos con hour/tzOffsetMinutes
+    const resolvedHour = Number.isInteger(localHour)
+      ? localHour
+      : resolveLocalHour({ hour, tzOffsetMinutes });
 
-    // Memoria: nombre/sexo
+    // Persistimos nombre/sexo como ya hacías
     const mem = await readMem(userId);
     const nm = String(name || mem.name || "").trim();
-    const sx = String(sex || mem.sex || "").trim().toLowerCase(); // male|female|""
+    const sx = String(sex || mem.sex || "").trim().toLowerCase(); // male|female|"" (unknown)
     if (nm) mem.name = nm;
     if (sx === "male" || sx === "female") mem.sex = sx;
     await writeMem(userId, mem);
 
-    // Saludo base
-    let sal = nm ? `${hi}, ${nm}.` : `${hi}.`;
+    // Llamamos al servicio (usa 1 frase AI + 1 pregunta variada, con Hijo/Hija 25% y saludo por hora)
+    const out = await getWelcomeText({
+      lang,
+      name: nm,
+      userId,
+      history,
+      localHour: resolvedHour,
+      gender: mem.sex || "unknown",
+    });
 
-    // Ocasional: Hijo/Hija mía (~30%), solo si hay sexo definido
-    if (Math.random() < 0.30) {
-      if (mem.sex === "female") sal += " Hija mía,";
-      else if (mem.sex === "male") sal += " Hijo mío,";
-      // si no hay sexo, no agrega nada
-    }
+    res.json(out);
+  } catch (e) {
+    console.error("WELCOME ERROR:", e);
+    res.json({
+      message: "La paz sea contigo. ¿De qué te gustaría hablar hoy?",
+      question: "¿En qué te puedo acompañar ahora?",
+    });
+  }
+});
 
-    // Frases alentadoras dinámicas (OpenAI)
-    let phrases = [];
-    try {
-      const sys = `Devuélveme un JSON {"phrases":["..."]} con 6 frases alentadoras, breves, cotidianas, no cursis ni muy religiosas explícitas, en ${lang}. Sin repetir conceptos.`;
-      const r = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        temperature: 0.9,
-        messages: [{ role: "system", content: sys }],
-        response_format: { type: "json_object" },
-      });
       const content = r?.choices?.[0]?.message?.content || "{}";
       const data = JSON.parse(content);
       if (Array.isArray(data.phrases)) phrases = data.phrases;
@@ -548,3 +560,4 @@ app.get("/api/heygen/config", (_req, res) => {
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
+
