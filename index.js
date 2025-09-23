@@ -9,6 +9,7 @@ const bodyParser = require("body-parser");
 const OpenAI = require("openai");
 const path = require("path");
 const fs = require("fs/promises");
+const { query, ping } = require("./db/pg");
 require("dotenv").config();
 
 
@@ -457,6 +458,7 @@ app.get("/api/heygen/config", (_req, res) => {
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
+
 
 
 
