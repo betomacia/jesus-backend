@@ -1,6 +1,11 @@
-// index.js — Backend monolítico, estable y sin imports externos a rutas
-// Arranca incluso si faltan otras carpetas/archivos.
-// Node 18+ (tiene fetch global). CommonJS.
+// index.js — Backend monolítico, dominios acotados y respuestas naturales (multi-idioma)
+// Cambios clave:
+// - /api/welcome con frase fija "Hoy es un buen día para empezar de nuevo." + 2-3 frases de OpenAI (variadas)
+// - "Hijo/Hija mía" ocasional (~30%) y solo si sex="male"/"female"
+// - Hora local: usa req.body.hour o tzOffsetMinutes si viene del móvil; fallback a hora del servidor
+// - /api/ask: siempre incluye bible en objeto separado; el message NO trae la cita (evita doble cita en frontend)
+// - OFFTOPIC ampliado (química, física, geometría, informática, computación, etc.)
+// - Anti-repetición de versículos + ban Mateo 11:28 + fallbacks por idioma
 
 const express = require("express");
 const cors = require("cors");
@@ -8,16 +13,8 @@ const bodyParser = require("body-parser");
 const OpenAI = require("openai");
 const path = require("path");
 const fs = require("fs/promises");
+const { query, ping } = require("./db/pg");
 require("dotenv").config();
-
-// ---- (Opcional DB) si no tenés db/pg, podés comentar estas 2 líneas y los endpoints /db/*:
-let query = async () => ({ rows: [] });
-let ping = async () => Date.now();
-try {
-  const db = require("./db/pg");
-  query = db.query || query;
-  ping = db.ping || ping;
-} catch { /* sin DB */ }
 
 const app = express();
 app.use(cors({ origin: true }));
@@ -26,12 +23,34 @@ app.use(bodyParser.json());
 // ---------- OpenAI ----------
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// ---------- Utils/Memory (inline) ----------
+// ---------- Utils ----------
 const NORM = (s = "") => String(s).toLowerCase().replace(/\s+/g, " ").trim();
+const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
 
 function langLabel(l = "es") {
-  const m = { es: "Español", en: "English", pt: "Português", it: "Italiano", de: "Deutsch", ca: "Català", fr: "Français" };
+  const m = {
+    es: "Español",
+    en: "English",
+    pt: "Português",
+    it: "Italiano",
+    de: "Deutsch",
+    ca: "Català",
+    fr: "Français",
+  };
   return m[l] || "Español";
+}
+
+// Hora local: si el móvil manda `hour` (0-23) la usamos; si manda tzOffsetMinutes (minutos respecto UTC), la convertimos.
+// Si no hay nada, usamos server time.
+function resolveLocalHour({ hour = null, tzOffsetMinutes = null } = {}) {
+  if (Number.isInteger(hour) && hour >= 0 && hour <= 23) return hour;
+  if (Number.isInteger(tzOffsetMinutes)) {
+    const nowUtc = new Date(Date.now());
+    const localMs = nowUtc.getTime() - (tzOffsetMinutes * 60 * 1000);
+    const local = new Date(localMs);
+    return local.getHours();
+  }
+  return new Date().getHours();
 }
 
 function greetingByHour(lang = "es", hour = null) {
@@ -48,7 +67,51 @@ function greetingByHour(lang = "es", hour = null) {
   }
 }
 
-// Fallback de versículos (por idioma)
+const DAILY_FALLBACKS = {
+  es: [
+    "La fe abre caminos donde parece no haberlos.",
+    "Un paso pequeño también es avance.",
+    "La paz crece con actos sencillos.",
+    "Dios obra también en lo cotidiano.",
+    "No estás solo: da hoy un paso más.",
+    "Tu corazón puede encontrar descanso.",
+  ],
+  en: [
+    "Faith opens paths where none are seen.",
+    "A small step is still progress.",
+    "Peace grows from simple acts.",
+    "God works in the everyday.",
+    "You are not alone: take one more step.",
+  ],
+  pt: [
+    "A fé abre caminhos quando nada se vê.",
+    "Um pequeno passo também é avanço.",
+    "A paz cresce em gestos simples.",
+  ],
+  it: [
+    "La fede apre strade dove non si vedono.",
+    "Un piccolo passo è comunque un progresso.",
+  ],
+  de: [
+    "Glaube öffnet Wege, wo keine sichtbar sind.",
+    "Ein kleiner Schritt ist dennoch Fortschritt.",
+  ],
+  ca: [
+    "La fe obre camins on no se’n veuen.",
+    "Un petit pas també és avançar.",
+  ],
+  fr: [
+    "La foi ouvre des chemins invisibles.",
+    "Un petit pas est déjà un progrès.",
+  ],
+};
+
+function dayFallback(lang = "es") {
+  const arr = DAILY_FALLBACKS[lang] || DAILY_FALLBACKS["es"];
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+// ---------- Fallback de versículos (por idioma) ----------
 const FALLBACK_VERSES = {
   es: [
     { ref: "Salmos 34:18", text: "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu." },
@@ -85,19 +148,59 @@ const FALLBACK_VERSES = {
 };
 function pickFallbackVerse(lang = "es", avoidSet = new Set()) {
   const list = FALLBACK_VERSES[lang] || FALLBACK_VERSES["es"];
-  for (const v of list) if (!avoidSet.has(NORM(v.ref))) return v;
+  for (const v of list) {
+    if (!avoidSet.has(NORM(v.ref))) return v;
+  }
   return list[0];
 }
 
-// Filtros de alcance reforzados
+// ---------- Memoria en FS (simple) ----------
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
+async function ensureDataDir() { try { await fs.mkdir(DATA_DIR, { recursive: true }); } catch {} }
+function memPath(uid) {
+  const safe = String(uid || "anon").replace(/[^a-z0-9_-]/gi, "_");
+  return path.join(DATA_DIR, `mem_${safe}.json`);
+}
+async function readMem(userId) {
+  await ensureDataDir();
+  try {
+    const raw = await fs.readFile(memPath(userId), "utf8");
+    const m = JSON.parse(raw);
+    return {
+      name: m.name || "",
+      sex: m.sex || "", // "male" | "female" | "" (unknown)
+      last_user_text: m.last_user_text || "",
+      last_user_ts: m.last_user_ts || 0,
+      last_bot: m.last_bot || null,
+      last_refs: Array.isArray(m.last_refs) ? m.last_refs : [],
+    };
+  } catch {
+    return {
+      name: "",
+      sex: "",
+      last_user_text: "",
+      last_user_ts: 0,
+      last_bot: null,
+      last_refs: [],
+    };
+  }
+}
+async function writeMem(userId, mem) {
+  await ensureDataDir();
+  await fs.writeFile(memPath(userId), JSON.stringify(mem, null, 2), "utf8");
+}
+
+// ---------- Filtros de alcance ----------
 const OFFTOPIC = [
   // entretenimiento/deporte/celebridades
   /\b(f[úu]tbol|futbol|deporte|champions|nba|tenis|selecci[oó]n|mundial|goles?)\b/i,
   /\b(pel[ií]cula|serie|netflix|hbo|max|disney|spotify|cantante|concierto|celebridad|famos[oa]s?)\b/i,
 
-  // técnica/ciencia/educación
-  /\b(program(a|ar|aci[oó]n)|c[oó]digo|javascript|react|inform[aá]tica|computaci[oó]n|pc|ordenador|linux|windows|red(es)?|wifi|driver|api|prompt|base de datos|docker|kubernetes|github)\b/i,
-  /\b(matem[aá]ticas?|algebra|c[aá]lculo|geometr[ií]a|f[ií]sica|qu[ií]mica|biolog[ií]a|cient[ií]fico|ecuaci[oó]n|derivadas?|integrales?)\b/i,
+  // técnica/ciencia/educación (ampliado)
+  /\b(program(a|ar|aci[oó]n)|c[oó]digo|javascript|react|inform[aá]tica|computaci[oó]n|pc|ordenador|linux|windows|macos|driver|api|prompt)\b/i,
+  /\b(ingenier[ií]a|software|hardware|servidor|cloud|nube|red(es)?|wifi|routing|docker|kubernetes)\b/i,
+  /\b(matem[aá]ticas?|algebra|c[aá]lculo|geometr[ií]a|trigonometr[ií]a)\b/i,
+  /\b(f[ií]sica|qu[ií]mica|biolog[ií]a|geolog[ií]a|astronom[ií]a|laboratorio)\b/i,
 
   // mecánica/electrónica/juegos
   /\b(mec[aá]nica|alternador|bater[ií]a del auto|motor|embrague|inyector|buj[ií]a|correa|nafta|diesel)\b/i,
@@ -108,7 +211,7 @@ const OFFTOPIC = [
   /\b(pa[ií]s|capital|mapa|d[oó]nde queda|ubicaci[oó]n|distancia|kil[oó]metros|frontera|r[íi]o|monta[ñn]a|cordillera)\b/i,
   /\b(viaje|hotel|playa|turismo|destino|vuelo|itinerario|tour|gu[ií]a tur[ií]stica)\b/i,
 
-  // gastronomía / comidas / bebidas
+  // gastronomía / comidas / bebidas (reforzado)
   /\b(gastronom[ií]a|gastronomia|cocina|recet(a|ario)s?|platos?|ingredientes?|men[uú]|men[uú]s|postres?|dulces?|salado?s?)\b/i,
   /\b(comida|comidas|almuerzo|cena|desayuno|merienda|vianda|raci[oó]n|calor[ií]as|nutrici[oó]n|dieta)\b/i,
   /\b(bebidas?|vino|cerveza|licor|coctel|c[oó]ctel|trago|fermentado|maridaje|bar|caf[eé]|cafeter[ií]a|restaurante|restaurantes?)\b/i,
@@ -117,11 +220,20 @@ const OFFTOPIC = [
   /\b(pol[ií]tica|elecci[oó]n|partido|diputado|senador|presidente|gobierno)\b/i,
   /\b(criptomonedas?|bitcoin|acciones|bolsa|nasdaq|d[oó]lar|euro)\b/i,
 ];
+
 const RELIGIOUS_ALLOW = [
   /\b(iglesia|templo|catedral|parroquia|misa|sacramento|oraci[oó]n|santuario|santo|santos|biblia|evangelio|rosario|confesi[oó]n|eucarist[ií]a|liturgia|vaticano|lourdes|f[aá]tima|peregrinaci[oó]n|camino de santiago)\b/i,
 ];
-function isReligiousException(s) { const x = NORM(s); return RELIGIOUS_ALLOW.some((r) => r.test(x)); }
-function isOffTopic(s) { const x = NORM(s); return OFFTOPIC.some((r) => r.test(x)); }
+
+function isReligiousException(s) {
+  const x = NORM(s);
+  return RELIGIOUS_ALLOW.some((r) => r.test(x));
+}
+function isOffTopic(s) {
+  const x = NORM(s);
+  return OFFTOPIC.some((r) => r.test(x));
+}
+
 function isGibberish(s) {
   const x = (s || "").trim();
   if (!x) return true;
@@ -130,100 +242,107 @@ function isGibberish(s) {
   return letters < Math.ceil(x.length * 0.25);
 }
 
-// Memoria FS
-const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
-async function ensureDataDir() { try { await fs.mkdir(DATA_DIR, { recursive: true }); } catch {} }
-function memPath(uid) { const safe = String(uid || "anon").replace(/[^a-z0-9_-]/gi, "_"); return path.join(DATA_DIR, `mem_${safe}.json`); }
-async function readMem(userId) {
-  await ensureDataDir();
-  try {
-    const raw = await fs.readFile(memPath(userId), "utf8");
-    const m = JSON.parse(raw);
-    return {
-      last_user_text: m.last_user_text || "",
-      last_user_ts: m.last_user_ts || 0,
-      last_bot: m.last_bot || null,
-      last_refs: Array.isArray(m.last_refs) ? m.last_refs : [],
-      sex: m.sex || "neutral",
-      name: m.name || "",
-    };
-  } catch {
-    return { last_user_text: "", last_user_ts: 0, last_bot: null, last_refs: [], sex: "neutral", name: "" };
-  }
-}
-async function writeMem(userId, mem) {
-  await ensureDataDir();
-  await fs.writeFile(memPath(userId), JSON.stringify(mem, null, 2), "utf8");
-}
+// ---------- Health ----------
+app.get("/", (_req, res) => res.json({ ok: true, service: "backend", ts: Date.now() }));
 
 // ---------- DB Health ----------
 app.get("/db/health", async (_req, res) => {
-  try { const now = await ping(); res.json({ ok: true, now }); }
-  catch (e) { console.error("DB HEALTH ERROR:", e); res.status(500).json({ ok: false, error: String(e) }); }
-});
-app.get("/db/test", async (_req, res) => {
-  try { const r = await query("SELECT COUNT(*)::int AS users FROM users"); res.json({ users: r.rows?.[0]?.users ?? 0 }); }
-  catch (e) { console.error("DB TEST ERROR:", e); res.status(500).json({ ok: false, error: String(e) }); }
+  try {
+    const now = await ping();
+    res.json({ ok: true, now });
+  } catch (e) {
+    console.error("DB HEALTH ERROR:", e);
+    res.status(500).json({ ok: false, error: String(e) });
+  }
 });
 
-// ---------- Health ----------
-app.get("/", (_req, res) => res.json({ ok: true, service: "backend", ts: Date.now() }));
+// (Opcional) Conteo rápido de usuarios
+app.get("/db/test", async (_req, res) => {
+  try {
+    const r = await query("SELECT COUNT(*)::int AS users FROM users");
+    res.json({ users: r.rows?.[0]?.users ?? 0 });
+  } catch (e) {
+    console.error("DB TEST ERROR:", e);
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
 
 // ---------- /api/welcome ----------
 app.post("/api/welcome", async (req, res) => {
   try {
-    const { lang = "es", name = "", sex = "neutral", hour = null, userId = "anon" } = req.body || {};
-    const hi = greetingByHour(lang, hour); // hora local que envía el móvil
-    const nm = String(name || "").trim();
+    const { lang = "es", name = "", sex = "", hour = null, tzOffsetMinutes = null, userId = "anon" } = req.body || {};
 
-    // guardamos nombre/sexo en memoria (para usar a futuro)
+    // Hora local preferida del móvil
+    const localHour = resolveLocalHour({ hour, tzOffsetMinutes });
+    const hi = greetingByHour(lang, localHour);
+
+    // Memoria: nombre/sexo
     const mem = await readMem(userId);
+    const nm = String(name || mem.name || "").trim();
+    const sx = String(sex || mem.sex || "").trim().toLowerCase(); // male|female|""
     if (nm) mem.name = nm;
-    if (sex) mem.sex = sex;
+    if (sx === "male" || sx === "female") mem.sex = sx;
     await writeMem(userId, mem);
 
-    // Pedimos 3 frases alentadoras a OpenAI
-    const sys = `Dame 3 frases breves, alentadoras y positivas, para uso diario, aptas para una audiencia cristiana, sin clichés, en ${lang}. JSON plano {"phrases":["...","...","..."]}`;
+    // Saludo base
+    let sal = nm ? `${hi}, ${nm}.` : `${hi}.`;
+
+    // Ocasional: Hijo/Hija mía (~30%), solo si hay sexo definido
+    if (Math.random() < 0.30) {
+      if (mem.sex === "female") sal += " Hija mía,";
+      else if (mem.sex === "male") sal += " Hijo mío,";
+      // si no hay sexo, no agrega nada
+    }
+
+    // Frases alentadoras dinámicas (OpenAI)
     let phrases = [];
     try {
+      const sys = `Devuélveme un JSON {"phrases":["..."]} con 6 frases alentadoras, breves, cotidianas, no cursis ni muy religiosas explícitas, en ${lang}. Sin repetir conceptos.`;
       const r = await openai.chat.completions.create({
         model: "gpt-4o-mini",
+        temperature: 0.9,
         messages: [{ role: "system", content: sys }],
-        response_format: { type: "json" },
+        response_format: { type: "json_object" },
       });
       const content = r?.choices?.[0]?.message?.content || "{}";
       const data = JSON.parse(content);
       if (Array.isArray(data.phrases)) phrases = data.phrases;
     } catch {
+      // fallback si falla la IA
       phrases = [
-        "Hoy es un buen día para empezar de nuevo.",
-        "La fe abre caminos donde parece no haberlos.",
-        "Un paso pequeño también es avance."
+        dayFallback(lang),
+        dayFallback(lang),
+        dayFallback(lang),
+        dayFallback(lang),
       ];
     }
 
-    let sal = nm ? `${hi}, ${nm}.` : `${hi}.`;
-    // uso no repetitivo de "hijo/hija mía"
-    if (Math.random() < 0.33) {
-      if (sex === "female") sal = `${sal} Hija mía,`;
-      else if (sex === "male") sal = `${sal} Hijo mío,`;
-      else sal = `${sal} Hijo/a mío/a,`;
+    // Frase fija (ES) siempre primera, sin duplicar
+    if (lang === "es") {
+      const MUST = "Hoy es un buen día para empezar de nuevo.";
+      const norm = (s="") => String(s).toLowerCase().replace(/\s+/g, " ").trim();
+      phrases = [MUST, ...phrases.filter(p => norm(p) !== norm(MUST))];
     }
 
-    let bridge = "";
-    if (mem?.last_user_text && Math.random() < 0.5) {
-      bridge =
-        lang === "en" ? " ¿Cómo te sentís con lo que veníamos conversando?" :
-        lang === "pt" ? " Como você se sente sobre o que conversamos?" :
-        lang === "it" ? " Come ti senti rispetto a ciò che conversavamo?" :
-        lang === "de" ? " Wie fühlst du dich in Bezug auf nossa conversa anterior?" :
-        lang === "ca" ? " Com et sents respecte del que parlàvem?" :
-        lang === "fr" ? " Comment te sens-tu par rapport à ce dont nous parlions ?" :
-                        " ¿Cómo te sentís con lo que veníamos conversando?";
+    // shuffle sencillo y tomar 3 (manteniendo la fija al inicio)
+    const head = phrases[0] ? [phrases[0]] : [];
+    const tail = (phrases.slice(1) || []).filter(Boolean);
+    for (let i = tail.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [tail[i], tail[j]] = [tail[j], tail[i]];
+    }
+    const picked = head.concat(tail.slice(0, 2)); // fija + 2
+
+    // dedup fuerte + limpiar
+    const seen = new Set();
+    const unique = [];
+    for (const p of picked) {
+      const k = (p || "").toLowerCase().replace(/\s+/g, " ").trim();
+      if (k && !seen.has(k)) { seen.add(k); unique.push(p.trim()); }
     }
 
-    const picked = phrases.slice(0, 3).join(" ");
-    const message = `${sal} ${picked}${bridge ? bridge : ""}`;
+    const message = `${sal} ${unique.join(" ")}`.replace(/\s+/g, " ").trim();
+
     const question =
       lang === "en" ? "What would you like to share today?" :
       lang === "pt" ? "O que você gostaria de compartilhar hoje?" :
@@ -236,7 +355,10 @@ app.post("/api/welcome", async (req, res) => {
     res.json({ message, question });
   } catch (e) {
     console.error("WELCOME ERROR:", e);
-    res.json({ message: "La paz sea contigo. ¿De qué te gustaría hablar hoy?", question: "¿Qué te gustaría compartir hoy?" });
+    res.json({
+      message: "La paz sea contigo. ¿De qué te gustaría hablar hoy?",
+      question: "¿Qué te gustaría compartir hoy?"
+    });
   }
 });
 
@@ -249,10 +371,7 @@ app.post("/api/ask", async (req, res) => {
     const mem = await readMem(userId);
     const now = Date.now();
 
-    // de paso, si nos mandan nombre/sexo en el history estilo "SYSTEM", no lo usamos aquí
-    // (lo mantiene el frontend)
-
-    // Duplicados rápidos
+    // Duplicados rápidos (mismo texto en <7s)
     if (userTxt && mem.last_user_text && userTxt === mem.last_user_text && now - mem.last_user_ts < 7000) {
       if (mem.last_bot) return res.json(mem.last_bot);
     }
@@ -273,16 +392,16 @@ app.post("/api/ask", async (req, res) => {
       return res.json(out);
     }
 
-    // Alcance
+    // Alcance: bloquear temas fuera del ámbito (con excepción religiosa)
     if (isOffTopic(userTxt) && !isReligiousException(userTxt)) {
       const msg =
-        lang === "en" ? "I’m here for your inner life: faith, personal struggles and healing. I don’t give facts or opinions on sports, entertainment, technical, food, science or general topics." :
-        lang === "pt" ? "Estou aqui para a sua vida interior: fé, questões pessoais e cura. Não trato esportes, entretenimento, técnica, gastronomia, ciência ou temas gerais." :
-        lang === "it" ? "Sono qui per la tua vita interiore: fede, difficoltà personali e guarigione. Non tratto sport, spettacolo, tecnica, gastronomia, scienza o temi generali." :
-        lang === "de" ? "Ich bin für dein inneres Leben da: Glaube, persönliche Themen und Heilung. Keine Fakten/Meinungen zu Sport, Unterhaltung, Technik, Gastronomie, Wissenschaft oder Allgemeinwissen." :
-        lang === "ca" ? "Sóc aquí per a la teva vida interior: fe, dificultats personals i sanació. No tracto esports, entreteniment, tècnica, gastronomia, ciència o temes generals." :
-        lang === "fr" ? "Je suis là pour ta vie intérieure : foi, difficultés personnelles et guérison. Je ne traite pas le sport, le divertissement, la technique, la gastronomie, la science ni les sujets généraux." :
-                        "Estoy aquí para tu vida interior: fe, dificultades personales y sanación. No doy datos ni opiniones de deportes, espectáculos, técnica, gastronomía, ciencia o temas generales.";
+        lang === "en" ? "I’m here for your inner life: faith, personal struggles and healing. I don’t give facts or opinions on sports, entertainment, technical, food or general topics." :
+        lang === "pt" ? "Estou aqui para a sua vida interior: fé, questões pessoais e cura. Não trato esportes, entretenimento, técnica, gastronomia ou temas gerais." :
+        lang === "it" ? "Sono qui per la tua vita interiore: fede, difficoltà personali e guarigione. Non tratto sport, spettacolo, tecnica, gastronomia o temi generali." :
+        lang === "de" ? "Ich bin für dein inneres Leben da: Glaube, persönliche Themen und Heilung. Keine Fakten/Meinungen zu Sport, Unterhaltung, Technik, Gastronomie oder Allgemeinwissen." :
+        lang === "ca" ? "Sóc aquí per a la teva vida interior: fe, dificultats personals i sanació. No tracto esports, entreteniment, tècnica, gastronomia o temes generals." :
+        lang === "fr" ? "Je suis là pour ta vie intérieure : foi, difficultés personnelles et guérison. Je ne traite pas le sport, le divertissement, la technique, la gastronomie ni les sujets généraux." :
+                        "Estoy aquí para tu vida interior: fe, dificultades personales y sanación. No doy datos ni opiniones de deportes, espectáculos, técnica, gastronomía o temas generales.";
       const q =
         lang === "en" ? "What would help you most right now—your emotions, a relationship, or your prayer life?" :
         lang === "pt" ? "O que mais ajudaria agora — suas emoções, uma relação, ou a sua vida de oração?" :
@@ -297,27 +416,30 @@ app.post("/api/ask", async (req, res) => {
       return res.json(out);
     }
 
-    // -------- OpenAI: Respuesta con biblia obligatoria --------
+    // -------- OpenAI: Instrucciones mínimas (con BIBLIA requerida) --------
     const SYS = `
 Eres cercano, claro y compasivo, desde una voz cristiana (católica).
-Alcance: espiritualidad/fe cristiana, psicología/autoayuda personal, relaciones y emociones.
-Varía el lenguaje; no repitas muletillas. 1 sola pregunta breve y útil.
+Alcance: espiritualidad/fe católica, psicología/autoayuda personal, relaciones y emociones. Evita lo demás.
+Varía el lenguaje; no repitas muletillas. No hagas cuestionarios; 1 sola pregunta breve y pertinente.
 Formato (JSON en ${langLabel(lang)}): {"message":"...", "question":"...?", "bible":{"text":"...","ref":"Libro 0:0"}}
-- "message": natural y concreto; pasos prácticos si corresponde.
-- "question": una pregunta simple (no hagas cuestionarios).
-- "bible": SIEMPRE incluida; pertinente; evita Mateo/Matthew 11:28 (todas las variantes).
+- "message": natural y concreto; si el usuario pide pasos, dáselos con claridad breve.
+- "question": **una** pregunta simple y útil (evita “desde cuándo” salvo que el usuario ya hable de tiempos).
+- "bible": **SIEMPRE** incluida; pertinente; no repetir continuamente la misma. Evita Mateo/Matthew 11:28 (todas las variantes).
+NO incluyas el versículo dentro de "message"; va SOLO en "bible".
 No incluyas nada fuera del JSON.
 `.trim();
 
     const convo = [];
     const recent = Array.isArray(history) ? history.slice(-8) : [];
-    for (const h of recent) if (typeof h === "string") convo.push({ role: "user", content: h });
+    for (const h of recent) {
+      if (typeof h === "string") convo.push({ role: "user", content: h });
+    }
     convo.push({ role: "user", content: userTxt });
 
     const r = await openai.chat.completions.create({
       model: "gpt-4o",
       temperature: 0.6,
-      max_tokens: 360,
+      max_tokens: 380,
       messages: [{ role: "system", content: SYS }, ...convo],
       response_format: {
         type: "json_schema",
@@ -344,47 +466,47 @@ No incluyas nada fuera del JSON.
     const content = r?.choices?.[0]?.message?.content || "{}";
     let data = {}; try { data = JSON.parse(content); } catch { data = {}; }
 
-    const banned = /mateo\s*11\s*:\s*28|matt(hew)?\s*11\s*:\s*28|matteo\s*11\s*:\s*28|matthäus\s*11\s*:\s*28|matthieu\s*11\s*:\s*28|mateu\s*11\s*:\s*28|mateus\s*11\s*:\s*28/i;
+    // Ensamblado de salida + versículo obligatorio con anti-repetición + ban Mateo 11:28
+    let out = {
+      message: String(data?.message || "").trim() || (lang === "en" ? "I’m with you." : "Estoy contigo."),
+      question: String(data?.question || "").trim() || "",
+    };
 
-    // Versículo final (sin duplicar en message)
-    let verse = null;
-    const used = new Set((mem.last_refs || []).map((x) => NORM(x)));
+    const banned = /mateo\s*11\s*:\s*28|matt(hew)?\s*11\s*:\s*28|matteo\s*11\s*:\s*28|matthäus\s*11\s*:\s*28|matthieu\s*11\s*:\s*28|mateu\s*11\s*:\s*28|mateus\s*11\s*:\s*28/i;
     const refRaw = String(data?.bible?.ref || "").trim();
     const txtRaw = String(data?.bible?.text || "").trim();
 
+    const used = new Set((mem.last_refs || []).map((x) => NORM(x)));
+    let finalVerse = null;
+
     if (txtRaw && refRaw && !banned.test(refRaw) && !used.has(NORM(refRaw))) {
-      verse = { ref: refRaw, text: txtRaw };
+      finalVerse = { ref: refRaw, text: txtRaw };
     } else {
-      verse = pickFallbackVerse(lang, used);
+      finalVerse = pickFallbackVerse(lang, used);
     }
 
-    // Forzar punto final para que el TTS haga pausa después de la cita
-    if (!/[.!?…]\s*$/.test(verse.text)) verse.text = verse.text + ".";
+    // MUY IMPORTANTE: la cita bíblica NO va dentro de "message"
+    out.bible = finalVerse;
 
-    const baseMsg = String(data?.message || "").trim() || (lang === "en" ? "I’m with you." : "Estoy contigo.");
-    const question = String(data?.question || "").trim() || "";
-
-    const out = { message: baseMsg, question, bible: verse };
-
-    // Persistencia
+    // Persistimos refs y mem
+    mem.last_refs = [...(mem.last_refs || []), finalVerse.ref].slice(-8);
     mem.last_user_text = userTxt;
     mem.last_user_ts = now;
     mem.last_bot = out;
-    mem.last_refs = [...(mem.last_refs || []), verse.ref].slice(-8);
     await writeMem(userId, mem);
 
     res.json(out);
   } catch (e) {
     console.error("ASK ERROR:", e);
     res.json({
-      message: "La paz sea contigo. Contame en pocas palabras qué está pasando y vemos un paso simple y concreto.",
+      message: "La paz sea contigo. Decime en pocas palabras qué está pasando y vemos un paso simple y concreto.",
       question: "¿Qué te gustaría trabajar primero?",
       bible: { ref: "Salmos 34:18", text: "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu." }
     });
   }
 });
 
-// ---------- /api/heygen/token ----------
+// ---------- HeyGen ----------
 app.get("/api/heygen/token", async (_req, res) => {
   try {
     const API_KEY = process.env.HEYGEN_API_KEY || process.env.HEYGEN_TOKEN || "";
@@ -408,7 +530,6 @@ app.get("/api/heygen/token", async (_req, res) => {
   }
 });
 
-// ---------- /api/heygen/config ----------
 app.get("/api/heygen/config", (_req, res) => {
   const AV_LANGS = ["es", "en", "pt", "it", "de", "ca", "fr"];
   const avatars = {};
