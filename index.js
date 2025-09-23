@@ -2,7 +2,6 @@
 // Cambios:
 // - Bible SIEMPRE presente en /api/ask (anti-repetición + ban Mateo 11:28 + fallback por idioma)
 // - OFFTOPIC reforzado para gastronomía/comidas
-// - TTS: agregamos "spoken" con pausas (".. ") antes de la cita bíblica y la pregunta
 
 const express = require("express");
 const cors = require("cors");
@@ -38,6 +37,9 @@ app.get("/db/test", async (_req, res) => {
     res.status(500).json({ ok: false, error: String(e) });
   }
 });
+
+
+
 
 // ---------- OpenAI ----------
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -417,15 +419,6 @@ No incluyas nada fuera del JSON.
     out.bible = finalVerse;
     mem.last_refs = [...(mem.last_refs || []), finalVerse.ref].slice(-8);
 
-    // ---------- TTS: "spoken" con pausas (".. ") ----------
-    // Nota: mantenemos message/question/bible "limpios" para UI;
-    //       "spoken" es una versión lista para leer con pausa antes de verso y pregunta.
-    const verseLine = finalVerse ? `— ${finalVerse.text} (${finalVerse.ref})` : "";
-    let spoken = out.message || "";
-    if (verseLine) spoken += `\n\n.. ${verseLine}`;
-    if (out.question) spoken += `\n\n.. ${out.question}`;
-    out.spoken = spoken;
-
     // Persistimos
     mem.last_user_text = userTxt;
     mem.last_user_ts = now;
@@ -438,8 +431,7 @@ No incluyas nada fuera del JSON.
     res.json({
       message: "La paz sea contigo. Decime en pocas palabras qué está pasando y vemos un paso simple y concreto.",
       question: "¿Qué te gustaría trabajar primero?",
-      bible: { ref: "Salmos 34:18", text: "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu." },
-      spoken: "La paz sea contigo.\n\n.. — Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu. (Salmos 34:18)\n\n.. ¿Qué te gustaría trabajar primero?"
+      bible: { ref: "Salmos 34:18", text: "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu." }
     });
   }
 });
@@ -486,3 +478,5 @@ app.get("/api/heygen/config", (_req, res) => {
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
+
+
