@@ -10,10 +10,15 @@ const OpenAI = require("openai");
 const path = require("path");
 const fs = require("fs/promises");
 require("dotenv").config();
+require("./db/mongoose"); // <- CONEXIÓN DB (nueva)
+const contactRouter = require("./routes/contact"); // <- ruta /contact
+const { logAskEvent } = require("./services/analytics"); // <- logger de /api/ask
 
 const app = express();
 app.use(cors({ origin: true })); // CORS permisivo
 app.use(bodyParser.json());
+app.use("/contact", contactRouter);
+
 
 // ---------- OpenAI ----------
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -452,3 +457,4 @@ app.get("/api/heygen/config", (_req, res) => {
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
+
