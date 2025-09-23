@@ -1,4 +1,4 @@
-// index.js — Backend principal
+// index.js — Backend principal estable y modular
 
 const express = require("express");
 const cors = require("cors");
@@ -20,16 +20,18 @@ app.get("/db/health", async (_req, res) => {
     const now = await ping();
     res.json({ ok: true, now });
   } catch (e) {
+    console.error("DB HEALTH ERROR:", e);
     res.status(500).json({ ok: false, error: String(e) });
   }
 });
 
-// Conteo rápido de usuarios
+// (Opcional) Conteo rápido de usuarios
 app.get("/db/test", async (_req, res) => {
   try {
     const r = await query("SELECT COUNT(*)::int AS users FROM users");
     res.json({ users: r.rows?.[0]?.users ?? 0 });
   } catch (e) {
+    console.error("DB TEST ERROR:", e);
     res.status(500).json({ ok: false, error: String(e) });
   }
 });
