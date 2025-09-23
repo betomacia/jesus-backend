@@ -1,157 +1,89 @@
 // service/welcometext.js
-// Bienvenida: Saludo + Nombre + (Hijo/Hija 25%) + 1 frase AI + 1 pregunta AI
-// Anti-repetición por usuario (memoria corta en proceso)
-
 const OpenAI = require("openai");
-const ai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// ===== Cache corta por usuario (anti-repetición) =====
-const USER_CACHE = new Map();
-// Estructura: { lastPhrases: Set<string>, lastQuestions: Set<string>, ts: number }
-function remember(userId, type, value, limit = 16) {
-  if (!userId) return;
-  const rec = USER_CACHE.get(userId) || { lastPhrases: new Set(), lastQuestions: new Set(), ts: Date.now() };
-  const bag = type === "phrase" ? rec.lastPhrases : rec.lastQuestions;
-  const norm = String(value || "").trim().toLowerCase();
-  if (!norm) return;
-  bag.add(norm);
-  // recortar si excede
-  while (bag.size > limit) {
-    const first = bag.values().next().value;
-    bag.delete(first);
+// Saludo por hora
+function greetingByHour(lang = "es", hour = null) {
+  const h = Number.isInteger(hour) ? hour : new Date().getHours();
+  const g = (m, a, n) => (h < 12 ? m : h < 19 ? a : n);
+  switch (lang) {
+    case "en": return g("Good morning", "Good afternoon", "Good evening");
+    case "pt": return g("Bom dia", "Boa tarde", "Boa noite");
+    case "it": return g("Buongiorno", "Buon pomeriggio", "Buonasera");
+    case "de": return g("Guten Morgen", "Guten Tag", "Guten Abend");
+    case "ca": return g("Bon dia", "Bona tarda", "Bona nit");
+    case "fr": return g("Bonjour", "Bon après-midi", "Bonsoir");
+    default:   return g("Buenos días", "Buenas tardes", "Buenas noches");
   }
-  rec.ts = Date.now();
-  USER_CACHE.set(userId, rec);
-}
-function wasUsed(userId, type, value) {
-  if (!userId || !value) return false;
-  const rec = USER_CACHE.get(userId);
-  if (!rec) return false;
-  const bag = type === "phrase" ? rec.lastPhrases : rec.lastQuestions;
-  return bag.has(String(value || "").trim().toLowerCase());
 }
 
-// ===== Saludo por hora (ES) usando hora local enviada por el front =====
-function greetingByHourES(localHour) {
-  const h = Number.isFinite(+localHour) ? (+localHour | 0) : new Date().getHours();
-  if (h < 6) return "Buenas noches";
-  if (h < 12) return "Buenos días";
-  if (h < 20) return "Buenas tardes";
-  return "Buenas noches";
-}
-
-// ===== “Hijo/Hija mío/a” opcional (25%) según gender =====
-const HIJO_FRASES = {
-  male: ["Hijo mío", "Hijo amado"],
-  female: ["Hija mía", "Hija amada"],
-  unknown: ["Hijo/a mío/a"],
+const VARIED_QUESTIONS = {
+  es: [
+    "¿En qué te puedo acompañar hoy?",
+    "¿Qué te inquieta en este momento?",
+    "¿De qué te gustaría hablar ahora?",
+    "¿Qué te haría bien poner en palabras hoy?",
+    "¿Qué necesitas hoy para estar en paz?",
+  ],
+  en: [
+    "What would help you most right now?",
+    "What would you like to talk about today?",
+    "What is on your heart at this moment?",
+  ],
+  pt: ["Sobre o que você quer falar hoje?", "O que te preocupa neste momento?"],
+  it: ["Di cosa vorresti parlare oggi?", "Cosa ti pesa nel cuore adesso?"],
+  de: ["Worüber möchtest du heute sprechen?", "Was beschäftigt dich gerade?"],
+  ca: ["De què t’agradaria parlar avui?", "Què et inquieta ara mateix?"],
+  fr: ["De quoi aimerais-tu parler aujourd’hui ?", "Qu’est-ce qui te préoccupe en ce moment ?"],
 };
-function maybeHijo(gender = "unknown") {
+
+function pick(arr = []) { return arr[Math.floor(Math.random() * arr.length)]; }
+
+// Frase fija en ES, 1 sola vez (si está en español)
+const FIXED_ES = "Hoy es un buen día para empezar de nuevo.";
+
+async function getWelcomeText({ lang = "es", name = "", userId = "anon", history = [], localHour = null, gender = "unknown" }) {
+  const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+  // 1) Saludo + nombre
+  const hi = greetingByHour(lang, localHour);
+  const nm = (name || "").trim();
+  let sal = nm ? `${hi}, ${nm}.` : `${hi}.`;
+
+  // 2) “Hijo/Hija mía” opcional (~25%), solo si gender definido
+  if (Math.random() < 0.25) {
+    if (gender === "female") sal += " Hija mía,";
+    else if (gender === "male") sal += " Hijo mío,";
+  }
+
+  // 3) 1 frase alentadora generada por IA (no cursi, breve)
+  let aiPhrase = "";
   try {
-    if (Math.random() < 0.25) {
-      const pool = HIJO_FRASES[gender] || HIJO_FRASES.unknown;
-      return pool[Math.floor(Math.random() * pool.length)];
-    }
-  } catch {}
-  return null;
-}
-
-// ===== Genera 1 frase alentadora y 1 pregunta variada (ES) =====
-async function generatePhraseAndQuestionES({ userId, history }) {
-  const sys = [
-    "Eres un asistente cristiano cálido, esperanzador y natural.",
-    "Responde SIEMPRE en español.",
-    "Devuelve JSON estricto con claves: frases[], preguntas[].",
-    "Cada frase: 6–14 palabras, sin emojis, sin citas bíblicas ni referencias a versículos.",
-    "Cada pregunta: breve, abierta, variada, sin clichés repetitivos y sin parecer formulario.",
-    "Nada de duplicados exactos dentro del set retornado.",
-  ].join(" ");
-
-  const usr = [
-    "Genera 6 a 10 frases breves para levantar el ánimo (sin Biblia ni emojis).",
-    "Genera también 6 preguntas de apertura variadas (ej.: «¿En qué puedo acompañarte hoy?», «¿Qué te inquieta?», «¿Qué te gustaría trabajar?»).",
-    "Evita repetir estructuras y palabras clave idénticas.",
-  ].join("\n");
-
-  let frases = [];
-  let preguntas = [];
-
-  try {
-    const completion = await ai.chat.completions.create({
-      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+    const sys = `Devuelve SOLO JSON con este formato: {"phrase":"..."}.
+Escribe 1 frase alentadora, breve, natural y cotidiana (sin citas, sin emojis), en ${lang}. No repitas ideas comunes.`;
+    const r = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
       temperature: 0.9,
-      messages: [
-        { role: "system", content: sys },
-        ...(Array.isArray(history) ? history.slice(-6).map((t) => ({ role: "user", content: String(t).slice(0, 400) })) : []),
-        { role: "user", content: usr },
-      ],
+      messages: [{ role: "system", content: sys }],
       response_format: { type: "json_object" },
     });
-
-    const data = JSON.parse(completion?.choices?.[0]?.message?.content || "{}");
-    const norm = (s) => String(s || "").trim();
-    const uniq = (arr) => Array.from(new Set((arr || []).map(norm))).filter(Boolean);
-
-    frases = uniq(data.frases);
-    preguntas = uniq(data.preguntas);
-  } catch (e) {
-    // continúa con fallback abajo
+    const content = r?.choices?.[0]?.message?.content || "{}";
+    const data = JSON.parse(content);
+    aiPhrase = String(data?.phrase || "").trim();
+  } catch {
+    aiPhrase = lang === "es" ? "La paz crece con pasos pequeños." : "Peace grows from small steps.";
   }
 
-  // filtrar por anti-repetición de este usuario
-  if (userId) {
-    frases = (frases || []).filter((f) => !wasUsed(userId, "phrase", f));
-    preguntas = (preguntas || []).filter((q) => !wasUsed(userId, "question", q));
-  }
+  // 4) Armar mensaje
+  const parts = [sal];
+  if (lang === "es") parts.push(FIXED_ES); // fija solo en español
+  if (aiPhrase) parts.push(aiPhrase);
+  const message = parts.join(" ").replace(/\s+/g, " ").trim();
 
-  // fallbacks si quedaran vacíos
-  if (!frases?.length) {
-    frases = [
-      "La perseverancia abre puertas.",
-      "Un paso pequeño también es avance.",
-      "La fe abre caminos donde parece no haberlos.",
-      "La constancia te acerca a la meta.",
-      "Respira hondo, hoy podés volver a intentarlo.",
-    ];
-  }
-  if (!preguntas?.length) {
-    preguntas = [
-      "¿En qué puedo acompañarte hoy?",
-      "¿Qué te gustaría trabajar primero?",
-      "¿Qué te inquieta en este momento?",
-      "¿Qué te haría sentir un poco más en paz ahora?",
-    ];
-  }
+  // 5) 1 pregunta variada
+  const qList = VARIED_QUESTIONS[lang] || VARIED_QUESTIONS["es"];
+  const question = pick(qList);
 
-  const pick1 = (arr) => arr[Math.floor(Math.random() * arr.length)];
-  const phrase = pick1(frases);
-  const question = pick1(preguntas);
-
-  remember(userId, "phrase", phrase);
-  remember(userId, "question", question);
-
-  return { phrase, question };
+  return { message, question };
 }
 
-// ===== API principal de bienvenida (para usar desde index.js) =====
-async function getWelcomeText({ lang = "es", name = "", userId = "anon", history = [], localHour, gender = "unknown" } = {}) {
-  // Por ahora sólo ES para el saludo/texto (tu app principal es ES).
-  const saludo = greetingByHourES(localHour);
-  const nombre = String(name || "").trim();
-  const hijo = maybeHijo(String(gender || "unknown"));
-
-  const { phrase, question } = await generatePhraseAndQuestionES({ userId, history });
-
-  // Componer: "[Saludo], [Nombre]. [Hijo/Hija… ,] [frase AI]"
-  const head = nombre ? `${saludo}, ${nombre}.` : `${saludo}.`;
-  const partes = [head];
-  if (hijo) partes.push(`${hijo},`);
-  if (phrase) partes.push(phrase);
-
-  const message = partes.join(" ").replace(/\s+/g, " ").trim();
-  return { message, question: String(question || "").trim() };
-}
-
-module.exports = {
-  getWelcomeText,
-};
+module.exports = { getWelcomeText };
