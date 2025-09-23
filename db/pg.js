@@ -1,24 +1,24 @@
-// db/pg.js — conexión a Postgres en Railway
+// db/pg.js
 const { Pool } = require("pg");
 
-const connectionString = process.env.DATABASE_URL;
-
-if (!connectionString) {
-  console.error("❌ Falta la variable DATABASE_URL en Railway");
-}
-
 const pool = new Pool({
-  connectionString,
-  ssl: { rejectUnauthorized: false }, // Railway requiere SSL
+  connectionString: process.env.DATABASE_URL, // Railway te da esta var
+  ssl: process.env.PGSSL === "false" ? false : { rejectUnauthorized: false }
 });
 
 async function query(text, params) {
-  return pool.query(text, params);
+  const client = await pool.connect();
+  try {
+    const res = await client.query(text, params);
+    return res;
+  } finally {
+    client.release();
+  }
 }
 
 async function ping() {
-  const r = await pool.query("SELECT NOW() as now");
-  return r.rows?.[0]?.now;
+  const r = await query("SELECT NOW() as now");
+  return r.rows[0].now;
 }
 
 module.exports = { pool, query, ping };
