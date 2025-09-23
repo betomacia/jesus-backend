@@ -1,8 +1,11 @@
 // index.js — Backend simple, dominios acotados y respuestas naturales (multi-idioma)
-// Cambios:
-// - Bienvenida modular (services/welcomeText) con 2–3 frases y memoria ligera.
-// - Vocativo “Hijo/Hija mía” ocasional (services/affection) en bienvenida y respuesta normal.
-// - Memoria extiende: profile {name, gender} (no rompe compatibilidad).
+// Cambios importantes:
+// - /api/welcome ahora genera 2–3 frases nuevas via OpenAI (dinámicas) + hora local del móvil (enviada por el frontend)
+// - Personaliza saludo con nombre y uso ocasional de “hijo/hija mía” (no repetitivo)
+// - Memoria liviana: si hubo interacción reciente, agrega continuidad (“lo de ayer…”)
+// - /api/ask fuerza PAUSA tras el versículo con "..." y mueve la pregunta detrás del versículo
+// - OFFTOPIC ampliado (química, física, geometría, informática, computación, etc.)
+// - Mantiene el resto de endpoints y comportamiento
 
 const express = require("express");
 const cors = require("cors");
@@ -11,8 +14,6 @@ const OpenAI = require("openai");
 const path = require("path");
 const fs = require("fs/promises");
 const { query, ping } = require("./db/pg");
-const { buildWelcome, langLabel } = require("./services/welcomeText");
-const { maybeInjectVocative } = require("./services/affection");
 require("dotenv").config();
 
 const app = express();
@@ -47,6 +48,149 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 // ---------- Utils ----------
 const NORM = (s = "") => String(s).toLowerCase().replace(/\s+/g, " ").trim();
 const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
+
+function langLabel(l = "es") {
+  const m = {
+    es: "Español",
+    en: "English",
+    pt: "Português",
+    it: "Italiano",
+    de: "Deutsch",
+    ca: "Català",
+    fr: "Français",
+  };
+  return m[l] || "Español";
+}
+
+function greetingByHour(lang = "es", hour = null) {
+  const h = Number.isInteger(hour) ? hour : new Date().getHours();
+  const g = (m, a, n) => (h < 12 ? m : h < 19 ? a : n);
+  switch (lang) {
+    case "en": return g("Good morning", "Good afternoon", "Good evening");
+    case "pt": return g("Bom dia", "Boa tarde", "Boa noite");
+    case "it": return g("Buongiorno", "Buon pomeriggio", "Buonasera");
+    case "de": return g("Guten Morgen", "Guten Tag", "Guten Abend");
+    case "ca": return g("Bon dia", "Bona tarda", "Bona nit");
+    case "fr": return g("Bonjour", "Bon après-midi", "Bonsoir");
+    default:   return g("Buenos días", "Buenas tardes", "Buenas noches");
+  }
+}
+
+// === Frases del día (fallback estático por si OpenAI falla) ===
+const DAILY_PHRASES = {
+  es: [
+    "Un gesto de bondad puede cambiar tu día.",
+    "La fe hace posible lo que parece imposible.",
+    "Hoy es buen día para empezar de nuevo.",
+    "La paz se cultiva con pasos pequeños.",
+    "El amor que das, vuelve a ti.",
+  ],
+  en: [
+    "A small kindness can change your day.",
+    "Faith makes the impossible possible.",
+    "Today is a good day to begin again.",
+    "Peace grows from small steps.",
+    "The love you give returns to you.",
+  ],
+  pt: [
+    "Um gesto de bondade pode mudar o seu dia.",
+    "A fé torna possível o impossível.",
+    "Hoje é um bom dia para recomeçar.",
+    "A paz cresce com pequenos passos.",
+    "O amor que você dá volta para você.",
+  ],
+  it: [
+    "Un gesto di gentilezza può cambiare la tua giornata.",
+    "La fede rende possibile l’impossibile.",
+    "Oggi è un buon giorno per ricominciare.",
+    "La pace cresce a piccoli passi.",
+    "L’amore che doni ritorna a te.",
+  ],
+  de: [
+    "Eine kleine Freundlichkeit kann deinen Tag verändern.",
+    "Glaube macht das Unmögliche möglich.",
+    "Heute ist ein guter Tag für einen Neuanfang.",
+    "Frieden wächst aus kleinen Schritten.",
+    "Die Liebe, die du gibst, kehrt zu dir zurück.",
+  ],
+  ca: [
+    "Un gest d’amabilitat pot canviar el teu dia.",
+    "La fe fa possible l’impossible.",
+    "Avui és un bon dia per començar de nou.",
+    "La pau creix amb petits passos.",
+    "L’amor que dones torna a tu.",
+  ],
+  fr: [
+    "Un geste de bonté peut changer ta journée.",
+    "La foi rend possible l’impossible.",
+    "Aujourd’hui est un bon jour pour recommencer.",
+    "La paix grandit à petits pas.",
+    "L’amour que tu donnes te revient.",
+  ],
+};
+function dayPhrase(lang = "es") {
+  const arr = DAILY_PHRASES[lang] || DAILY_PHRASES["es"];
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+// === Dinámica de frases alentadoras (vía OpenAI) ===
+async function fetchDynamicPhrases(lang = "es") {
+  const prompts = {
+    en: "Give me 3 short fresh uplifting phrases for today (<=12 words each). Return them as plain lines.",
+    es: "Dame 3 frases alentadoras, breves y originales para hoy (<=12 palabras cada una). Devuélvelas como líneas sueltas.",
+    pt: "Dê 3 frases curtas e originais para hoje (<=12 palavras cada).",
+    it: "Dammi 3 frasi brevi e originali per oggi (<=12 parole ciascuna).",
+    de: "Gib mir 3 kurze, frische Ermutigungssätze für heute (<=12 Wörter).",
+    ca: "Dona’m 3 frases breus i originals per avui (<=12 paraules).",
+    fr: "Donne-moi 3 phrases brèves et originales pour aujourd’hui (<=12 mots).",
+  };
+  const prompt = prompts[lang] || prompts.es;
+
+  try {
+    const r = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0.9,
+      messages: [
+        { role: "system", content: "You output only 3 plain lines, each a different uplifting short sentence." },
+        { role: "user", content: prompt },
+      ],
+    });
+    const text = r?.choices?.[0]?.message?.content || "";
+    const arr = text
+      .split(/\n+/)
+      .map(s => s.replace(/^[-*]\s*/, "").trim())
+      .filter(Boolean)
+      .slice(0, 3);
+
+    if (!arr.length) {
+      return [dayPhrase(lang), dayPhrase(lang), dayPhrase(lang)];
+    }
+    return arr;
+  } catch {
+    return [dayPhrase(lang), dayPhrase(lang), dayPhrase(lang)];
+  }
+}
+
+// === Tratamiento ocasional “hijo/hija mía” ===
+function honorificSometimes(lang = "es", gender = "unknown") {
+  if (Math.random() > 0.3) return ""; // 30% de probabilidad
+  const byLang = {
+    en: gender === "female" ? " my daughter" : gender === "male" ? " my son" : " my child",
+    es: gender === "female" ? " hija mía" : gender === "male" ? " hijo mío" : " hijo/hija mía",
+    pt: gender === "female" ? " minha filha" : gender === "male" ? " meu filho" : " meu/minha filha(o)",
+    it: gender === "female" ? " figlia mia" : gender === "male" ? " figlio mio" : " figlio/figlia mia",
+    de: gender === "female" ? " meine Tochter" : gender === "male" ? " mein Sohn" : " mein Kind",
+    ca: gender === "female" ? " filla meva" : gender === "male" ? " fill meu" : " fill/filla meva",
+    fr: gender === "female" ? " ma fille" : gender === "male" ? " mon fils" : " mon enfant",
+  };
+  return byLang[lang] || byLang.es;
+}
+
+// === Mención ocasional del nombre ===
+function sometimesName(name = "") {
+  if (!name) return "";
+  return Math.random() < 0.35 ? ` ${name}` : "";
+}
 
 // ---------- Fallback de versículos (por idioma) ----------
 const FALLBACK_VERSES = {
@@ -108,7 +252,6 @@ async function readMem(userId) {
       last_user_ts: m.last_user_ts || 0,
       last_bot: m.last_bot || null,
       last_refs: Array.isArray(m.last_refs) ? m.last_refs : [],
-      profile: m.profile || { name: "", gender: "unknown" },
     };
   } catch {
     return {
@@ -116,7 +259,6 @@ async function readMem(userId) {
       last_user_ts: 0,
       last_bot: null,
       last_refs: [],
-      profile: { name: "", gender: "unknown" },
     };
   }
 }
@@ -132,12 +274,13 @@ const OFFTOPIC = [
   /\b(pel[ií]cula|serie|netflix|hbo|max|disney|spotify|cantante|concierto|celebridad|famos[oa]s?)\b/i,
 
   // técnica/ciencia/educación
-  /\b(program(a|ar|aci[oó]n)|c[oó]digo|javascript|react|inform[aá]tica|pc|ordenador|linux|windows|red(es)?|wifi|driver|api|prompt)\b/i,
-  /\b(matem[aá]ticas?|algebra|c[aá]lculo|geometr[ií]a|f[ií]sica|qu[ií]mica|biolog[ií]a|cient[ií]fico|ecuaci[oó]n)\b/i,
+  /\b(program(a|ar|aci[oó]n)|c[oó]digo|javascript|react|inform[aá]tica|computaci[oó]n|pc|ordenador|linux|windows|red(es)?|wifi|driver|api|prompt|algoritmo|base de datos|sql|docker|kubernetes|devops)\b/i,
+  /\b(matem[aá]ticas?|algebra|c[aá]lculo|geometr[ií]a|trigonometr[ií]a|probabilidad|estad[ií]stica)\b/i,
+  /\b(f[ií]sica|qu[ií]mica|biolog[ií]a|geolog[ií]a|astronom[ií]a|ecuaci[oó]n|experimento|laboratorio)\b/i,
 
   // mecánica/electrónica/juegos
   /\b(mec[aá]nica|alternador|bater[ií]a del auto|motor|embrague|inyector|buj[ií]a|correa|nafta|diesel)\b/i,
-  /\b(circuito|voltaje|ohmios|arduino|raspberry|microcontrolador|placa)\b/i,
+  /\b(circuito|voltaje|ohmios|arduino|raspberry|microcontrolador|placa|soldadura)\b/i,
   /\b(videojuego|fortnite|minecraft|playstation|xbox|nintendo|steam)\b/i,
 
   // geografía/turismo no religioso
@@ -145,9 +288,9 @@ const OFFTOPIC = [
   /\b(viaje|hotel|playa|turismo|destino|vuelo|itinerario|tour|gu[ií]a tur[ií]stica)\b/i,
 
   // gastronomía / comidas / bebidas
-  /\b(gastronom[ií]a|gastronomia|cocina|recet(a|ario)s?|platos?|ingredientes?|men[uú]|men[uú]s|postres?|dulces?|salado?s?)\b/i,
+  /\b(gastronom[ií]a|gastronomia|cocina|recet(a|ario)s?|platos?|ingredientes?|men[uú]|postres?|dulces?|salado?s?)\b/i,
   /\b(comida|comidas|almuerzo|cena|desayuno|merienda|vianda|raci[oó]n|calor[ií]as|nutrici[oó]n|dieta)\b/i,
-  /\b(bebidas?|vino|cerveza|licor|coctel|c[oó]ctel|trago|fermentado|maridaje|bar|caf[eé]|cafeter[ií]a|restaurante|restaurantes?)\b/i,
+  /\b(bebidas?|vino|cerveza|licor|c[oó]ctel|trago|bar|caf[eé]|cafeter[ií]a|restaurante|restaurantes?)\b/i,
 
   // política/negocios/finanzas
   /\b(pol[ií]tica|elecci[oó]n|partido|diputado|senador|presidente|gobierno)\b/i,
@@ -166,7 +309,6 @@ function isOffTopic(s) {
   const x = NORM(s);
   return OFFTOPIC.some((r) => r.test(x));
 }
-
 function isGibberish(s) {
   const x = (s || "").trim();
   if (!x) return true;
@@ -181,22 +323,65 @@ app.get("/", (_req, res) => res.json({ ok: true, service: "backend", ts: Date.no
 // ---------- /api/welcome ----------
 app.post("/api/welcome", async (req, res) => {
   try {
+    // Recibe hour desde el FRONT (hora local del móvil) — ver App.tsx
     const { lang = "es", name = "", gender = "unknown", userId = "anon", hour = null } = req.body || {};
+
+    const hi = greetingByHour(lang, Number.isInteger(hour) ? hour : null);
+    const nm = String(name || "").trim();
     const mem = await readMem(userId);
 
-    // Persistimos nombre/género si vienen del front
-    if (name || gender) {
-      mem.profile = {
-        name: String(name || mem.profile?.name || ""),
-        gender: String(gender || mem.profile?.gender || "unknown"),
-      };
-      await writeMem(userId, mem);
+    // frases dinámicas (OpenAI). Si falla, usa fallback dayPhrase()
+    const phrases = await fetchDynamicPhrases(lang);
+    const pick2or3 = Math.random() < 0.65 ? 2 : 3;
+    const chosen = phrases.slice(0, pick2or3);
+
+    // tratamiento ocasional + nombre ocasional
+    const honor = honorificSometimes(lang, gender);
+    const nameMaybe = sometimesName(nm);
+
+    const sal = nm ? `${hi}, ${nm}.` : `${hi}.`;
+
+    // continuidad si hubo charla reciente (<48h)
+    let continuity = "";
+    if (mem?.last_user_text) {
+      const recentEnough = (Date.now() - (mem.last_user_ts || 0)) < 1000 * 60 * 60 * 48;
+      if (recentEnough && Math.random() < 0.6) {
+        const refLineByLang = {
+          en: "How have you felt since yesterday about what you shared?",
+          es: "¿Cómo te sentiste desde ayer con lo que compartiste?",
+          pt: "Como você se sentiu desde ontem com o que compartilhou?",
+          it: "Come ti sei sentito da ieri riguardo a ciò che hai condiviso?",
+          de: "Wie hast du dich seit gestern mit dem, was du geteilt hast, gefühlt?",
+          ca: "Com t’has sentit des d’ahir amb allò que vas compartir?",
+          fr: "Comment t’es-tu senti depuis hier à propos de ce que tu as partagé ?",
+        };
+        continuity = refLineByLang[lang] || refLineByLang.es;
+      }
     }
 
-    const { message, question } = buildWelcome({ lang, name, gender, hour, mem });
+    const message = [
+      `${sal}${honor}${nameMaybe ? "," + nameMaybe : ""}`,
+      ...chosen,
+      continuity
+    ].filter(Boolean).join(" ");
+
+    const questionByLang = {
+      en: "What would you like to share today?",
+      es: "¿Qué te gustaría compartir hoy?",
+      pt: "O que você gostaria de compartilhar hoje?",
+      it: "Di cosa ti piacerebbe parlare oggi?",
+      de: "Worüber möchtest du heute sprechen?",
+      ca: "De què t’agradaria parlar avui?",
+      fr: "De quoi aimerais-tu parler aujourd’hui ?",
+    };
+    const question = questionByLang[lang] || questionByLang.es;
+
     res.json({ message, question });
   } catch {
-    res.json({ message: "La paz sea contigo. ¿De qué te gustaría hablar hoy?", question: "¿Qué te gustaría compartir hoy?" });
+    res.json({
+      message: "La paz sea contigo. ¿De qué te gustaría hablar hoy?",
+      question: "¿Qué te gustaría compartir hoy?",
+    });
   }
 });
 
@@ -245,7 +430,7 @@ app.post("/api/ask", async (req, res) => {
         lang === "pt" ? "O que mais ajudaria agora — suas emoções, uma relação, ou a sua vida de oração?" :
         lang === "it" ? "Cosa ti aiuterebbe ora — le emozioni, una relazione o la tua vita di preghiera?" :
         lang === "de" ? "Was würde dir jetzt am meisten helfen – deine Gefühle, eine Beziehung oder dein Gebetsleben?" :
-        lang === "ca" ? "Què t’ajudaria ara — les teves emocions, una relació o la tua vida de pregària?" :
+        lang === "ca" ? "Què t’ajudaria ara — les teves emocions, una relació o la teva vida de pregària?" :
         lang === "fr" ? "Qu’est-ce qui t’aiderait le plus — tes émotions, une relation ou ta vie de prière ?" :
                         "¿Qué te ayudaría ahora — tus emociones, una relación o tu vida de oración?";
       const out = { message: msg, question: q };
@@ -324,16 +509,24 @@ No incluyas nada fuera del JSON.
     }
 
     out.bible = finalVerse;
+    mem.last_refs = [...(mem.last_refs || []), finalVerse.ref].slice(-8);
 
-    // Vocativo ocasional en respuestas (ES) según género en memoria
-    const gender = mem?.profile?.gender || "unknown";
-    out.message = maybeInjectVocative({ lang, gender, chance: 0.18 }, out.message);
+    // == Pausa fuerte entre mensaje, versículo y pregunta ==
+    // Usamos "..." para forzar chunk en el TTS del frontend.
+    if (out.bible && out.bible.text) {
+      const verseLine = `— ${out.bible.text} (${out.bible.ref}).`;
+      if (out.question) {
+        out.message = [out.message, verseLine, "...", out.question].filter(Boolean).join(" ");
+        out.question = ""; // evitamos que se lea “todo seguido”
+      } else {
+        out.message = [out.message, verseLine].filter(Boolean).join(" ");
+      }
+    }
 
     // Persistimos
     mem.last_user_text = userTxt;
     mem.last_user_ts = now;
     mem.last_bot = out;
-    mem.last_refs = [...(mem.last_refs || []), finalVerse.ref].slice(-8);
     await writeMem(userId, mem);
 
     res.json(out);
