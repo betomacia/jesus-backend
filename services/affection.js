@@ -1,4 +1,6 @@
 // services/affection.js
+// Inserta “Hijo/Hija mía” con baja frecuencia y sin sonar repetitivo.
+
 function pickVocativeES(gender = "unknown") {
   if (gender === "female") return "Hija mía";
   if (gender === "male") return "Hijo mío";
@@ -6,22 +8,26 @@ function pickVocativeES(gender = "unknown") {
 }
 
 /**
- * Inserta “Hijo/Hija mía” con baja frecuencia (p.ej., 22%),
- * evitando sonar repetitivo. En otros idiomas no agrega nada.
+ * Inserta “Hijo/Hija mía” con probabilidad controlada.
+ * - Solo en ES.
+ * - Evita repetición si el texto ya inicia cálido (“Hola…”, “Buenos días…”, etc.).
  */
-function maybeInjectVocative({ lang = "es", gender = "unknown", chance = 0.22 }, text) {
+function maybeInjectVocative({ lang = "es", gender = "unknown", chance = 0.2 }, text) {
   try {
     if (lang !== "es") return text;
     if (Math.random() > chance) return text;
 
     const voc = pickVocativeES(gender);
-
-    // Si ya empieza con “Hola/Buenos días/Querido/a”, ponlo al final como cierre corto.
-    const startsWarm = /^\s*(hola|buen[oa]s\s+(d[ií]as|tardes|noches)|querid[oa])/i.test(text || "");
-    if (startsWarm) return `${text} ${voc}.`;
-
-    // Si es una sola línea corta, prefijo; si es más largo, lo metemos como 2ª frase.
     const s = String(text || "").trim();
+    if (!s) return text;
+
+    const startsWarm = /^\s*(hola|buen[oa]s\s+(d[ií]as|tardes|noches)|querid[oa])/i.test(s);
+    if (startsWarm) {
+      // Cierre corto para no duplicar arranques cálidos
+      return s.endsWith(".") ? `${s} ${voc}.` : `${s}. ${voc}.`;
+    }
+
+    // Si es breve, prefijar; si es más largo, intercalar tras la primera frase
     const sentences = s.split(/(?<=[.!?])\s+/).filter(Boolean);
     if (sentences.length <= 1 && s.length < 120) {
       return `${voc}, ${s}`;
@@ -34,4 +40,4 @@ function maybeInjectVocative({ lang = "es", gender = "unknown", chance = 0.22 },
   }
 }
 
-module.exports = { maybeInjectVocative };
+module.exports = { maybeInjectVocative, pickVocativeES };
