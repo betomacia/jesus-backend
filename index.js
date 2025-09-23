@@ -1,7 +1,8 @@
 // index.js — Backend simple, dominios acotados y respuestas naturales (multi-idioma)
 // Cambios:
-// - Bible SIEMPRE presente en /api/ask (anti-repetición + ban Mateo 11:28 + fallback por idioma)
-// - OFFTOPIC reforzado para gastronomía/comidas
+// - Bienvenida modular (services/welcomeText) con 2–3 frases y memoria ligera.
+// - Vocativo “Hijo/Hija mía” ocasional (services/affection) en bienvenida y respuesta normal.
+// - Memoria extiende: profile {name, gender} (no rompe compatibilidad).
 
 const express = require("express");
 const cors = require("cors");
@@ -10,6 +11,8 @@ const OpenAI = require("openai");
 const path = require("path");
 const fs = require("fs/promises");
 const { query, ping } = require("./db/pg");
+const { buildWelcome, langLabel } = require("./services/welcomeText");
+const { maybeInjectVocative } = require("./services/affection");
 require("dotenv").config();
 
 const app = express();
@@ -38,99 +41,12 @@ app.get("/db/test", async (_req, res) => {
   }
 });
 
-
-
-
 // ---------- OpenAI ----------
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 // ---------- Utils ----------
 const NORM = (s = "") => String(s).toLowerCase().replace(/\s+/g, " ").trim();
 const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
-
-function langLabel(l = "es") {
-  const m = {
-    es: "Español",
-    en: "English",
-    pt: "Português",
-    it: "Italiano",
-    de: "Deutsch",
-    ca: "Català",
-    fr: "Français",
-  };
-  return m[l] || "Español";
-}
-
-function greetingByHour(lang = "es", hour = null) {
-  const h = Number.isInteger(hour) ? hour : new Date().getHours();
-  const g = (m, a, n) => (h < 12 ? m : h < 19 ? a : n);
-  switch (lang) {
-    case "en": return g("Good morning", "Good afternoon", "Good evening");
-    case "pt": return g("Bom dia", "Boa tarde", "Boa noite");
-    case "it": return g("Buongiorno", "Buon pomeriggio", "Buonasera");
-    case "de": return g("Guten Morgen", "Guten Tag", "Guten Abend");
-    case "ca": return g("Bon dia", "Bona tarda", "Bona nit");
-    case "fr": return g("Bonjour", "Bon après-midi", "Bonsoir");
-    default:   return g("Buenos días", "Buenas tardes", "Buenas noches");
-  }
-}
-
-const DAILY_PHRASES = {
-  es: [
-    "Un gesto de bondad puede cambiar tu día.",
-    "La fe hace posible lo que parece imposible.",
-    "Hoy es buen día para empezar de nuevo.",
-    "La paz se cultiva con pasos pequeños.",
-    "El amor que das, vuelve a ti.",
-  ],
-  en: [
-    "A small kindness can change your day.",
-    "Faith makes the impossible possible.",
-    "Today is a good day to begin again.",
-    "Peace grows from small steps.",
-    "The love you give returns to you.",
-  ],
-  pt: [
-    "Um gesto de bondade pode mudar o seu dia.",
-    "A fé torna possível o impossível.",
-    "Hoje é um bom dia para recomeçar.",
-    "A paz cresce com pequenos passos.",
-    "O amor que você dá volta para você.",
-  ],
-  it: [
-    "Un gesto di gentilezza può cambiare la tua giornata.",
-    "La fede rende possibile l’impossibile.",
-    "Oggi è un buon giorno per ricominciare.",
-    "La pace cresce a piccoli passi.",
-    "L’amore che doni ritorna a te.",
-  ],
-  de: [
-    "Eine kleine Freundlichkeit kann deinen Tag verändern.",
-    "Glaube macht das Unmögliche möglich.",
-    "Heute ist ein guter Tag für einen Neuanfang.",
-    "Frieden wächst aus kleinen Schritten.",
-    "Die Liebe, die du gibst, kehrt zu dir zurück.",
-  ],
-  ca: [
-    "Un gest d’amabilitat pot canviar el teu dia.",
-    "La fe fa possible l’impossible.",
-    "Avui és un bon dia per començar de nou.",
-    "La pau creix amb petits passos.",
-    "L’amor que dones torna a tu.",
-  ],
-  fr: [
-    "Un geste de bonté peut changer ta journée.",
-    "La foi rend possible l’impossible.",
-    "Aujourd’hui est un bon jour pour recommencer.",
-    "La paix grandit à petits pas.",
-    "L’amour que tu donnes te revient.",
-  ],
-};
-
-function dayPhrase(lang = "es") {
-  const arr = DAILY_PHRASES[lang] || DAILY_PHRASES["es"];
-  return arr[Math.floor(Math.random() * arr.length)];
-}
 
 // ---------- Fallback de versículos (por idioma) ----------
 const FALLBACK_VERSES = {
@@ -192,6 +108,7 @@ async function readMem(userId) {
       last_user_ts: m.last_user_ts || 0,
       last_bot: m.last_bot || null,
       last_refs: Array.isArray(m.last_refs) ? m.last_refs : [],
+      profile: m.profile || { name: "", gender: "unknown" },
     };
   } catch {
     return {
@@ -199,6 +116,7 @@ async function readMem(userId) {
       last_user_ts: 0,
       last_bot: null,
       last_refs: [],
+      profile: { name: "", gender: "unknown" },
     };
   }
 }
@@ -226,7 +144,7 @@ const OFFTOPIC = [
   /\b(pa[ií]s|capital|mapa|d[oó]nde queda|ubicaci[oó]n|distancia|kil[oó]metros|frontera|r[íi]o|monta[ñn]a|cordillera)\b/i,
   /\b(viaje|hotel|playa|turismo|destino|vuelo|itinerario|tour|gu[ií]a tur[ií]stica)\b/i,
 
-  // gastronomía / comidas / bebidas (reforzado)
+  // gastronomía / comidas / bebidas
   /\b(gastronom[ií]a|gastronomia|cocina|recet(a|ario)s?|platos?|ingredientes?|men[uú]|men[uú]s|postres?|dulces?|salado?s?)\b/i,
   /\b(comida|comidas|almuerzo|cena|desayuno|merienda|vianda|raci[oó]n|calor[ií]as|nutrici[oó]n|dieta)\b/i,
   /\b(bebidas?|vino|cerveza|licor|coctel|c[oó]ctel|trago|fermentado|maridaje|bar|caf[eé]|cafeter[ií]a|restaurante|restaurantes?)\b/i,
@@ -263,30 +181,19 @@ app.get("/", (_req, res) => res.json({ ok: true, service: "backend", ts: Date.no
 // ---------- /api/welcome ----------
 app.post("/api/welcome", async (req, res) => {
   try {
-    const { lang = "es", name = "", userId = "anon", hour = null } = req.body || {};
-    const hi = greetingByHour(lang, hour);
-    const phrase = dayPhrase(lang);
-    const nm = String(name || "").trim();
-    const sal = nm ? `${hi}, ${nm}.` : `${hi}.`;
+    const { lang = "es", name = "", gender = "unknown", userId = "anon", hour = null } = req.body || {};
+    const mem = await readMem(userId);
 
-    const message =
-      lang === "en" ? `${sal} ${phrase} I'm here for you.` :
-      lang === "pt" ? `${sal} ${phrase} Estou aqui para você.` :
-      lang === "it" ? `${sal} ${phrase} Sono qui per te.` :
-      lang === "de" ? `${sal} ${phrase} Ich bin für dich da.` :
-      lang === "ca" ? `${sal} ${phrase} Sóc aquí per ajudar-te.` :
-      lang === "fr" ? `${sal} ${phrase} Je suis là pour toi.` :
-                      `${sal} ${phrase} Estoy aquí para lo que necesites.`;
+    // Persistimos nombre/género si vienen del front
+    if (name || gender) {
+      mem.profile = {
+        name: String(name || mem.profile?.name || ""),
+        gender: String(gender || mem.profile?.gender || "unknown"),
+      };
+      await writeMem(userId, mem);
+    }
 
-    const question =
-      lang === "en" ? "What would you like to share today?" :
-      lang === "pt" ? "O que você gostaria de compartilhar hoje?" :
-      lang === "it" ? "Di cosa ti piacerebbe parlare oggi?" :
-      lang === "de" ? "Worüber möchtest du heute sprechen?" :
-      lang === "ca" ? "De què t’agradaria parlar avui?" :
-      lang === "fr" ? "De quoi aimerais-tu parler aujourd’hui ?" :
-                      "¿Qué te gustaría compartir hoy?";
-
+    const { message, question } = buildWelcome({ lang, name, gender, hour, mem });
     res.json({ message, question });
   } catch {
     res.json({ message: "La paz sea contigo. ¿De qué te gustaría hablar hoy?", question: "¿Qué te gustaría compartir hoy?" });
@@ -338,7 +245,7 @@ app.post("/api/ask", async (req, res) => {
         lang === "pt" ? "O que mais ajudaria agora — suas emoções, uma relação, ou a sua vida de oração?" :
         lang === "it" ? "Cosa ti aiuterebbe ora — le emozioni, una relazione o la tua vita di preghiera?" :
         lang === "de" ? "Was würde dir jetzt am meisten helfen – deine Gefühle, eine Beziehung oder dein Gebetsleben?" :
-        lang === "ca" ? "Què t’ajudaria ara — les teves emocions, una relació o la teva vida de pregària?" :
+        lang === "ca" ? "Què t’ajudaria ara — les teves emocions, una relació o la tua vida de pregària?" :
         lang === "fr" ? "Qu’est-ce qui t’aiderait le plus — tes émotions, une relation ou ta vie de prière ?" :
                         "¿Qué te ayudaría ahora — tus emociones, una relación o tu vida de oración?";
       const out = { message: msg, question: q };
@@ -417,12 +324,16 @@ No incluyas nada fuera del JSON.
     }
 
     out.bible = finalVerse;
-    mem.last_refs = [...(mem.last_refs || []), finalVerse.ref].slice(-8);
+
+    // Vocativo ocasional en respuestas (ES) según género en memoria
+    const gender = mem?.profile?.gender || "unknown";
+    out.message = maybeInjectVocative({ lang, gender, chance: 0.18 }, out.message);
 
     // Persistimos
     mem.last_user_text = userTxt;
     mem.last_user_ts = now;
     mem.last_bot = out;
+    mem.last_refs = [...(mem.last_refs || []), finalVerse.ref].slice(-8);
     await writeMem(userId, mem);
 
     res.json(out);
@@ -478,5 +389,3 @@ app.get("/api/heygen/config", (_req, res) => {
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
-
-
