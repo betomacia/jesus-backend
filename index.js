@@ -12,12 +12,32 @@ const fs = require("fs/promises");
 const { query, ping } = require("./db/pg");
 require("dotenv").config();
 
-
-
-
 const app = express();
 app.use(cors({ origin: true })); // CORS permisivo
 app.use(bodyParser.json());
+
+// ---------- DB Health ----------
+app.get("/db/health", async (_req, res) => {
+  try {
+    const now = await ping();
+    res.json({ ok: true, now });
+  } catch (e) {
+    console.error("DB HEALTH ERROR:", e);
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// (Opcional) Conteo rápido de usuarios
+app.get("/db/test", async (_req, res) => {
+  try {
+    const r = await query("SELECT COUNT(*)::int AS users FROM users");
+    res.json({ users: r.rows?.[0]?.users ?? 0 });
+  } catch (e) {
+    console.error("DB TEST ERROR:", e);
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
 
 
 
@@ -458,6 +478,7 @@ app.get("/api/heygen/config", (_req, res) => {
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
+
 
 
 
