@@ -1,11 +1,8 @@
 // index.js — Backend simple, dominios acotados y respuestas naturales (multi-idioma)
-// Cambios importantes:
-// - /api/welcome ahora genera 2–3 frases nuevas via OpenAI (dinámicas) + hora local del móvil (enviada por el frontend)
-// - Personaliza saludo con nombre y uso ocasional de “hijo/hija mía” (no repetitivo)
-// - Memoria liviana: si hubo interacción reciente, agrega continuidad (“lo de ayer…”)
-// - /api/ask fuerza PAUSA tras el versículo con "..." y mueve la pregunta detrás del versículo
-// - OFFTOPIC ampliado (química, física, geometría, informática, computación, etc.)
-// - Mantiene el resto de endpoints y comportamiento
+// Ajustes:
+// - /api/ask: NO embebe el versículo en message (evita duplicado). Prefija la pregunta con "… " para forzar pausa en TTS.
+// - /api/welcome: saludo con plantillas variadas (menos repetición) + 2–3 frases dinámicas (OpenAI) + hora local del móvil.
+// - OFFTOPIC ampliado (química, física, geometría, informática, computación, etc.).
 
 const express = require("express");
 const cors = require("cors");
@@ -17,7 +14,7 @@ const { query, ping } = require("./db/pg");
 require("dotenv").config();
 
 const app = express();
-app.use(cors({ origin: true })); // CORS permisivo
+app.use(cors({ origin: true }));
 app.use(bodyParser.json());
 
 // ---------- DB Health ----------
@@ -31,7 +28,7 @@ app.get("/db/health", async (_req, res) => {
   }
 });
 
-// (Opcional) Conteo rápido de usuarios
+// (Opcional) Conteo rápido
 app.get("/db/test", async (_req, res) => {
   try {
     const r = await query("SELECT COUNT(*)::int AS users FROM users");
@@ -48,17 +45,10 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 // ---------- Utils ----------
 const NORM = (s = "") => String(s).toLowerCase().replace(/\s+/g, " ").trim();
 const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
+const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 
 function langLabel(l = "es") {
-  const m = {
-    es: "Español",
-    en: "English",
-    pt: "Português",
-    it: "Italiano",
-    de: "Deutsch",
-    ca: "Català",
-    fr: "Français",
-  };
+  const m = { es: "Español", en: "English", pt: "Português", it: "Italiano", de: "Deutsch", ca: "Català", fr: "Français" };
   return m[l] || "Español";
 }
 
@@ -76,104 +66,53 @@ function greetingByHour(lang = "es", hour = null) {
   }
 }
 
-// === Frases del día (fallback estático por si OpenAI falla) ===
+// Fallback frases
 const DAILY_PHRASES = {
-  es: [
-    "Un gesto de bondad puede cambiar tu día.",
-    "La fe hace posible lo que parece imposible.",
-    "Hoy es buen día para empezar de nuevo.",
-    "La paz se cultiva con pasos pequeños.",
-    "El amor que das, vuelve a ti.",
-  ],
-  en: [
-    "A small kindness can change your day.",
-    "Faith makes the impossible possible.",
-    "Today is a good day to begin again.",
-    "Peace grows from small steps.",
-    "The love you give returns to you.",
-  ],
-  pt: [
-    "Um gesto de bondade pode mudar o seu dia.",
-    "A fé torna possível o impossível.",
-    "Hoje é um bom dia para recomeçar.",
-    "A paz cresce com pequenos passos.",
-    "O amor que você dá volta para você.",
-  ],
-  it: [
-    "Un gesto di gentilezza può cambiare la tua giornata.",
-    "La fede rende possibile l’impossibile.",
-    "Oggi è un buon giorno per ricominciare.",
-    "La pace cresce a piccoli passi.",
-    "L’amore che doni ritorna a te.",
-  ],
-  de: [
-    "Eine kleine Freundlichkeit kann deinen Tag verändern.",
-    "Glaube macht das Unmögliche möglich.",
-    "Heute ist ein guter Tag für einen Neuanfang.",
-    "Frieden wächst aus kleinen Schritten.",
-    "Die Liebe, die du gibst, kehrt zu dir zurück.",
-  ],
-  ca: [
-    "Un gest d’amabilitat pot canviar el teu dia.",
-    "La fe fa possible l’impossible.",
-    "Avui és un bon dia per començar de nou.",
-    "La pau creix amb petits passos.",
-    "L’amor que dones torna a tu.",
-  ],
-  fr: [
-    "Un geste de bonté peut changer ta journée.",
-    "La foi rend possible l’impossible.",
-    "Aujourd’hui est un bon jour pour recommencer.",
-    "La paix grandit à petits pas.",
-    "L’amour que tu donnes te revient.",
-  ],
+  es: ["Un gesto de bondad puede cambiar tu día.","La fe hace posible lo que parece imposible.","Hoy es buen día para empezar de nuevo.","La paz se cultiva con pasos pequeños.","El amor que das, vuelve a ti."],
+  en: ["A small kindness can change your day.","Faith makes the impossible possible.","Today is a good day to begin again.","Peace grows from small steps.","The love you give returns to you."],
+  pt: ["Um gesto de bondade pode mudar o seu dia.","A fé torna possível o impossível.","Hoje é um bom dia para recomeçar.","A paz cresce com pequenos passos.","O amor que você dá volta para você."],
+  it: ["Un gesto di gentilezza può cambiare la tua giornata.","La fede rende possibile l’impossibile.","Oggi è un buon giorno per ricominciare.","La pace cresce a piccoli passi.","L’amore che doni ritorna a te."],
+  de: ["Eine kleine Freundlichkeit kann deinen Tag verändern.","Glaube macht das Unmögliche möglich.","Heute ist ein guter Tag für einen Neuanfang.","Frieden wächst aus kleinen Schritten.","Die Liebe, die du gibst, kehrt zu dir zurück."],
+  ca: ["Un gest d’amabilitat pot canviar el teu dia.","La fe fa possible l’impossible.","Avui és un bon dia per començar de nou.","La pau creix amb petits passos.","L’amor que dones torna a tu."],
+  fr: ["Un geste de bonté peut changer ta journée.","La foi rend possible l’impossible.","Aujourd’hui est un bon jour pour recommencer.","La paix grandit à petits pas.","L’amour que tu donnes te revient."],
 };
 function dayPhrase(lang = "es") {
   const arr = DAILY_PHRASES[lang] || DAILY_PHRASES["es"];
-  return arr[Math.floor(Math.random() * arr.length)];
+  return pick(arr);
 }
 
-// === Dinámica de frases alentadoras (vía OpenAI) ===
+// Frases dinámicas (OpenAI)
 async function fetchDynamicPhrases(lang = "es") {
   const prompts = {
-    en: "Give me 3 short fresh uplifting phrases for today (<=12 words each). Return them as plain lines.",
-    es: "Dame 3 frases alentadoras, breves y originales para hoy (<=12 palabras cada una). Devuélvelas como líneas sueltas.",
+    en: "Give me 3 short fresh uplifting phrases for today (<=12 words each). Return only plain lines.",
+    es: "Dame 3 frases alentadoras, breves y originales para hoy (<=12 palabras). Devuélvelas como líneas sueltas.",
     pt: "Dê 3 frases curtas e originais para hoje (<=12 palavras cada).",
-    it: "Dammi 3 frasi brevi e originali per oggi (<=12 parole ciascuna).",
+    it: "Dammi 3 frasi brevi e originali per oggi (<=12 parole).",
     de: "Gib mir 3 kurze, frische Ermutigungssätze für heute (<=12 Wörter).",
     ca: "Dona’m 3 frases breus i originals per avui (<=12 paraules).",
     fr: "Donne-moi 3 phrases brèves et originales pour aujourd’hui (<=12 mots).",
   };
   const prompt = prompts[lang] || prompts.es;
-
   try {
     const r = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       temperature: 0.9,
       messages: [
-        { role: "system", content: "You output only 3 plain lines, each a different uplifting short sentence." },
+        { role: "system", content: "Output only 3 plain lines, each a different uplifting short sentence. No bullets." },
         { role: "user", content: prompt },
       ],
     });
     const text = r?.choices?.[0]?.message?.content || "";
-    const arr = text
-      .split(/\n+/)
-      .map(s => s.replace(/^[-*]\s*/, "").trim())
-      .filter(Boolean)
-      .slice(0, 3);
-
-    if (!arr.length) {
-      return [dayPhrase(lang), dayPhrase(lang), dayPhrase(lang)];
-    }
-    return arr;
+    const arr = text.split(/\n+/).map(s => s.replace(/^[-*]\s*/, "").trim()).filter(Boolean).slice(0, 3);
+    return arr.length ? arr : [dayPhrase(lang), dayPhrase(lang), dayPhrase(lang)];
   } catch {
     return [dayPhrase(lang), dayPhrase(lang), dayPhrase(lang)];
   }
 }
 
-// === Tratamiento ocasional “hijo/hija mía” ===
+// “hijo/hija mía” ocasional
 function honorificSometimes(lang = "es", gender = "unknown") {
-  if (Math.random() > 0.3) return ""; // 30% de probabilidad
+  if (Math.random() > 0.3) return ""; // 30%
   const byLang = {
     en: gender === "female" ? " my daughter" : gender === "male" ? " my son" : " my child",
     es: gender === "female" ? " hija mía" : gender === "male" ? " hijo mío" : " hijo/hija mía",
@@ -185,14 +124,10 @@ function honorificSometimes(lang = "es", gender = "unknown") {
   };
   return byLang[lang] || byLang.es;
 }
+// nombre ocasional
+function sometimesName(name = "") { return name && Math.random() < 0.35 ? ` ${name}` : ""; }
 
-// === Mención ocasional del nombre ===
-function sometimesName(name = "") {
-  if (!name) return "";
-  return Math.random() < 0.35 ? ` ${name}` : "";
-}
-
-// ---------- Fallback de versículos (por idioma) ----------
+// Versículos fallback
 const FALLBACK_VERSES = {
   es: [
     { ref: "Salmos 34:18", text: "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu." },
@@ -229,90 +164,50 @@ const FALLBACK_VERSES = {
 };
 function pickFallbackVerse(lang = "es", avoidSet = new Set()) {
   const list = FALLBACK_VERSES[lang] || FALLBACK_VERSES["es"];
-  for (const v of list) {
-    if (!avoidSet.has(NORM(v.ref))) return v;
-  }
+  for (const v of list) if (!avoidSet.has(NORM(v.ref))) return v;
   return list[0];
 }
 
-// ---------- Memoria en FS (simple) ----------
+// Memoria FS simple
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
 async function ensureDataDir() { try { await fs.mkdir(DATA_DIR, { recursive: true }); } catch {} }
-function memPath(uid) {
-  const safe = String(uid || "anon").replace(/[^a-z0-9_-]/gi, "_");
-  return path.join(DATA_DIR, `mem_${safe}.json`);
-}
+function memPath(uid) { const safe = String(uid || "anon").replace(/[^a-z0-9_-]/gi, "_"); return path.join(DATA_DIR, `mem_${safe}.json`); }
 async function readMem(userId) {
   await ensureDataDir();
   try {
     const raw = await fs.readFile(memPath(userId), "utf8");
     const m = JSON.parse(raw);
-    return {
-      last_user_text: m.last_user_text || "",
-      last_user_ts: m.last_user_ts || 0,
-      last_bot: m.last_bot || null,
-      last_refs: Array.isArray(m.last_refs) ? m.last_refs : [],
-    };
+    return { last_user_text: m.last_user_text || "", last_user_ts: m.last_user_ts || 0, last_bot: m.last_bot || null, last_refs: Array.isArray(m.last_refs) ? m.last_refs : [] };
   } catch {
-    return {
-      last_user_text: "",
-      last_user_ts: 0,
-      last_bot: null,
-      last_refs: [],
-    };
+    return { last_user_text: "", last_user_ts: 0, last_bot: null, last_refs: [] };
   }
 }
-async function writeMem(userId, mem) {
-  await ensureDataDir();
-  await fs.writeFile(memPath(userId), JSON.stringify(mem, null, 2), "utf8");
-}
+async function writeMem(userId, mem) { await ensureDataDir(); await fs.writeFile(memPath(userId), JSON.stringify(mem, null, 2), "utf8"); }
 
-// ---------- Filtros de alcance ----------
+// OFFTOPIC ampliado
 const OFFTOPIC = [
-  // entretenimiento/deporte/celebridades
   /\b(f[úu]tbol|futbol|deporte|champions|nba|tenis|selecci[oó]n|mundial|goles?)\b/i,
   /\b(pel[ií]cula|serie|netflix|hbo|max|disney|spotify|cantante|concierto|celebridad|famos[oa]s?)\b/i,
-
-  // técnica/ciencia/educación
   /\b(program(a|ar|aci[oó]n)|c[oó]digo|javascript|react|inform[aá]tica|computaci[oó]n|pc|ordenador|linux|windows|red(es)?|wifi|driver|api|prompt|algoritmo|base de datos|sql|docker|kubernetes|devops)\b/i,
   /\b(matem[aá]ticas?|algebra|c[aá]lculo|geometr[ií]a|trigonometr[ií]a|probabilidad|estad[ií]stica)\b/i,
   /\b(f[ií]sica|qu[ií]mica|biolog[ií]a|geolog[ií]a|astronom[ií]a|ecuaci[oó]n|experimento|laboratorio)\b/i,
-
-  // mecánica/electrónica/juegos
   /\b(mec[aá]nica|alternador|bater[ií]a del auto|motor|embrague|inyector|buj[ií]a|correa|nafta|diesel)\b/i,
   /\b(circuito|voltaje|ohmios|arduino|raspberry|microcontrolador|placa|soldadura)\b/i,
   /\b(videojuego|fortnite|minecraft|playstation|xbox|nintendo|steam)\b/i,
-
-  // geografía/turismo no religioso
   /\b(pa[ií]s|capital|mapa|d[oó]nde queda|ubicaci[oó]n|distancia|kil[oó]metros|frontera|r[íi]o|monta[ñn]a|cordillera)\b/i,
   /\b(viaje|hotel|playa|turismo|destino|vuelo|itinerario|tour|gu[ií]a tur[ií]stica)\b/i,
-
-  // gastronomía / comidas / bebidas
   /\b(gastronom[ií]a|gastronomia|cocina|recet(a|ario)s?|platos?|ingredientes?|men[uú]|postres?|dulces?|salado?s?)\b/i,
   /\b(comida|comidas|almuerzo|cena|desayuno|merienda|vianda|raci[oó]n|calor[ií]as|nutrici[oó]n|dieta)\b/i,
   /\b(bebidas?|vino|cerveza|licor|c[oó]ctel|trago|bar|caf[eé]|cafeter[ií]a|restaurante|restaurantes?)\b/i,
-
-  // política/negocios/finanzas
   /\b(pol[ií]tica|elecci[oó]n|partido|diputado|senador|presidente|gobierno)\b/i,
   /\b(criptomonedas?|bitcoin|acciones|bolsa|nasdaq|d[oó]lar|euro)\b/i,
 ];
-
-const RELIGIOUS_ALLOW = [
-  /\b(iglesia|templo|catedral|parroquia|misa|sacramento|oraci[oó]n|santuario|santo|santos|biblia|evangelio|rosario|confesi[oó]n|eucarist[ií]a|liturgia|vaticano|lourdes|f[aá]tima|peregrinaci[oó]n|camino de santiago)\b/i,
-];
-
-function isReligiousException(s) {
-  const x = NORM(s);
-  return RELIGIOUS_ALLOW.some((r) => r.test(x));
-}
-function isOffTopic(s) {
-  const x = NORM(s);
-  return OFFTOPIC.some((r) => r.test(x));
-}
+const RELIGIOUS_ALLOW = [ /\b(iglesia|templo|catedral|parroquia|misa|sacramento|oraci[oó]n|santuario|santo|santos|biblia|evangelio|rosario|confesi[oó]n|eucarist[ií]a|liturgia|vaticano|lourdes|f[aá]tima|peregrinaci[oó]n|camino de santiago)\b/i ];
+function isReligiousException(s) { const x = NORM(s); return RELIGIOUS_ALLOW.some((r) => r.test(x)); }
+function isOffTopic(s) { const x = NORM(s); return OFFTOPIC.some((r) => r.test(x)); }
 function isGibberish(s) {
   const x = (s || "").trim();
-  if (!x) return true;
-  if (x.length < 2) return true;
+  if (!x || x.length < 2) return true;
   const letters = (x.match(/[a-záéíóúüñàèìòùçâêîôûäëïöüß]/gi) || []).length;
   return letters < Math.ceil(x.length * 0.25);
 }
@@ -323,47 +218,47 @@ app.get("/", (_req, res) => res.json({ ok: true, service: "backend", ts: Date.no
 // ---------- /api/welcome ----------
 app.post("/api/welcome", async (req, res) => {
   try {
-    // Recibe hour desde el FRONT (hora local del móvil) — ver App.tsx
     const { lang = "es", name = "", gender = "unknown", userId = "anon", hour = null } = req.body || {};
-
     const hi = greetingByHour(lang, Number.isInteger(hour) ? hour : null);
     const nm = String(name || "").trim();
     const mem = await readMem(userId);
 
-    // frases dinámicas (OpenAI). Si falla, usa fallback dayPhrase()
+    // 2–3 frases dinámicas
     const phrases = await fetchDynamicPhrases(lang);
-    const pick2or3 = Math.random() < 0.65 ? 2 : 3;
-    const chosen = phrases.slice(0, pick2or3);
+    const chosen = phrases.slice(0, Math.random() < 0.65 ? 2 : 3);
 
-    // tratamiento ocasional + nombre ocasional
     const honor = honorificSometimes(lang, gender);
     const nameMaybe = sometimesName(nm);
 
-    const sal = nm ? `${hi}, ${nm}.` : `${hi}.`;
+    // plantillas de saludo (evitar repetición)
+    const openers = {
+      es: [
+        `${hi}${nm ? ", " + nm : ""}.${honor || ""}${nameMaybe ? "," + nameMaybe : ""}`,
+        `${hi}.${honor || ""}${nameMaybe ? " " + nameMaybe : ""}`,
+        `${hi}${nameMaybe ? ", " + nameMaybe : ""}.${honor || ""}`,
+      ],
+      en: [
+        `${hi}${nm ? ", " + nm : ""}.${honor || ""}${nameMaybe ? "," + nameMaybe : ""}`,
+        `${hi}.${honor || ""}${nameMaybe ? " " + nameMaybe : ""}`,
+        `${hi}${nameMaybe ? ", " + nameMaybe : ""}.${honor || ""}`,
+      ],
+      pt: undefined, it: undefined, de: undefined, ca: undefined, fr: undefined,
+    };
+    const opener = (openers[lang] ? pick(openers[lang]) : `${hi}${nm ? ", " + nm : ""}.${honor || ""}`).trim();
 
-    // continuidad si hubo charla reciente (<48h)
-    let continuity = "";
-    if (mem?.last_user_text) {
-      const recentEnough = (Date.now() - (mem.last_user_ts || 0)) < 1000 * 60 * 60 * 48;
-      if (recentEnough && Math.random() < 0.6) {
-        const refLineByLang = {
-          en: "How have you felt since yesterday about what you shared?",
-          es: "¿Cómo te sentiste desde ayer con lo que compartiste?",
-          pt: "Como você se sentiu desde ontem com o que compartilhou?",
-          it: "Come ti sei sentito da ieri riguardo a ciò che hai condiviso?",
-          de: "Wie hast du dich seit gestern mit dem, was du geteilt hast, gefühlt?",
-          ca: "Com t’has sentit des d’ahir amb allò que vas compartir?",
-          fr: "Comment t’es-tu senti depuis hier à propos de ce que tu as partagé ?",
-        };
-        continuity = refLineByLang[lang] || refLineByLang.es;
-      }
-    }
+    // cierres opcionales variados
+    const closers = {
+      es: ["Seguimos paso a paso.", "Estoy contigo.", "Respiremos y seguimos.", "Aquí estoy.", ""],
+      en: ["I’m with you.", "One step at a time.", "I’m here.", ""],
+      pt: ["Estou com você.", "Um passo de cada vez.", ""],
+      it: ["Sono con te.", "Un passo alla volta.", ""],
+      de: ["Ich bin bei dir.", "Schritt für Schritt.", ""],
+      ca: ["Soc amb tu.", "A poc a poc.", ""],
+      fr: ["Je suis avec toi.", "Un pas après l’autre.", ""],
+    };
+    const closer = pick(closers[lang] || closers.es);
 
-    const message = [
-      `${sal}${honor}${nameMaybe ? "," + nameMaybe : ""}`,
-      ...chosen,
-      continuity
-    ].filter(Boolean).join(" ");
+    const message = [opener, ...chosen, closer].filter(Boolean).join(" ");
 
     const questionByLang = {
       en: "What would you like to share today?",
@@ -378,10 +273,7 @@ app.post("/api/welcome", async (req, res) => {
 
     res.json({ message, question });
   } catch {
-    res.json({
-      message: "La paz sea contigo. ¿De qué te gustaría hablar hoy?",
-      question: "¿Qué te gustaría compartir hoy?",
-    });
+    res.json({ message: "La paz sea contigo. ¿De qué te gustaría hablar hoy?", question: "¿Qué te gustaría compartir hoy?" });
   }
 });
 
@@ -394,7 +286,7 @@ app.post("/api/ask", async (req, res) => {
     const mem = await readMem(userId);
     const now = Date.now();
 
-    // Duplicados rápidos (mismo texto en <7s)
+    // Duplicados rápidos
     if (userTxt && mem.last_user_text && userTxt === mem.last_user_text && now - mem.last_user_ts < 7000) {
       if (mem.last_bot) return res.json(mem.last_bot);
     }
@@ -439,7 +331,7 @@ app.post("/api/ask", async (req, res) => {
       return res.json(out);
     }
 
-    // -------- OpenAI: Instrucciones mínimas (con BIBLIA requerida) --------
+    // -------- OpenAI con biblia obligatoria --------
     const SYS = `
 Eres cercano, claro y compasivo, desde una voz cristiana (católica).
 Alcance: espiritualidad/fe católica, psicología/autoayuda personal, relaciones y emociones. Evita lo demás.
@@ -453,9 +345,7 @@ No incluyas nada fuera del JSON.
 
     const convo = [];
     const recent = Array.isArray(history) ? history.slice(-8) : [];
-    for (const h of recent) {
-      if (typeof h === "string") convo.push({ role: "user", content: h });
-    }
+    for (const h of recent) if (typeof h === "string") convo.push({ role: "user", content: h });
     convo.push({ role: "user", content: userTxt });
 
     const r = await openai.chat.completions.create({
@@ -488,7 +378,6 @@ No incluyas nada fuera del JSON.
     const content = r?.choices?.[0]?.message?.content || "{}";
     let data = {}; try { data = JSON.parse(content); } catch { data = {}; }
 
-    // Ensamblado de salida + versículo obligatorio con anti-repetición + ban Mateo 11:28
     let out = {
       message: String(data?.message || "").trim() || (lang === "en" ? "I’m with you." : "Estoy contigo."),
       question: String(data?.question || "").trim() || "",
@@ -500,28 +389,18 @@ No incluyas nada fuera del JSON.
 
     const used = new Set((mem.last_refs || []).map((x) => NORM(x)));
     let finalVerse = null;
-
     if (txtRaw && refRaw && !banned.test(refRaw) && !used.has(NORM(refRaw))) {
       finalVerse = { ref: refRaw, text: txtRaw };
     } else {
-      // fallback seguro por idioma
       finalVerse = pickFallbackVerse(lang, used);
     }
-
     out.bible = finalVerse;
     mem.last_refs = [...(mem.last_refs || []), finalVerse.ref].slice(-8);
 
-    // == Pausa fuerte entre mensaje, versículo y pregunta ==
-    // Usamos "..." para forzar chunk en el TTS del frontend.
-    if (out.bible && out.bible.text) {
-      const verseLine = `— ${out.bible.text} (${out.bible.ref}).`;
-      if (out.question) {
-        out.message = [out.message, verseLine, "...", out.question].filter(Boolean).join(" ");
-        out.question = ""; // evitamos que se lea “todo seguido”
-      } else {
-        out.message = [out.message, verseLine].filter(Boolean).join(" ");
-      }
-    }
+    // === Pausa ANTES de la pregunta, sin duplicar versículo ===
+    // NO tocamos out.message con el versículo (el front lo muestra aparte).
+    // Prefijamos la pregunta con "… " para que App.tsx cree un chunk "..." (~1.3s) y luego la pregunta.
+    if (out.question) out.question = `… ${out.question}`;
 
     // Persistimos
     mem.last_user_text = userTxt;
