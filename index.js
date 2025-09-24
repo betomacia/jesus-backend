@@ -1,6 +1,6 @@
 // index.js — Backend monolítico, dominios acotados y respuestas naturales (multi-idioma)
 // Esta versión es AUTOCONTENIDA (sin require de ./service/welcometext)
-// - /api/welcome: Saludo por hora + nombre + (opcional hijo/hija 25%) + 1 frase IA + 1 pregunta IA (variada)
+// - /api/welcome: Saludo por hora + nombre + (opcional hijo/hija 25%) + 1 frase IA + 1 pregunta IA (variada, íntima)
 // - /api/ask: TODA la Biblia viene de OpenAI. Si es inválida/repetida/prohibida, se pide una alternativa a OpenAI.
 // - Heygen: sin cambios.
 
@@ -12,6 +12,8 @@ const path = require("path");
 const fs = require("fs/promises");
 const { query, ping } = require("./db/pg");
 require("dotenv").config();
+
+// Node 18+ tiene fetch global
 
 const app = express();
 app.use(cors({ origin: true }));
@@ -246,9 +248,11 @@ app.post("/api/welcome", async (req, res) => {
     // Pedimos a OpenAI: 1 frase breve + 1 pregunta variada (ambas en JSON)
     const W_SYS = `
 Devuélveme SOLO un JSON en ${langLabel(lang)} con este esquema:
-{"phrase":"<frase alentadora breve, cotidiana, NO cursi, sin repetir ideas recientes>","question":"<UNA pregunta distinta a '¿Qué te gustaría compartir hoy?', natural y concreta>"}
-- La frase NO debe repetir "Hoy es un buen día para empezar de nuevo." ni fórmulas idénticas en sesiones seguidas.
-- La pregunta debe variar: ejemplos de estilo (no los repitas literal): "¿En qué puedo acompañarte hoy?", "¿Qué te inquieta ahora?", "¿De qué querés que hablemos?".
+{"phrase":"<frase alentadora breve, suave, de autoestima, sin clichés ni tono duro>",
+ "question":"<UNA pregunta íntima/acompañamiento (no cuestionario), distinta a '¿Qué te gustaría compartir hoy?'>"}
+Condiciones:
+- Evita fórmulas gastadas: nada de “cada pequeño paso cuenta” ni “camino hacia tus metas”.
+- La pregunta invita a hablar (“¿Querés que te escuche?”, “¿Cómo te gustaría empezar?”, “¿Preferís contarme algo sencillo?”… pero NO repitas literal estos ejemplos).
 - No incluyas nada fuera del JSON.
 `.trim();
 
@@ -407,7 +411,7 @@ No incluyas nada fuera del JSON.
       }
     };
 
-    // Validación de la cita
+    // Validación de la cita (prohibida + repetida)
     const banned = /mateo\s*11\s*:\s*28|matt(hew)?\s*11\s*:\s*28|matteo\s*11\s*:\s*28|matthäus\s*11\s*:\s*28|matthieu\s*11\s*:\s*28|mateu\s*11\s*:\s*28|mateus\s*11\s*:\s*28/i;
     const used = new Set((mem.last_refs || []).map((x) => NORM(x)));
     const invalid =
@@ -417,7 +421,7 @@ No incluyas nada fuera del JSON.
       used.has(NORM(out.bible.ref));
 
     if (invalid) {
-      // Pedimos SOLO una alternativa de Biblia
+      // Pedimos SOLO una alternativa de Biblia a OpenAI (sin listas fijas)
       const altSys = `
 Devuélveme SOLO un JSON {"bible":{"text":"...","ref":"Libro 0:0"}} en ${langLabel(lang)}.
 Cita bíblica pertinente al siguiente mensaje del usuario, evita Mateo/Matthew 11:28 y evita estas referencias ya usadas: ${Array.from(used).join(", ") || "ninguna"}.
@@ -454,7 +458,8 @@ No incluyas nada fuera del JSON. Texto exacto de la Biblia y su referencia legib
         });
 
         const altContent = alt?.choices?.[0]?.message?.content || "{}";
-        const altData = JSON.parse(altContent);
+        let altData = {};
+        try { altData = JSON.parse(altContent); } catch (e) { altData = {}; }
         const t = String(altData?.bible?.text || "").trim();
         const r2 = String(altData?.bible?.ref || "").trim();
         if (t && r2 && !banned.test(r2) && !used.has(NORM(r2))) {
