@@ -188,6 +188,15 @@ function isGibberish(s) {
 // ---------- Health ----------
 app.get("/", (_req, res) => res.json({ ok: true, service: "backend", ts: Date.now() }));
 
+// GET /avatar-url -> { url: "..." }
+app.get('/avatar-url', (req, res) => {
+  const url = process.env.AVATAR_STREAM_URL || '';
+  // (opcional CORS si el front está en otro dominio)
+  res.set('Access-Control-Allow-Origin', '*');
+  res.json({ url });
+});
+
+
 // ---------- DB Health ----------
 app.get("/db/health", async (_req, res) => {
   try {
@@ -533,3 +542,4 @@ app.get("/api/heygen/config", (_req, res) => {
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
+
