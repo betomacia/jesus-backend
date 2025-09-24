@@ -1,8 +1,8 @@
 // index.js — Backend monolítico, dominios acotados y respuestas naturales (multi-idioma)
-// Cambios clave en esta versión:
-// - NINGÚN versículo hardcodeado. 100% OpenAI.
-// - /api/ask valida la cita (no vacía, no repetida, no Mateo 11:28) y, si falla, pide a OpenAI una cita alternativa SOLO-BIBLIA.
-// - /api/welcome delega en service/welcometext.js (saludo por hora + nombre + opcional hijo/hija + 1 frase IA + 1 pregunta variada).
+// Esta versión es AUTOCONTENIDA (sin require de ./service/welcometext)
+// - /api/welcome: Saludo por hora + nombre + (opcional hijo/hija 25%) + 1 frase IA + 1 pregunta IA (variada)
+// - /api/ask: TODA la Biblia viene de OpenAI. Si es inválida/repetida/prohibida, se pide una alternativa a OpenAI.
+// - Heygen: sin cambios.
 
 const express = require("express");
 const cors = require("cors");
@@ -13,8 +13,6 @@ const fs = require("fs/promises");
 const { query, ping } = require("./db/pg");
 require("dotenv").config();
 
-const { getWelcomeText } = require("./service/welcometext");
-
 const app = express();
 app.use(cors({ origin: true }));
 app.use(bodyParser.json());
@@ -24,7 +22,6 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 // ---------- Utils ----------
 const NORM = (s = "") => String(s).toLowerCase().replace(/\s+/g, " ").trim();
-const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
 
 function langLabel(l = "es") {
   const m = {
@@ -39,8 +36,7 @@ function langLabel(l = "es") {
   return m[l] || "Español";
 }
 
-// Hora local: si el móvil manda `hour` (0-23) la usamos; si manda tzOffsetMinutes (minutos respecto UTC), la convertimos.
-// Si no hay nada, usamos server time.
+// Hora local: si el móvil manda `hour` (0-23) o tzOffsetMinutes (min respecto a UTC).
 function resolveLocalHour({ hour = null, tzOffsetMinutes = null } = {}) {
   if (Number.isInteger(hour) && hour >= 0 && hour <= 23) return hour;
   if (Number.isInteger(tzOffsetMinutes)) {
@@ -64,6 +60,39 @@ function greetingByHour(lang = "es", hour = null) {
     case "fr": return g("Bonjour", "Bon après-midi", "Bonsoir");
     default:   return g("Buenos días", "Buenas tardes", "Buenas noches");
   }
+}
+
+// Fallbacks mínimos (solo por si OpenAI falla por completo)
+const DAILY_FALLBACKS = {
+  es: [
+    "La paz también crece en lo pequeño.",
+    "Un paso honesto hoy abre caminos mañana.",
+    "No estás solo: vamos de a poco.",
+  ],
+  en: [
+    "Small honest steps open the way.",
+    "You’re not alone; let’s start small.",
+  ],
+  pt: [
+    "Um passo sincero hoje abre caminhos.",
+  ],
+  it: [
+    "Un passo sincero oggi apre la strada.",
+  ],
+  de: [
+    "Ein ehrlicher Schritt heute öffnet Wege.",
+  ],
+  ca: [
+    "Un pas sincer avui obre camins.",
+  ],
+  fr: [
+    "Un pas sincère aujourd’hui ouvre la voie.",
+  ],
+};
+
+function dayFallback(lang = "es") {
+  const arr = DAILY_FALLBACKS[lang] || DAILY_FALLBACKS["es"];
+  return arr[Math.floor(Math.random() * arr.length)];
 }
 
 // ---------- Memoria en FS (simple) ----------
@@ -188,18 +217,16 @@ app.post("/api/welcome", async (req, res) => {
       sex = "",
       userId = "anon",
       history = [],
-      // compat: aceptamos localHour directo o bien hour/tzOffsetMinutes
-      localHour = null,
-      hour = null,
-      tzOffsetMinutes = null,
+      localHour = null, // opcional directo
+      hour = null,      // compat
+      tzOffsetMinutes = null, // compat
     } = req.body || {};
 
-    // Resolver hora local
     const resolvedHour = Number.isInteger(localHour)
       ? localHour
       : resolveLocalHour({ hour, tzOffsetMinutes });
 
-    // Persistir nombre/sexo
+    // persistir nombre/sexo
     const mem = await readMem(userId);
     const nm = String(name || mem.name || "").trim();
     const sx = String(sex || mem.sex || "").trim().toLowerCase(); // male|female|""
@@ -207,21 +234,62 @@ app.post("/api/welcome", async (req, res) => {
     if (sx === "male" || sx === "female") mem.sex = sx;
     await writeMem(userId, mem);
 
-    // Delego en el servicio
-    const out = await getWelcomeText({
-      lang,
-      name: nm,
-      userId,
-      history,
-      localHour: resolvedHour,
-      gender: mem.sex || "unknown",
-    });
+    // saludo + nombre
+    let sal = nm ? `${greetingByHour(lang, resolvedHour)}, ${nm}.` : `${greetingByHour(lang, resolvedHour)}.`;
 
-    res.json(out);
+    // 25% "Hijo/Hija mío/a" si hay sex
+    if (Math.random() < 0.25) {
+      if (mem.sex === "female") sal += " Hija mía,";
+      else if (mem.sex === "male") sal += " Hijo mío,";
+    }
+
+    // Pedimos a OpenAI: 1 frase breve + 1 pregunta variada (ambas en JSON)
+    const W_SYS = `
+Devuélveme SOLO un JSON en ${langLabel(lang)} con este esquema:
+{"phrase":"<frase alentadora breve, cotidiana, NO cursi, sin repetir ideas recientes>","question":"<UNA pregunta distinta a '¿Qué te gustaría compartir hoy?', natural y concreta>"}
+- La frase NO debe repetir "Hoy es un buen día para empezar de nuevo." ni fórmulas idénticas en sesiones seguidas.
+- La pregunta debe variar: ejemplos de estilo (no los repitas literal): "¿En qué puedo acompañarte hoy?", "¿Qué te inquieta ahora?", "¿De qué querés que hablemos?".
+- No incluyas nada fuera del JSON.
+`.trim();
+
+    let phrase = "";
+    let question = "";
+
+    try {
+      const r = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        temperature: 0.9,
+        max_tokens: 180,
+        messages: [
+          { role: "system", content: W_SYS },
+          ...(Array.isArray(history) ? history.slice(-6).map(h => ({ role: "user", content: String(h) })) : []),
+          { role: "user", content: nm ? `Nombre del usuario: ${nm}` : "Usuario anónimo" }
+        ],
+        response_format: { type: "json_object" },
+      });
+      const content = r?.choices?.[0]?.message?.content || "{}";
+      const data = JSON.parse(content);
+      phrase = String(data?.phrase || "").trim();
+      question = String(data?.question || "").trim();
+    } catch (e) {
+      // fallbacks mínimos si OpenAI falla
+      phrase = dayFallback(lang);
+      question =
+        lang === "en" ? "What would help you right now?" :
+        lang === "pt" ? "Em que posso te acompanhar agora?" :
+        lang === "it" ? "Di cosa vuoi parlare adesso?" :
+        lang === "de" ? "Wobei kann ich dich jetzt begleiten?" :
+        lang === "ca" ? "En què et puc acompanyar ara?" :
+        lang === "fr" ? "De quoi veux-tu parler maintenant ?" :
+                        "¿En qué te puedo acompañar ahora?";
+    }
+
+    const message = `${sal} ${phrase}`.replace(/\s+/g, " ").trim();
+    res.json({ message, question });
   } catch (e) {
     console.error("WELCOME ERROR:", e);
     res.json({
-      message: "La paz sea contigo. ¿De qué te gustaría hablar hoy?",
+      message: "La paz sea contigo.",
       question: "¿En qué te puedo acompañar ahora?",
     });
   }
@@ -251,18 +319,18 @@ app.post("/api/ask", async (req, res) => {
         lang === "ca" ? "No ho he entès del tot. Ho pots repetir en poques paraules?" :
         lang === "fr" ? "Je n’ai pas bien compris. Peux-tu répéter en quelques mots ?" :
                         "No te entendí bien. ¿Podés repetirlo en pocas palabras?";
-      const out = { message: msg, question: "" , bible: { text: "", ref: "" } };
+      const out = { message: msg, question: "", bible: { text: "", ref: "" } };
       mem.last_user_text = userTxt; mem.last_user_ts = now; mem.last_bot = out;
       await writeMem(userId, mem);
       return res.json(out);
     }
 
-    // Alcance: bloquear temas fuera del ámbito (con excepción religiosa)
+    // Alcance
     if (isOffTopic(userTxt) && !isReligiousException(userTxt)) {
       const msg =
         lang === "en" ? "I’m here for your inner life: faith, personal struggles and healing. I don’t give facts or opinions on sports, entertainment, technical, food or general topics." :
         lang === "pt" ? "Estou aqui para a sua vida interior: fé, questões pessoais e cura. Não trato esportes, entretenimento, técnica, gastronomia ou temas gerais." :
-        lang === "it" ? "Sono qui per la tua vida interiore: fede, difficoltà personali e guarigione. Non tratto sport, spettacolo, tecnica, gastronomia o temi generali." :
+        lang === "it" ? "Sono qui per la tua vita interiore: fede, difficoltà personali e guarigione. Non tratto sport, spettacolo, tecnica, gastronomia o temi generali." :
         lang === "de" ? "Ich bin für dein inneres Leben da: Glaube, persönliche Themen und Heilung. Keine Fakten/Meinungen zu Sport, Unterhaltung, Technik, Gastronomie oder Allgemeinwissen." :
         lang === "ca" ? "Sóc aquí per a la teva vida interior: fe, dificultats personals i sanació. No tracto esports, entreteniment, tècnica, gastronomia o temes generals." :
         lang === "fr" ? "Je suis là pour ta vie intérieure : foi, difficultés personnelles et guérison. Je ne traite pas le sport, le divertissement, la technique, la gastronomie ni les sujets généraux." :
@@ -270,7 +338,7 @@ app.post("/api/ask", async (req, res) => {
       const q =
         lang === "en" ? "What would help you most right now—your emotions, a relationship, or your prayer life?" :
         lang === "pt" ? "O que mais ajudaria agora — suas emoções, uma relação, ou a sua vida de oração?" :
-        lang === "it" ? "Cosa ti aiuterebbe ora — le emozioni, una relazione o la tua vida di preghiera?" :
+        lang === "it" ? "Cosa ti aiuterebbe ora — le emozioni, una relazione o la tua vita di preghiera?" :
         lang === "de" ? "Was würde dir jetzt am meisten helfen – deine Gefühle, eine Beziehung oder dein Gebetsleben?" :
         lang === "ca" ? "Què t’ajudaria ara — les teves emocions, una relació o la teva vida de pregària?" :
         lang === "fr" ? "Qu’est-ce qui t’aiderait le plus — tes émotions, une relation ou ta vie de prière ?" :
@@ -281,24 +349,22 @@ app.post("/api/ask", async (req, res) => {
       return res.json(out);
     }
 
-    // -------- OpenAI: Instrucciones (con BIBLIA requerida) --------
+    // -------- OpenAI principal (message + question + bible) --------
     const SYS = `
 Eres cercano, claro y compasivo, desde una voz cristiana (católica).
 Alcance: espiritualidad/fe católica, psicología/autoayuda personal, relaciones y emociones. Evita lo demás.
 Varía el lenguaje; no repitas muletillas. No hagas cuestionarios; 1 sola pregunta breve y pertinente.
 Formato (JSON en ${langLabel(lang)}): {"message":"...", "question":"...?", "bible":{"text":"...","ref":"Libro 0:0"}}
 - "message": natural y concreto; si el usuario pide pasos, dáselos con claridad breve.
-- "question": **una** pregunta simple y útil (evita “desde cuándo” salvo que el usuario ya hable de tiempos).
-- "bible": SIEMPRE incluida; pertinente al tema del usuario; NO Mateo/Matthew 11:28 (ninguna variante).
+- "question": **una** pregunta simple y útil (sin interrogar de más).
+- "bible": SIEMPRE incluida; pertinente; NO Mateo/Matthew 11:28 (ninguna variante).
 NO incluyas el versículo dentro de "message"; va SOLO en "bible".
 No incluyas nada fuera del JSON.
 `.trim();
 
     const convo = [];
     const recent = Array.isArray(history) ? history.slice(-8) : [];
-    for (const h of recent) {
-      if (typeof h === "string") convo.push({ role: "user", content: h });
-    }
+    for (const h of recent) if (typeof h === "string") convo.push({ role: "user", content: h });
     convo.push({ role: "user", content: userTxt });
 
     const r = await openai.chat.completions.create({
@@ -332,7 +398,6 @@ No incluyas nada fuera del JSON.
     let data = {};
     try { data = JSON.parse(content); } catch (e) { data = {}; }
 
-    // Ensamblado base
     let out = {
       message: String(data?.message || "").trim() || (lang === "en" ? "I’m with you." : "Estoy contigo."),
       question: String(data?.question || "").trim() || "",
@@ -342,74 +407,69 @@ No incluyas nada fuera del JSON.
       }
     };
 
-    // Validación de la cita: no vacía, no repetida, no Mateo 11:28
+    // Validación de la cita
     const banned = /mateo\s*11\s*:\s*28|matt(hew)?\s*11\s*:\s*28|matteo\s*11\s*:\s*28|matthäus\s*11\s*:\s*28|matthieu\s*11\s*:\s*28|mateu\s*11\s*:\s*28|mateus\s*11\s*:\s*28/i;
     const used = new Set((mem.last_refs || []).map((x) => NORM(x)));
-    const isInvalid =
+    const invalid =
       !out.bible.text ||
       !out.bible.ref ||
       banned.test(out.bible.ref) ||
       used.has(NORM(out.bible.ref));
 
-    if (isInvalid) {
-      // Pedimos SOLO una cita alternativa a OpenAI, relevante al mensaje del usuario y evitando repetidos
+    if (invalid) {
+      // Pedimos SOLO una alternativa de Biblia
       const altSys = `
 Devuélveme SOLO un JSON {"bible":{"text":"...","ref":"Libro 0:0"}} en ${langLabel(lang)}.
 Cita bíblica pertinente al siguiente mensaje del usuario, evita Mateo/Matthew 11:28 y evita estas referencias ya usadas: ${Array.from(used).join(", ") || "ninguna"}.
 No incluyas nada fuera del JSON. Texto exacto de la Biblia y su referencia legible.
 `.trim();
 
-      const alt = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        temperature: 0.5,
-        max_tokens: 180,
-        messages: [
-          { role: "system", content: altSys },
-          { role: "user", content: userTxt }
-        ],
-        response_format: {
-          type: "json_schema",
-          json_schema: {
-            name: "BibleOnly",
-            schema: {
-              type: "object",
-              properties: {
-                bible: {
-                  type: "object",
-                  properties: { text: { type: "string" }, ref: { type: "string" } },
-                  required: ["text", "ref"]
-                }
-              },
-              required: ["bible"],
-              additionalProperties: false
+      try {
+        const alt = await openai.chat.completions.create({
+          model: "gpt-4o-mini",
+          temperature: 0.5,
+          max_tokens: 180,
+          messages: [
+            { role: "system", content: altSys },
+            { role: "user", content: userTxt }
+          ],
+          response_format: {
+            type: "json_schema",
+            json_schema: {
+              name: "BibleOnly",
+              schema: {
+                type: "object",
+                properties: {
+                  bible: {
+                    type: "object",
+                    properties: { text: { type: "string" }, ref: { type: "string" } },
+                    required: ["text", "ref"]
+                  }
+                },
+                required: ["bible"],
+                additionalProperties: false
+              }
             }
           }
-        }
-      }).catch(() => null);
+        });
 
-      if (alt?.choices?.[0]?.message?.content) {
-        try {
-          const altData = JSON.parse(alt.choices[0].message.content);
-          const t = String(altData?.bible?.text || "").trim();
-          const r2 = String(altData?.bible?.ref || "").trim();
-          if (t && r2 && !banned.test(r2) && !used.has(NORM(r2))) {
-            out.bible = { text: t, ref: r2 };
-          } else {
-            out.bible = { text: "", ref: "" }; // no inventamos localmente
-          }
-        } catch (e) {
+        const altContent = alt?.choices?.[0]?.message?.content || "{}";
+        const altData = JSON.parse(altContent);
+        const t = String(altData?.bible?.text || "").trim();
+        const r2 = String(altData?.bible?.ref || "").trim();
+        if (t && r2 && !banned.test(r2) && !used.has(NORM(r2))) {
+          out.bible = { text: t, ref: r2 };
+        } else {
           out.bible = { text: "", ref: "" };
         }
-      } else {
+      } catch (e) {
         out.bible = { text: "", ref: "" };
       }
     }
 
     // Persistimos refs válidas (solo si hay ref)
     const finalRef = String(out?.bible?.ref || "").trim();
-    if (finalRef) {
-      mem.last_refs = [...(mem.last_refs || []), finalRef].slice(-8);
-    }
+    if (finalRef) mem.last_refs = [...(mem.last_refs || []), finalRef].slice(-8);
     mem.last_user_text = userTxt;
     mem.last_user_ts = now;
     mem.last_bot = out;
@@ -418,7 +478,6 @@ No incluyas nada fuera del JSON. Texto exacto de la Biblia y su referencia legib
     res.json(out);
   } catch (e) {
     console.error("ASK ERROR:", e);
-    // Sin fallbacks locales de versículos:
     res.json({
       message: "La paz sea contigo. Decime en pocas palabras qué está pasando y vemos un paso simple y concreto.",
       question: "¿Qué te gustaría trabajar primero?",
