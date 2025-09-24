@@ -2,6 +2,7 @@
 // Esta versión es AUTOCONTENIDA (sin require de ./service/welcometext)
 // - /api/welcome: Saludo por hora + nombre + (opcional hijo/hija 25%) + 1 frase IA + 1 pregunta IA (variada, íntima)
 // - /api/ask: TODA la Biblia viene de OpenAI. Si es inválida/repetida/prohibida, se pide una alternativa a OpenAI.
+// - /api/avatar/stream: sirve avatar.mp4 (Range + CORS) desde /media (o AVATAR_FILE_PATH)
 // - Heygen: sin cambios.
 
 const express = require("express");
@@ -9,7 +10,8 @@ const cors = require("cors");
 const bodyParser = require("body-parser");
 const OpenAI = require("openai");
 const path = require("path");
-const fs = require("fs/promises");
+const fsP = require("fs/promises");      // Promises API (para memoria)
+const fs = require("fs");                // FS clásico (para streams de video)
 const { query, ping } = require("./db/pg");
 require("dotenv").config();
 
@@ -21,6 +23,21 @@ app.use(bodyParser.json());
 
 // ---------- OpenAI ----------
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+// ---------- Paths de media ----------
+const MEDIA_DIR = process.env.MEDIA_DIR || path.join(__dirname, "media");
+const AVATAR_FILE_PATH = process.env.AVATAR_FILE_PATH || path.join(MEDIA_DIR, "avatar.mp4");
+
+// Servir /media estático (útil para debug o archivos públicos)
+app.use(
+  "/media",
+  express.static(MEDIA_DIR, {
+    setHeaders(res) {
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      // Los mp4 estáticos también aceptan range por defecto en Express/Node
+    },
+  })
+);
 
 // ---------- Utils ----------
 const NORM = (s = "") => String(s).toLowerCase().replace(/\s+/g, " ").trim();
@@ -98,8 +115,8 @@ function dayFallback(lang = "es") {
 }
 
 // ---------- Memoria en FS (simple) ----------
+async function ensureDataDir() { try { await fsP.mkdir(DATA_DIR, { recursive: true }); } catch (e) {} }
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
-async function ensureDataDir() { try { await fs.mkdir(DATA_DIR, { recursive: true }); } catch (e) {} }
 function memPath(uid) {
   const safe = String(uid || "anon").replace(/[^a-z0-9_-]/gi, "_");
   return path.join(DATA_DIR, `mem_${safe}.json`);
@@ -107,7 +124,7 @@ function memPath(uid) {
 async function readMem(userId) {
   await ensureDataDir();
   try {
-    const raw = await fs.readFile(memPath(userId), "utf8");
+    const raw = await fsP.readFile(memPath(userId), "utf8");
     const m = JSON.parse(raw);
     return {
       name: m.name || "",
@@ -130,7 +147,7 @@ async function readMem(userId) {
 }
 async function writeMem(userId, mem) {
   await ensureDataDir();
-  await fs.writeFile(memPath(userId), JSON.stringify(mem, null, 2), "utf8");
+  await fsP.writeFile(memPath(userId), JSON.stringify(mem, null, 2), "utf8");
 }
 
 // ---------- Filtros de alcance ----------
@@ -189,13 +206,73 @@ function isGibberish(s) {
 app.get("/", (_req, res) => res.json({ ok: true, service: "backend", ts: Date.now() }));
 
 // GET /avatar-url -> { url: "..." }
-app.get('/avatar-url', (req, res) => {
-  const url = process.env.AVATAR_STREAM_URL || '';
-  // (opcional CORS si el front está en otro dominio)
-  res.set('Access-Control-Allow-Origin', '*');
+app.get("/avatar-url", (req, res) => {
+  const url = process.env.AVATAR_STREAM_URL || "";
+  res.set("Access-Control-Allow-Origin", "*");
   res.json({ url });
 });
 
+// ---------- Stream de AVATAR MP4 ----------
+app.head("/api/avatar/stream", (req, res) => {
+  try {
+    if (!fs.existsSync(AVATAR_FILE_PATH)) return res.status(404).end();
+    const stat = fs.statSync(AVATAR_FILE_PATH);
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Accept-Ranges", "bytes");
+    res.setHeader("Content-Type", "video/mp4");
+    res.setHeader("Content-Length", stat.size);
+    res.status(200).end();
+  } catch (e) {
+    console.error("AVATAR_HEAD_ERR:", e);
+    res.status(500).end();
+  }
+});
+
+app.get("/api/avatar/stream", (req, res) => {
+  try {
+    if (!fs.existsSync(AVATAR_FILE_PATH)) {
+      return res.status(404).send("mp4 not found");
+    }
+    const stat = fs.statSync(AVATAR_FILE_PATH);
+    res.setHeader("Access-Control-Allow-Origin", "*");
+
+    const range = req.headers.range;
+    if (!range) {
+      // Respuesta completa (sin Range)
+      res.setHeader("Content-Type", "video/mp4");
+      res.setHeader("Content-Length", stat.size);
+      fs.createReadStream(AVATAR_FILE_PATH).pipe(res);
+      return;
+    }
+
+    // Soporte Range
+    const [startStr, endStr] = String(range).replace(/bytes=/, "").split("-");
+    let start = parseInt(startStr, 10);
+    let end = endStr ? parseInt(endStr, 10) : Math.min(start + 1024 * 1024 - 1, stat.size - 1);
+    start = isNaN(start) ? 0 : start;
+    end = isNaN(end) ? Math.min(start + 1024 * 1024 - 1, stat.size - 1) : end;
+
+    if (start >= stat.size || end >= stat.size) {
+      res.status(416).set("Content-Range", `bytes */${stat.size}`).end();
+      return;
+    }
+
+    const chunkSize = end - start + 1;
+    res.writeHead(206, {
+      "Content-Range": `bytes ${start}-${end}/${stat.size}`,
+      "Accept-Ranges": "bytes",
+      "Content-Length": chunkSize,
+      "Content-Type": "video/mp4",
+      "Cache-Control": "no-store, max-age=0",
+      "Access-Control-Allow-Origin": "*",
+    });
+
+    fs.createReadStream(AVATAR_FILE_PATH, { start, end }).pipe(res);
+  } catch (e) {
+    console.error("AVATAR_STREAM_ERR:", e);
+    res.status(500).json({ error: "stream_error" });
+  }
+});
 
 // ---------- DB Health ----------
 app.get("/db/health", async (_req, res) => {
@@ -540,6 +617,9 @@ app.get("/api/heygen/config", (_req, res) => {
 });
 
 // ---------- Arranque ----------
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
-
+const PORT = process.env.PORT || 7880;   // ← por defecto 7880
+app.listen(PORT, () => {
+  console.log(`Servidor listo en puerto ${PORT}`);
+  console.log(`MEDIA_DIR: ${MEDIA_DIR}`);
+  console.log(`AVATAR_FILE_PATH: ${AVATAR_FILE_PATH}`);
+});
