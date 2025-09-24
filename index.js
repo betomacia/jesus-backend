@@ -3,6 +3,8 @@
 // - /api/welcome: Saludo por hora + nombre + (opcional hijo/hija 25%) + 1 frase IA + 1 pregunta IA (variada, íntima)
 // - /api/ask: TODA la Biblia viene de OpenAI. Si es inválida/repetida/prohibida, se pide una alternativa a OpenAI.
 // - /api/avatar/stream: sirve avatar.mp4 (Range + CORS) desde /media (o AVATAR_FILE_PATH)
+// - /avatar-url: entrega URL del avatar (ws(s)://<host>/avatar-ws por defecto, o la de env)
+// - /avatar-ws: proxy WebSocket hacia el lipsync interno (ws://127.0.0.1:8084 por defecto)
 // - Heygen: sin cambios.
 
 const express = require("express");
@@ -13,11 +15,13 @@ const path = require("path");
 const fsP = require("fs/promises");      // Promises API (para memoria)
 const fs = require("fs");                // FS clásico (para streams de video)
 const { query, ping } = require("./db/pg");
+const { createProxyMiddleware } = require("http-proxy-middleware");
 require("dotenv").config();
 
 // Node 18+ tiene fetch global
 
 const app = express();
+app.set("trust proxy", true);
 app.use(cors({ origin: true }));
 app.use(bodyParser.json());
 
@@ -205,9 +209,14 @@ function isGibberish(s) {
 // ---------- Health ----------
 app.get("/", (_req, res) => res.json({ ok: true, service: "backend", ts: Date.now() }));
 
-// GET /avatar-url -> { url: "..." }
+// ---------- Avatar URL (HTTP/WS) ----------
 app.get("/avatar-url", (req, res) => {
-  const url = process.env.AVATAR_STREAM_URL || "";
+  const env = (process.env.AVATAR_STREAM_URL || "").trim();
+  // Si no hay env, devolvemos un WS relativo al backend (/avatar-ws -> proxy WS)
+  const isHttps = (req.headers["x-forwarded-proto"] || req.protocol) === "https";
+  const proto = isHttps ? "wss" : "ws";
+  const host = req.headers["x-forwarded-host"] || req.get("host");
+  const url = env || `${proto}://${host}/avatar-ws`;
   res.set("Access-Control-Allow-Origin", "*");
   res.json({ url });
 });
@@ -616,10 +625,23 @@ app.get("/api/heygen/config", (_req, res) => {
   res.json({ voiceId, defaultAvatar, avatars, version });
 });
 
+// ---------- Proxy WebSocket a lipsync interno ----------
+const WS_INTERNAL = process.env.AVATAR_WS_INTERNAL || "http://127.0.0.1:8084";
+const wsProxy = createProxyMiddleware("/avatar-ws", {
+  target: WS_INTERNAL,
+  ws: true,
+  changeOrigin: false,
+  logLevel: "warn",
+  // Si el servidor WS escucha en raíz "/", eliminamos el prefijo:
+  pathRewrite: { "^/avatar-ws": "" },
+});
+app.use("/avatar-ws", wsProxy);
+
 // ---------- Arranque ----------
-const PORT = process.env.PORT || 7880;   // ← por defecto 7880
-app.listen(PORT, () => {
+const PORT = process.env.PORT || 7880; // ← por defecto 7880
+const server = app.listen(PORT, () => {
   console.log(`Servidor listo en puerto ${PORT}`);
   console.log(`MEDIA_DIR: ${MEDIA_DIR}`);
   console.log(`AVATAR_FILE_PATH: ${AVATAR_FILE_PATH}`);
 });
+server.on("upgrade", wsProxy.upgrade);
