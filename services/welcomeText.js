@@ -1,89 +1,147 @@
-// service/welcometext.js
-const OpenAI = require("openai");
-
-// Saludo por hora
-function greetingByHour(lang = "es", hour = null) {
-  const h = Number.isInteger(hour) ? hour : new Date().getHours();
-  const g = (m, a, n) => (h < 12 ? m : h < 19 ? a : n);
-  switch (lang) {
-    case "en": return g("Good morning", "Good afternoon", "Good evening");
-    case "pt": return g("Bom dia", "Boa tarde", "Boa noite");
-    case "it": return g("Buongiorno", "Buon pomeriggio", "Buonasera");
-    case "de": return g("Guten Morgen", "Guten Tag", "Guten Abend");
-    case "ca": return g("Bon dia", "Bona tarda", "Bona nit");
-    case "fr": return g("Bonjour", "Bon après-midi", "Bonsoir");
-    default:   return g("Buenos días", "Buenas tardes", "Buenas noches");
-  }
-}
-
-const VARIED_QUESTIONS = {
-  es: [
-    "¿En qué te puedo acompañar hoy?",
-    "¿Qué te inquieta en este momento?",
-    "¿De qué te gustaría hablar ahora?",
-    "¿Qué te haría bien poner en palabras hoy?",
-    "¿Qué necesitas hoy para estar en paz?",
-  ],
-  en: [
-    "What would help you most right now?",
-    "What would you like to talk about today?",
-    "What is on your heart at this moment?",
-  ],
-  pt: ["Sobre o que você quer falar hoje?", "O que te preocupa neste momento?"],
-  it: ["Di cosa vorresti parlare oggi?", "Cosa ti pesa nel cuore adesso?"],
-  de: ["Worüber möchtest du heute sprechen?", "Was beschäftigt dich gerade?"],
-  ca: ["De què t’agradaria parlar avui?", "Què et inquieta ara mateix?"],
-  fr: ["De quoi aimerais-tu parler aujourd’hui ?", "Qu’est-ce qui te préoccupe en ce moment ?"],
-};
-
-function pick(arr = []) { return arr[Math.floor(Math.random() * arr.length)]; }
-
-// Frase fija en ES, 1 sola vez (si está en español)
-const FIXED_ES = "Hoy es un buen día para empezar de nuevo.";
-
-async function getWelcomeText({ lang = "es", name = "", userId = "anon", history = [], localHour = null, gender = "unknown" }) {
-  const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-  // 1) Saludo + nombre
-  const hi = greetingByHour(lang, localHour);
-  const nm = (name || "").trim();
-  let sal = nm ? `${hi}, ${nm}.` : `${hi}.`;
-
-  // 2) “Hijo/Hija mía” opcional (~25%), solo si gender definido
-  if (Math.random() < 0.25) {
-    if (gender === "female") sal += " Hija mía,";
-    else if (gender === "male") sal += " Hijo mío,";
-  }
-
-  // 3) 1 frase alentadora generada por IA (no cursi, breve)
-  let aiPhrase = "";
+// ---------- /api/welcome ----------
+app.post("/api/welcome", async (req, res) => {
   try {
-    const sys = `Devuelve SOLO JSON con este formato: {"phrase":"..."}.
-Escribe 1 frase alentadora, breve, natural y cotidiana (sin citas, sin emojis), en ${lang}. No repitas ideas comunes.`;
-    const r = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      temperature: 0.9,
-      messages: [{ role: "system", content: sys }],
-      response_format: { type: "json_object" },
+    const {
+      lang = "es",
+      name = "",
+      sex = "",
+      userId = "anon",
+      history = [],
+      localHour = null,
+      hour = null,
+      tzOffsetMinutes = null,
+    } = req.body || {};
+
+    const resolvedHour = Number.isInteger(localHour)
+      ? localHour
+      : resolveLocalHour({ hour, tzOffsetMinutes });
+
+    // Memoria básica
+    const mem = await readMem(userId);
+    const nm = String(name || mem.name || "").trim();
+    const sx = String(sex || mem.sex || "").trim().toLowerCase(); // "male" | "female" | ""
+    if (nm) mem.name = nm;
+    if (sx === "male" || sx === "female") mem.sex = sx;
+
+    // Saludo + nombre
+    let sal = nm
+      ? `${greetingByHour(lang, resolvedHour)}, ${nm}.`
+      : `${greetingByHour(lang, resolvedHour)}.`;
+
+    // 25% "Hijo/Hija mía" si hay sexo definido
+    if (Math.random() < 0.25) {
+      if (mem.sex === "female") sal += " Hija mía,";
+      else if (mem.sex === "male") sal += " Hijo mío,";
+    }
+
+    // Prompt a OpenAI: frase suave + pregunta íntima (nada duro / imperativo)
+    const W_SYS = `
+Devuélveme SOLO un JSON en ${langLabel(lang)} con este esquema:
+{"phrase":"<una frase breve, amable y esperanzadora que eleve la autoestima, tono cálido, NO imperativa, NO clichés, NO 'cada pequeño paso...'>",
+ "question":"<UNA sola pregunta íntima y cercana para abrir conversación: ejemplos de estilo (no repetir literal): '¿Querés que te escuche?', '¿Preferís empezar por algo sencillo?', '¿Qué te gustaría compartir primero?', '¿Cómo te gustaría comenzar?' >"}
+Condiciones:
+- La frase debe sentirse humana, suave, cercana (no técnica, no sermón, no moralista).
+- Nada de 'cada pequeño paso cuenta', 'camino hacia tus metas' ni fórmulas gastadas.
+- La pregunta debe invitar a hablar con cuidado y contención, no sonar a cuestionario.
+- No incluyas nada fuera del JSON.
+`.trim();
+
+    async function fetchWelcomePair(prevPhrases = [], prevQuestions = []) {
+      const r = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        temperature: 0.9,
+        presence_penalty: 0.6,
+        frequency_penalty: 0.4,
+        max_tokens: 180,
+        messages: [
+          { role: "system", content: W_SYS },
+          ...(Array.isArray(history) ? history.slice(-4).map(h => ({ role: "user", content: String(h) })) : []),
+          { role: "user", content: nm ? `Usuario: ${nm}` : "Usuario anónimo" },
+          { role: "user", content: prevPhrases.length ? `Evita frases parecidas a: ${prevPhrases.join(" | ")}` : "Evita repetir frases recientes." },
+          { role: "user", content: prevQuestions.length ? `Evita preguntas parecidas a: ${prevQuestions.join(" | ")}` : "Evita repetir preguntas recientes." },
+        ],
+        response_format: { type: "json_object" },
+      });
+      const content = r?.choices?.[0]?.message?.content || "{}";
+      const data = JSON.parse(content);
+      return {
+        phrase: String(data?.phrase || "").trim(),
+        question: String(data?.question || "").trim(),
+      };
+    }
+
+    // Intento 1 (+ hasta 2 reintentos si se parece demasiado)
+    let phrase = "";
+    let question = "";
+    const prevP = mem.last_welcome_phrases || [];
+    const prevQ = mem.last_welcome_questions || [];
+
+    let tries = 0;
+    while (tries < 3) {
+      tries++;
+      try {
+        const pair = await fetchWelcomePair(prevP.slice(-6), prevQ.slice(-6));
+        phrase = pair.phrase;
+        question = pair.question;
+
+        // Validaciones de tono/contenido y anti-repetición
+        const bannedStarts = [/^cada pequeño paso/i, /^cada d[ií]a es una nueva oportunidad/i];
+        const looksBanned = bannedStarts.some(rx => rx.test(phrase));
+        const isRepPhrase = prevP.some(p => tooSimilar(p, phrase));
+        const isRepQuestion = prevQ.some(q => tooSimilar(q, question));
+
+        const okay =
+          phrase &&
+          question &&
+          !looksBanned &&
+          !isRepPhrase &&
+          !isRepQuestion;
+
+        if (okay) break;
+      } catch (e) {
+        // sigue intentando con fallback al final
+      }
+    }
+
+    // Si OpenAI falló todas, usa mini fallbacks suaves (rarísimo)
+    if (!phrase) {
+      phrase =
+        lang === "en" ? "Estoy a tu lado; podés ir a tu ritmo." :
+        lang === "pt" ? "Estou ao teu lado; podes ir no teu ritmo." :
+        lang === "it" ? "Sono accanto a te; puoi andare al tuo ritmo." :
+        lang === "de" ? "Ich bin an deiner Seite; du kannst dein Tempo wählen." :
+        lang === "ca" ? "Soc al teu costat; pots anar al teu ritme." :
+        lang === "fr" ? "Je suis à tes côtés; avance à ton rythme." :
+                        "Estoy a tu lado; podés ir a tu ritmo.";
+    }
+    if (!question) {
+      question =
+        lang === "en" ? "¿Cómo te gustaría empezar a hablar hoy?" :
+        lang === "pt" ? "Como gostarias de começar a conversar hoje?" :
+        lang === "it" ? "Come ti piacerebbe iniziare a parlare oggi?" :
+        lang === "de" ? "Wie möchtest du heute anfangen zu sprechen?" :
+        lang === "ca" ? "Com t’agradaria començar a parlar avui?" :
+        lang === "fr" ? "Comment aimerais-tu commencer à parler aujourd’hui ?" :
+                        "¿Cómo te gustaría empezar a hablar hoy?";
+    }
+
+    const message = `${sal} ${phrase}`.replace(/\s+/g, " ").trim();
+
+    // Persistimos anti-repetición (máx 10)
+    if (phrase) {
+      mem.last_welcome_phrases = [...(mem.last_welcome_phrases || []), phrase].slice(-10);
+    }
+    if (question) {
+      mem.last_welcome_questions = [...(mem.last_welcome_questions || []), question].slice(-10);
+    }
+    await writeMem(userId, mem);
+
+    res.json({ message, question });
+  } catch (e) {
+    console.error("WELCOME ERROR:", e);
+    res.json({
+      message: "La paz sea contigo.",
+      question: "¿Querés que te escuche un momento?",
     });
-    const content = r?.choices?.[0]?.message?.content || "{}";
-    const data = JSON.parse(content);
-    aiPhrase = String(data?.phrase || "").trim();
-  } catch {
-    aiPhrase = lang === "es" ? "La paz crece con pasos pequeños." : "Peace grows from small steps.";
   }
-
-  // 4) Armar mensaje
-  const parts = [sal];
-  if (lang === "es") parts.push(FIXED_ES); // fija solo en español
-  if (aiPhrase) parts.push(aiPhrase);
-  const message = parts.join(" ").replace(/\s+/g, " ").trim();
-
-  // 5) 1 pregunta variada
-  const qList = VARIED_QUESTIONS[lang] || VARIED_QUESTIONS["es"];
-  const question = pick(qList);
-
-  return { message, question };
-}
-
-module.exports = { getWelcomeText };
+});
