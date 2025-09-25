@@ -11,6 +11,7 @@ const OpenAI = require("openai");
 const path = require("path");
 const fs = require("fs/promises");
 const { query, ping } = require("./db/pg");
+const { runSadTalker, stitchSegments } = require("./utils/avatar");
 require("dotenv").config();
 
 // Node 18+ tiene fetch global
@@ -587,4 +588,5 @@ app.post("/api/avatar-video", async (req, res) => {
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
+
 
