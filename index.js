@@ -12,7 +12,6 @@ const path = require("path");
 const fs = require("fs/promises");
 const { query, ping } = require("./db/pg");
 const AVATAR_SERVER = process.env.AVATAR_SERVER_URL;
-const avatarRes = await fetch(`${AVATAR_SERVER}/speak`, { ... });
 require("dotenv").config();
 
 // Node 18+ tiene fetch global
@@ -570,6 +569,7 @@ app.post("/api/heygen/video", async (req, res) => {
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
+
 
 
 
