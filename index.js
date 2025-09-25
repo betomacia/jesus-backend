@@ -530,6 +530,61 @@ app.get("/api/heygen/config", (_req, res) => {
   res.json({ voiceId, defaultAvatar, avatars, version });
 });
 
+// ---------- /api/avatar-video ----------
+app.post("/api/avatar-video", async (req, res) => {
+  try {
+    const { text = "", userId = "anon" } = req.body || {};
+    if (!text || typeof text !== "string") return res.status(400).json({ error: "Texto vacío o inválido" });
+
+    // 1. Generar audio con HeyGen
+    const audioResponse = await fetch("https://api.heygen.com/v1/audio", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.HEYGEN_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        text,
+        voice_id: process.env.HEYGEN_VOICE_ID,
+      }),
+    });
+
+    const audioData = await audioResponse.json();
+    const audioUrl = audioData.audio_url;
+
+    // 2. Descargar audio
+    const audioPath = path.join(__dirname, "temp", `${userId}_audio.mp3`);
+    const audioStream = await fetch(audioUrl);
+    const audioBuffer = await audioStream.arrayBuffer();
+    await fs.writeFile(audioPath, Buffer.from(audioBuffer));
+
+    // 3. Generar video con tu avatar (SadTalker u otro)
+    const videoPath = path.join(__dirname, "temp", `${userId}_video.mp4`);
+    await runSadTalker({
+      imagePath: path.join(__dirname, "assets", "jesus.png"),
+      audioPath,
+      outputPath: videoPath,
+    });
+
+    // 4. Unir con intro y outro (15+90+15)
+    const finalPath = path.join(__dirname, "temp", `${userId}_final.mp4`);
+    await stitchSegments({
+      intro: path.join(__dirname, "assets", "intro_idle.mp4"),
+      main: videoPath,
+      outro: path.join(__dirname, "assets", "outro_idle.mp4"),
+      output: finalPath,
+    });
+
+    // 5. Enviar video al frontend
+    res.sendFile(finalPath);
+  } catch (err) {
+    console.error("AVATAR VIDEO ERROR:", err);
+    res.status(500).json({ error: "Error generando video" });
+  }
+});
+
+
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
+
