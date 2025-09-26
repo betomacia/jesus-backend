@@ -31,11 +31,21 @@ app.post("/api/audio", async (req, res) => {
       })
     });
 
-    const heygenData = await heygenRes.json();
-    console.log("Respuesta completa de HeyGen:", heygenData);
+    const rawText = await heygenRes.text();
+    console.log("Respuesta cruda de HeyGen:", rawText);
+
+    let heygenData;
+    try {
+      heygenData = JSON.parse(rawText);
+    } catch (parseErr) {
+      throw new Error("La respuesta de HeyGen no es JSON válido");
+    }
 
     const audioUrl = heygenData?.audio_url;
-    if (!audioUrl) throw new Error("No se pudo generar el audio");
+    if (!audioUrl) {
+      console.error("Respuesta sin audio_url:", heygenData);
+      throw new Error("No se pudo generar el audio");
+    }
 
     res.json({ audioUrl });
   } catch (err) {
