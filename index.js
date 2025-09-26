@@ -27,11 +27,11 @@ app.post("/api/avatar", async (req, res) => {
     res.send(Buffer.from(buffer));
   } catch (err) {
     console.error("Error en /api/avatar:", err);
-    res.status(500).json({ error: "No se pudo generar el video" });
+    res.status(500).json({ error: "No se pudo generar el video", details: err.message });
   }
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Servidor avatar corriendo en puerto ${PORT}`);
+  console.log(`Servidor Railway corriendo en puerto ${PORT}`);
 });
