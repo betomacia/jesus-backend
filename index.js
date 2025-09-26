@@ -1,3 +1,11 @@
+import express from "express";
+import cors from "cors";
+import fetch from "node-fetch"; // Si usás Node 18+, podés omitir esto
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
 app.post("/api/avatar", async (req, res) => {
   try {
     const { text, userId = "anon" } = req.body;
@@ -21,4 +29,9 @@ app.post("/api/avatar", async (req, res) => {
     console.error("Error en /api/avatar:", err);
     res.status(500).json({ error: "No se pudo generar el video" });
   }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Servidor avatar corriendo en puerto ${PORT}`);
 });
