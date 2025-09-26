@@ -1,7 +1,7 @@
 {
   "name": "jesus-backend",
   "version": "1.0.0",
-  "description": "Backend Railway que conecta con el servidor avatar",
+  "description": "Backend Railway que conecta con HeyGen y el servidor avatar",
   "main": "index.js",
   "type": "module",
   "scripts": {
@@ -10,7 +10,8 @@
   "dependencies": {
     "express": "^4.18.2",
     "cors": "^2.8.5",
-    "node-fetch": "^2.6.7"
+    "node-fetch": "^2.6.7",
+    "dotenv": "^16.3.1"
   },
   "engines": {
     "node": ">=14.0.0"
