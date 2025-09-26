@@ -10,6 +10,7 @@ const bodyParser = require("body-parser");
 const OpenAI = require("openai");
 const path = require("path");
 const fs = require("fs/promises");
+const { Readable } = require("stream");
 const { query, ping } = require("./db/pg");
 require("dotenv").config();
 
@@ -342,7 +343,7 @@ app.post("/api/ask", async (req, res) => {
       const q =
         lang === "en" ? "What would help you most right now—your emotions, a relationship, or your prayer life?" :
         lang === "pt" ? "O que mais ajudaria agora — suas emoções, uma relação, ou a sua vida de oração?" :
-        lang === "it" ? "Cosa ti aiuterebbe ora — le emozioni, una relazione o la tua vita di preghiera?" :
+        lang === "it" ? "Cosa ti aiuterebbe ora — le emozioni, una relazione o la tua vita de preghiera?" :
         lang === "de" ? "Was würde dir jetzt am meisten helfen – deine Gefühle, eine Beziehung oder dein Gebetsleben?" :
         lang === "ca" ? "Què t’ajudaria ara — les teves emocions, una relació o la teva vida de pregària?" :
         lang === "fr" ? "Qu’est-ce qui t’aiderait le plus — tes émotions, une relation ou ta vie de prière ?" :
@@ -532,7 +533,11 @@ app.get("/api/heygen/config", (_req, res) => {
 
 // ---------- Avatar propio (proxy a GCP: puerto 8083) ----------
 const AVATAR_API_BASE_URL = (process.env.AVATAR_API_BASE_URL || "http://34.67.119.151:8083").replace(/\/+$/, "");
+// Si AVATAR_DIRECT_PROXY=1 => proxy directo a /v1/video/talk del upstream.
+// Si no, modo MOCK (finished inmediato apuntando a test-video).
+const AVATAR_DIRECT_PROXY = String(process.env.AVATAR_DIRECT_PROXY || "").trim() === "1";
 
+// Salud del upstream
 app.get("/api/avatar/health", async (_req, res) => {
   try {
     const r = await fetch(`${AVATAR_API_BASE_URL}/health`);
@@ -544,35 +549,73 @@ app.get("/api/avatar/health", async (_req, res) => {
   }
 });
 
-// Crea tarea "tipo HeyGen" -> devuelve {request_id, status:"processing"}
-app.post("/api/avatar/talk", async (req, res) => {
+// Proxy del MP4 de prueba (streaming) desde GCP
+app.get("/api/avatar/test-video", async (req, res) => {
   try {
-    const r = await fetch(`${AVATAR_API_BASE_URL}/v1/video/talk`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(req.body || {}),
-    });
-    const j = await r.json().catch(() => ({}));
+    const r = await fetch(`${AVATAR_API_BASE_URL}/test-video`);
+    if (!r.ok) {
+      return res.status(r.status || 502).json({ error: "upstream_error", status: r.status });
+    }
     res.setHeader("Access-Control-Allow-Origin", "*");
-    return res.status(r.status || 500).json(j);
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("Content-Type", r.headers.get("content-type") || "video/mp4");
+
+    if (r.body && typeof Readable.fromWeb === "function") {
+      Readable.fromWeb(r.body).pipe(res);
+    } else {
+      const buf = Buffer.from(await r.arrayBuffer());
+      res.end(buf);
+    }
   } catch (e) {
-    console.error("avatar_talk_error:", e);
-    return res.status(502).json({ error: "avatar_talk_proxy_failed", detail: String(e) });
+    console.error("avatar test-video error:", e);
+    res.status(502).json({ error: "fetch_failed", detail: String(e) });
   }
 });
 
-// Consulta estado -> cuando termina, devuelve {status:"finished", video_url, fps, duration_frames}
-app.get("/api/avatar/talk/:id", async (req, res) => {
-  try {
-    const r = await fetch(`${AVATAR_API_BASE_URL}/v1/video/talk/${encodeURIComponent(req.params.id)}`);
-    const j = await r.json().catch(() => ({}));
+if (AVATAR_DIRECT_PROXY) {
+  // ----- Modo PROXY DIRECTO (tu upstream debe tener /v1/video/talk) -----
+  app.post("/api/avatar/talk", async (req, res) => {
+    try {
+      const r = await fetch(`${AVATAR_API_BASE_URL}/v1/video/talk`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req.body || {}),
+      });
+      const j = await r.json().catch(() => ({}));
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      return res.status(r.status || 500).json(j);
+    } catch (e) {
+      console.error("avatar_talk_error:", e);
+      return res.status(502).json({ error: "avatar_talk_proxy_failed", detail: String(e) });
+    }
+  });
+
+  app.get("/api/avatar/talk/:id", async (req, res) => {
+    try {
+      const r = await fetch(`${AVATAR_API_BASE_URL}/v1/video/talk/${encodeURIComponent(req.params.id)}`);
+      const j = await r.json().catch(() => ({}));
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      return res.status(r.status || 500).json(j);
+    } catch (e) {
+      console.error("avatar_status_error:", e);
+      return res.status(502).json({ error: "avatar_status_proxy_failed", detail: String(e) });
+    }
+  });
+} else {
+  // ----- Modo MOCK (funciona YA con tu /test-video actual) -----
+  app.post("/api/avatar/talk", async (_req, res) => {
+    const id = Math.random().toString(36).slice(2);
     res.setHeader("Access-Control-Allow-Origin", "*");
-    return res.status(r.status || 500).json(j);
-  } catch (e) {
-    console.error("avatar_status_error:", e);
-    return res.status(502).json({ error: "avatar_status_proxy_failed", detail: String(e) });
-  }
-});
+    res.json({ request_id: id, status: "queued" });
+  });
+
+  app.get("/api/avatar/talk/:id", async (req, res) => {
+    const baseUrl = `${req.protocol}://${req.get("host")}`;
+    const videoUrl = `${baseUrl}/api/avatar/test-video?t=${Date.now()}`;
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.json({ status: "finished", video_url: videoUrl });
+  });
+}
 
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
