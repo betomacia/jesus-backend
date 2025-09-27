@@ -2,22 +2,20 @@
   "name": "jesus-backend",
   "version": "1.0.0",
   "private": true,
+  "description": "Backend monolítico (API + proxy avatar + Heygen audio) para la app.",
   "main": "index.js",
   "type": "commonjs",
+  "engines": { "node": ">=18 <21" },
   "scripts": {
     "start": "node index.js"
   },
-  "engines": {
-    "node": ">=18"
-  },
   "dependencies": {
-    "express": "^4.19.2",
+    "body-parser": "^1.20.3",
     "cors": "^2.8.5",
-    "body-parser": "^1.20.2",
     "dotenv": "^16.4.5",
-    "openai": "^4.57.0",
-    "pg": "^8.11.5",
-    "multer": "1.4.5-lts.2",
-    "node-fetch": "^2.6.7"
+    "express": "^4.19.2",
+    "openai": "^4.63.0",
+    "pg": "^8.12.0",
+    "ws": "^8.17.0"
   }
 }
