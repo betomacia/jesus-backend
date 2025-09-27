@@ -31,7 +31,6 @@ function langLabel(l = "es") {
   return m[l] || "Español";
 }
 
-// Hora local: si el móvil manda `hour` (0-23) o tzOffsetMinutes (min respecto a UTC).
 function resolveLocalHour({ hour = null, tzOffsetMinutes = null } = {}) {
   if (Number.isInteger(hour) && hour >= 0 && hour <= 23) return hour;
   if (Number.isInteger(tzOffsetMinutes)) {
@@ -57,7 +56,6 @@ function greetingByHour(lang = "es", hour = null) {
   }
 }
 
-// Fallbacks mínimos (solo por si OpenAI falla por completo)
 const DAILY_FALLBACKS = {
   es: ["La paz también crece en lo pequeño.", "Un paso honesto hoy abre caminos mañana.", "No estás solo: vamos de a poco."],
   en: ["Small honest steps open the way.", "You’re not alone; let’s start small."],
@@ -250,7 +248,7 @@ app.post("/api/ask", async (req, res) => {
       const msg =
         lang === "en" ? "I’m here for your inner life: faith, personal struggles and healing. I don’t give facts or opinions on sports, entertainment, technical, food or general topics." :
         lang === "pt" ? "Estou aqui para a sua vida interior: fé, questões pessoais e cura. Não trato esportes, entretenimento, técnica, gastronomia ou temas gerais." :
-        lang === "it" ? "Sono qui per la tua vita interiore: fede, difficoltà personali e guarigione. Non tratto sport, spettacolo, tecnica, gastronomia o temi generali." :
+        lang === "it" ? "Sono qui per la tua vida interiore: fede, difficoltà personali e guarigione. Non tratto sport, spettacolo, tecnica, gastronomia o temi generali." :
         lang === "de" ? "Ich bin für dein inneres Leben da: Glaube, persönliche Themen und Heilung. Keine Fakten/Meinungen zu Sport, Unterhaltung, Technik, Gastronomie oder Allgemeinwissen." :
         lang === "ca" ? "Sóc aquí per a la teva vida interior: fe, dificultats personals i sanació. No tracto esports, entreteniment, tècnica, gastronomia o temes generals." :
         lang === "fr" ? "Je suis là pour ta vie intérieure : foi, difficultés personnelles et guérison. Je ne traite pas le sport, le divertissement, la technique, la gastronomie ni les sujets généraux." :
@@ -258,7 +256,7 @@ app.post("/api/ask", async (req, res) => {
       const q =
         lang === "en" ? "What would help you most right now—your emotions, a relationship, or your prayer life?" :
         lang === "pt" ? "O que mais ajudaria agora — suas emoções, uma relação, ou a sua vida de oração?" :
-        lang === "it" ? "Cosa ti aiuterebbe ora — le emozioni, una relazione o la tua vita de preghiera?" :
+        lang === "it" ? "Cosa ti aiuterebbe ora — le emozioni, una relazione o la tua vita di preghiera?" :
         lang === "de" ? "Was würde dir jetzt am meisten helfen – deine Gefühle, eine Beziehung oder dein Gebetsleben?" :
         lang === "ca" ? "Què t’ajudaria ara — les teves emocions, una relació o la teva vida de pregària?" :
         lang === "fr" ? "Qu’est-ce qui t’aiderait le plus — tes émotions, une relation ou ta vie de prière ?" :
@@ -447,7 +445,7 @@ app.get("/api/avatar/health", async (_req, res) => {
 });
 
 // Proxy del MP4 de prueba (streaming) desde upstream
-app.get("/api/avatar/test-video", async (req, res) => {
+app.get("/api/avatar/test-video", async (_req, res) => {
   try {
     const r = await fetch(`${AVATAR_API_BASE_URL}/test-video`);
     if (!r.ok) return res.status(r.status || 502).json({ error: "upstream_error", status: r.status });
@@ -480,7 +478,6 @@ app.get("/api/avatar/mjpeg", async (_req, res) => {
     if (r.body && typeof Readable.fromWeb === "function") {
       Readable.fromWeb(r.body).pipe(res);
     } else {
-      // Fallback: no debería ocurrir en Node 18+
       const buf = Buffer.from(await r.arrayBuffer());
       res.end(buf);
     }
@@ -546,14 +543,15 @@ const { WebSocketServer, WebSocket } = require("ws");
 const AVATAR_WS_URL = (process.env.AVATAR_WS_URL || "ws://34.139.173.100:8090/pcm").trim();
 
 // Creamos un WSS y usamos el mismo server HTTP para upgrade
-const wss = new WebSocketServer({ noServer: true });
+const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false });
 
 server.on("upgrade", (req, socket, head) => {
   try {
-    // Solo aceptamos /ws/pcm (puedes añadir auth token por query si necesitas)
     const url = req.url || "";
-    if (!url.startsWith("/ws/pcm")) return;
-
+    if (!url.startsWith("/ws/pcm")) {
+      socket.destroy(); // importante: no dejar sockets colgados
+      return;
+    }
     wss.handleUpgrade(req, socket, head, (client) => {
       wss.emit("connection", client, req);
     });
