@@ -531,6 +531,37 @@ app.get("/api/heygen/config", (_req, res) => {
   res.json({ voiceId, defaultAvatar, avatars, version });
 });
 
+// === 1) Generar visemas desde tu VM (endpoint /viseme del servidor Node en 8085)
+const AVATAR_BASE = process.env.AVATAR_API_BASE_URL?.replace(/\/+$/, '') || 'http://34.139.173.100:8085';
+const AVATAR_SCRIPT = 'http://34.139.173.100:8084/script'; // FastAPI que sirve el MJPEG
+
+// audioUrl: el WAV/MP3 que ya generaste con Heygen (o el que devuelves al front)
+const visemeRes = await fetch(`${AVATAR_BASE}/viseme`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ audio_url: audioUrl })
+});
+if (!visemeRes.ok) throw new Error("viseme_failed");
+const vis = await visemeRes.json();
+if (!vis?.mouthCues?.length) throw new Error("no_mouthCues");
+
+// === 2) Enviar el “script” (mouthCues) al avatar que emite /mjpeg (8084)
+await fetch(AVATAR_SCRIPT, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    mouthCues: vis.mouthCues,
+    totalSeconds: vis.totalSeconds || 0,
+    img: "/opt/avatar-rt/server/content/my_avatar.jpg", // o la que prefieras
+    t0_ms: Date.now() + 120,  // ajusta +/– para clavar sincronía audio↔boca
+    loop: false
+  })
+});
+
+// (después de esto, responde al front como ya hacías):
+// res.json({ ok: true, audio_url: audioUrl })
+
+
 // ---------- Avatar propio (proxy a GCP o tu host) ----------
 // (ACTUALIZADO) IP/puerto actuales como defaults
 const AVATAR_API_BASE_URL = (process.env.AVATAR_API_BASE_URL || "http://34.139.173.100:8083").replace(
@@ -723,3 +754,4 @@ wss.on("connection", (client) => {
 });
 
 console.log("WS proxy listo en /ws/pcm →", AVATAR_WS_URL);
+
