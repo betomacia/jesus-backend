@@ -27,7 +27,15 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const NORM = (s = "") => String(s).toLowerCase().replace(/\s+/g, " ").trim();
 
 function langLabel(l = "es") {
-  const m = { es: "Español", en: "English", pt: "Português", it: "Italiano", de: "Deutsch", ca: "Català", fr: "Français" };
+  const m = {
+    es: "Español",
+    en: "English",
+    pt: "Português",
+    it: "Italiano",
+    de: "Deutsch",
+    ca: "Català",
+    fr: "Français",
+  };
   return m[l] || "Español";
 }
 
@@ -46,18 +54,29 @@ function greetingByHour(lang = "es", hour = null) {
   const h = Number.isInteger(hour) ? hour : new Date().getHours();
   const g = (m, a, n) => (h < 12 ? m : h < 19 ? a : n);
   switch (lang) {
-    case "en": return g("Good morning", "Good afternoon", "Good evening");
-    case "pt": return g("Bom dia", "Boa tarde", "Boa noite");
-    case "it": return g("Buongiorno", "Buon pomeriggio", "Buonasera");
-    case "de": return g("Guten Morgen", "Guten Tag", "Guten Abend");
-    case "ca": return g("Bon dia", "Bona tarda", "Bona nit");
-    case "fr": return g("Bonjour", "Bon après-midi", "Bonsoir");
-    default:   return g("Buenos días", "Buenas tardes", "Buenas noches");
+    case "en":
+      return g("Good morning", "Good afternoon", "Good evening");
+    case "pt":
+      return g("Bom dia", "Boa tarde", "Boa noite");
+    case "it":
+      return g("Buongiorno", "Buon pomeriggio", "Buonasera");
+    case "de":
+      return g("Guten Morgen", "Guten Tag", "Guten Abend");
+    case "ca":
+      return g("Bon dia", "Bona tarda", "Bona nit");
+    case "fr":
+      return g("Bonjour", "Bon après-midi", "Bonsoir");
+    default:
+      return g("Buenos días", "Buenas tardes", "Buenas noches");
   }
 }
 
 const DAILY_FALLBACKS = {
-  es: ["La paz también crece en lo pequeño.", "Un paso honesto hoy abre caminos mañana.", "No estás solo: vamos de a poco."],
+  es: [
+    "La paz también crece en lo pequeño.",
+    "Un paso honesto hoy abre caminos mañana.",
+    "No estás solo: vamos de a poco.",
+  ],
   en: ["Small honest steps open the way.", "You’re not alone; let’s start small."],
   pt: ["Um passo sincero hoje abre caminhos."],
   it: ["Un passo sincero oggi apre la strada."],
@@ -65,11 +84,18 @@ const DAILY_FALLBACKS = {
   ca: ["Un pas sincer avui obre camins."],
   fr: ["Un pas sincère aujourd’hui ouvre la voie."],
 };
-const dayFallback = (lang = "es") => (DAILY_FALLBACKS[lang] || DAILY_FALLBACKS["es"])[Math.floor(Math.random() * (DAILY_FALLBACKS[lang]?.length || 3))];
+const dayFallback = (lang = "es") =>
+  (DAILY_FALLBACKS[lang] || DAILY_FALLBACKS["es"])[
+    Math.floor(Math.random() * (DAILY_FALLBACKS[lang]?.length || 3))
+  ];
 
 // ---------- Memoria en FS (simple) ----------
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
-async function ensureDataDir() { try { await fs.mkdir(DATA_DIR, { recursive: true }); } catch (e) {} }
+async function ensureDataDir() {
+  try {
+    await fs.mkdir(DATA_DIR, { recursive: true });
+  } catch (e) {}
+}
 function memPath(uid) {
   const safe = String(uid || "anon").replace(/[^a-z0-9_-]/gi, "_");
   return path.join(DATA_DIR, `mem_${safe}.json`);
@@ -88,7 +114,14 @@ async function readMem(userId) {
       last_refs: Array.isArray(m.last_refs) ? m.last_refs : [],
     };
   } catch {
-    return { name: "", sex: "", last_user_text: "", last_user_ts: 0, last_bot: null, last_refs: [] };
+    return {
+      name: "",
+      sex: "",
+      last_user_text: "",
+      last_user_ts: 0,
+      last_bot: null,
+      last_refs: [],
+    };
   }
 }
 async function writeMem(userId, mem) {
@@ -115,7 +148,9 @@ const OFFTOPIC = [
   /\b(pol[ií]tica|elecci[oó]n|partido|diputado|senador|presidente|gobierno)\b/i,
   /\b(criptomonedas?|bitcoin|acciones|bolsa|nasdaq|d[oó]lar|euro)\b/i,
 ];
-const RELIGIOUS_ALLOW = [/\b(iglesia|templo|catedral|parroquia|misa|sacramento|oraci[oó]n|santuario|santo|biblia|evangelio|rosario|confesi[oó]n|eucarist[ií]a|liturgia|vaticano|lourdes|f[aá]tima|peregrinaci[oó]n|camino de santiago)\b/i];
+const RELIGIOUS_ALLOW = [
+  /\b(iglesia|templo|catedral|parroquia|misa|sacramento|oraci[oó]n|santuario|santo|biblia|evangelio|rosario|confesi[oó]n|eucarist[ií]a|liturgia|vaticano|lourdes|f[aá]tima|peregrinaci[oó]n|camino de santiago)\b/i,
+];
 const isReligiousException = (s) => RELIGIOUS_ALLOW.some((r) => r.test(NORM(s)));
 const isOffTopic = (s) => OFFTOPIC.some((r) => r.test(NORM(s)));
 const isGibberish = (s) => {
@@ -153,8 +188,19 @@ app.get("/db/test", async (_req, res) => {
 // ---------- /api/welcome ----------
 app.post("/api/welcome", async (req, res) => {
   try {
-    const { lang = "es", name = "", sex = "", userId = "anon", history = [], localHour = null, hour = null, tzOffsetMinutes = null } = req.body || {};
-    const resolvedHour = Number.isInteger(localHour) ? localHour : resolveLocalHour({ hour, tzOffsetMinutes });
+    const {
+      lang = "es",
+      name = "",
+      sex = "",
+      userId = "anon",
+      history = [],
+      localHour = null,
+      hour = null,
+      tzOffsetMinutes = null,
+    } = req.body || {};
+    const resolvedHour = Number.isInteger(localHour)
+      ? localHour
+      : resolveLocalHour({ hour, tzOffsetMinutes });
 
     const mem = await readMem(userId);
     const nm = String(name || mem.name || "").trim();
@@ -179,7 +225,8 @@ Condiciones:
 - No incluyas nada fuera del JSON.
 `.trim();
 
-    let phrase = "", question = "";
+    let phrase = "",
+      question = "";
     try {
       const r = await openai.chat.completions.create({
         model: "gpt-4o-mini",
@@ -187,7 +234,9 @@ Condiciones:
         max_tokens: 180,
         messages: [
           { role: "system", content: W_SYS },
-          ...(Array.isArray(history) ? history.slice(-6).map(h => ({ role: "user", content: String(h) })) : []),
+          ...(Array.isArray(history)
+            ? history.slice(-6).map((h) => ({ role: "user", content: String(h) }))
+            : []),
           { role: "user", content: nm ? `Nombre del usuario: ${nm}` : "Usuario anónimo" },
         ],
         response_format: { type: "json_object" },
@@ -199,20 +248,29 @@ Condiciones:
     } catch {
       phrase = dayFallback(lang);
       question =
-        lang === "en" ? "What would help you right now?" :
-        lang === "pt" ? "Em que posso te acompanhar agora?" :
-        lang === "it" ? "Di cosa vuoi parlare adesso?" :
-        lang === "de" ? "Wobei kann ich dich jetzt begleiten?" :
-        lang === "ca" ? "En què et puc acompanyar ara?" :
-        lang === "fr" ? "De quoi veux-tu parler maintenant ?" :
-                        "¿En qué te puedo acompañar ahora?";
+        lang === "en"
+          ? "What would help you right now?"
+          : lang === "pt"
+          ? "Em que posso te acompanhar agora?"
+          : lang === "it"
+          ? "Di cosa vuoi parlare adesso?"
+          : lang === "de"
+          ? "Wobei kann ich dich jetzt begleiten?"
+          : lang === "ca"
+          ? "En què et puc acompanyar ara?"
+          : lang === "fr"
+          ? "De quoi veux-tu parler maintenant ?"
+          : "¿En qué te puedo acompañar ahora?";
     }
 
     const message = `${sal} ${phrase}`.replace(/\s+/g, " ").trim();
     res.json({ message, question });
   } catch (e) {
     console.error("WELCOME ERROR:", e);
-    res.json({ message: "La paz sea contigo.", question: "¿En qué te puedo acompañar ahora?" });
+    res.json({
+      message: "La paz sea contigo.",
+      question: "¿En qué te puedo acompañar ahora?",
+    });
   }
 });
 
@@ -231,38 +289,60 @@ app.post("/api/ask", async (req, res) => {
 
     if (isGibberish(userTxt)) {
       const msg =
-        lang === "en" ? "I didn’t quite get that. Could you say it again in a few words?" :
-        lang === "pt" ? "Não entendi bem. Pode repetir em poucas palavras?" :
-        lang === "it" ? "Non ho capito bene. Puoi ripetere in poche parole?" :
-        lang === "de" ? "Ich habe es nicht ganz verstanden. Kannst du es in wenigen Worten wiederholen?" :
-        lang === "ca" ? "No ho he entès del tot. Ho pots repetir en poques paraules?" :
-        lang === "fr" ? "Je n’ai pas bien compris. Peux-tu répéter en quelques mots ?" :
-                        "No te entendí bien. ¿Podés repetirlo en pocas palabras?";
+        lang === "en"
+          ? "I didn’t quite get that. Could you say it again in a few words?"
+          : lang === "pt"
+          ? "Não entendi bem. Pode repetir em poucas palavras?"
+          : lang === "it"
+          ? "Non ho capito bene. Puoi ripetere in poche parole?"
+          : lang === "de"
+          ? "Ich habe es nicht ganz verstanden. Kannst du es in wenigen Worten wiederholen?"
+          : lang === "ca"
+          ? "No ho he entès del tot. Ho pots repetir en poques paraules?"
+          : lang === "fr"
+          ? "Je n’ai pas bien compris. Peux-tu répéter en quelques mots ?"
+          : "No te entendí bien. ¿Podés repetirlo en pocas palabras?";
       const out = { message: msg, question: "", bible: { text: "", ref: "" } };
-      mem.last_user_text = userTxt; mem.last_user_ts = now; mem.last_bot = out;
+      mem.last_user_text = userTxt;
+      mem.last_user_ts = now;
+      mem.last_bot = out;
       await writeMem(userId, mem);
       return res.json(out);
     }
 
     if (isOffTopic(userTxt) && !isReligiousException(userTxt)) {
       const msg =
-        lang === "en" ? "I’m here for your inner life: faith, personal struggles and healing. I don’t give facts or opinions on sports, entertainment, technical, food or general topics." :
-        lang === "pt" ? "Estou aqui para a sua vida interior: fé, questões pessoais e cura. Não trato esportes, entretenimento, técnica, gastronomia ou temas gerais." :
-        lang === "it" ? "Sono qui per la tua vida interiore: fede, difficoltà personali e guarigione. Non tratto sport, spettacolo, tecnica, gastronomia o temi generali." :
-        lang === "de" ? "Ich bin für dein inneres Leben da: Glaube, persönliche Themen und Heilung. Keine Fakten/Meinungen zu Sport, Unterhaltung, Technik, Gastronomie oder Allgemeinwissen." :
-        lang === "ca" ? "Sóc aquí per a la teva vida interior: fe, dificultats personals i sanació. No tracto esports, entreteniment, tècnica, gastronomia o temes generals." :
-        lang === "fr" ? "Je suis là pour ta vie intérieure : foi, difficultés personnelles et guérison. Je ne traite pas le sport, le divertissement, la technique, la gastronomie ni les sujets généraux." :
-                        "Estoy aquí para tu vida interior: fe, dificultades personales y sanación. No doy datos ni opiniones de deportes, espectáculos, técnica, gastronomía o temas generales.";
+        lang === "en"
+          ? "I’m here for your inner life: faith, personal struggles and healing. I don’t give facts or opinions on sports, entertainment, technical, food or general topics."
+          : lang === "pt"
+          ? "Estou aqui para a sua vida interior: fé, questões pessoais e cura. Não trato esportes, entretenimento, técnica, gastronomia ou temas gerais."
+          : lang === "it"
+          ? "Sono qui per la tua vida interiore: fede, difficoltà personali e guarigione. Non tratto sport, spettacolo, tecnica, gastronomia o temi generali."
+          : lang === "de"
+          ? "Ich bin für dein inneres Leben da: Glaube, persönliche Themen und Heilung. Keine Fakten/Meinungen zu Sport, Unterhaltung, Technik, Gastronomie oder Allgemeinwissen."
+          : lang === "ca"
+          ? "Sóc aquí per a la teva vida interior: fe, dificultats personals i sanació. No tracto esports, entreteniment, tècnica, gastronomia o temes generals."
+          : lang === "fr"
+          ? "Je suis là pour ta vie intérieure : foi, difficultés personnelles et guérison. Je ne traite pas le sport, le divertissement, la technique, la gastronomie ni les sujets généraux."
+          : "Estoy aquí para tu vida interior: fe, dificultades personales y sanación. No doy datos ni opiniones de deportes, espectáculos, técnica, gastronomía o temas generales.";
       const q =
-        lang === "en" ? "What would help you most right now—your emotions, a relationship, or your prayer life?" :
-        lang === "pt" ? "O que mais ajudaria agora — suas emoções, uma relação, ou a sua vida de oração?" :
-        lang === "it" ? "Cosa ti aiuterebbe ora — le emozioni, una relazione o la tua vita di preghiera?" :
-        lang === "de" ? "Was würde dir jetzt am meisten helfen – deine Gefühle, eine Beziehung oder dein Gebetsleben?" :
-        lang === "ca" ? "Què t’ajudaria ara — les teves emocions, una relació o la teva vida de pregària?" :
-        lang === "fr" ? "Qu’est-ce qui t’aiderait le plus — tes émotions, une relation ou ta vie de prière ?" :
-                        "¿Qué te ayudaría ahora — tus emociones, una relación o tu vida de oración?";
+        lang === "en"
+          ? "What would help you most right now—your emotions, a relationship, or your prayer life?"
+          : lang === "pt"
+          ? "O que mais ajudaria agora — suas emoções, uma relação, ou a sua vida de oração?"
+          : lang === "it"
+          ? "Cosa ti aiuterebbe ora — le emozioni, una relazione o la tua vida di preghiera?"
+          : lang === "de"
+          ? "Was würde dir jetzt am meisten helfen – deine Gefühle, eine Beziehung oder dein Gebetsleben?"
+          : lang === "ca"
+          ? "Què t’ajudaria ara — les teves emocions, una relació o la teva vida de pregària?"
+          : lang === "fr"
+          ? "Qu’est-ce qui t’aiderait le plus — tes émotions, une relation ou ta vie de prière ?"
+          : "¿Qué te ayudaría ahora — tus emociones, una relación o tu vida de oración?";
       const out = { message: msg, question: q, bible: { text: "", ref: "" } };
-      mem.last_user_text = userTxt; mem.last_user_ts = now; mem.last_bot = out;
+      mem.last_user_text = userTxt;
+      mem.last_user_ts = now;
+      mem.last_bot = out;
       await writeMem(userId, mem);
       return res.json(out);
     }
@@ -313,22 +393,35 @@ No incluyas nada fuera del JSON.
 
     const content = r?.choices?.[0]?.message?.content || "{}";
     let data = {};
-    try { data = JSON.parse(content); } catch { data = {}; }
+    try {
+      data = JSON.parse(content);
+    } catch {
+      data = {};
+    }
 
     let out = {
-      message: String(data?.message || "").trim() || (lang === "en" ? "I’m with you." : "Estoy contigo."),
+      message:
+        String(data?.message || "").trim() ||
+        (lang === "en" ? "I’m with you." : "Estoy contigo."),
       question: String(data?.question || "").trim() || "",
-      bible: { text: String(data?.bible?.text || "").trim(), ref:  String(data?.bible?.ref  || "").trim() },
+      bible: {
+        text: String(data?.bible?.text || "").trim(),
+        ref: String(data?.bible?.ref || "").trim(),
+      },
     };
 
-    const banned = /mateo\s*11\s*:\s*28|matt(hew)?\s*11\s*:\s*28|matteo\s*11\s*:\s*28|matthäus\s*11\s*:\s*28|matthieu\s*11\s*:\s*28|mateu\s*11\s*:\s*28|mateus\s*11\s*:\s*28/i;
+    const banned =
+      /mateo\s*11\s*:\s*28|matt(hew)?\s*11\s*:\s*28|matteo\s*11\s*:\s*28|matthäus\s*11\s*:\s*28|matthieu\s*11\s*:\s*28|mateu\s*11\s*:\s*28|mateus\s*11\s*:\s*28/i;
     const used = new Set((mem.last_refs || []).map((x) => NORM(x)));
-    const invalid = !out.bible.text || !out.bible.ref || banned.test(out.bible.ref) || used.has(NORM(out.bible.ref));
+    const invalid =
+      !out.bible.text || !out.bible.ref || banned.test(out.bible.ref) || used.has(NORM(out.bible.ref));
 
     if (invalid) {
       const altSys = `
 Devuélveme SOLO un JSON {"bible":{"text":"...","ref":"Libro 0:0"}} en ${langLabel(lang)}.
-Cita bíblica pertinente al siguiente mensaje del usuario, evita Mateo/Matthew 11:28 y evita estas referencias ya usadas: ${Array.from(used).join(", ") || "ninguna"}.
+Cita bíblica pertinente al siguiente mensaje del usuario, evita Mateo/Matthew 11:28 y evita estas referencias ya usadas: ${
+        Array.from(used).join(", ") || "ninguna"
+      }.
 No incluyas nada fuera del JSON. Texto exacto de la Biblia y su referencia legible.
 `.trim();
 
@@ -337,7 +430,10 @@ No incluyas nada fuera del JSON. Texto exacto de la Biblia y su referencia legib
           model: "gpt-4o-mini",
           temperature: 0.5,
           max_tokens: 180,
-          messages: [{ role: "system", content: altSys }, { role: "user", content: userTxt }],
+          messages: [
+            { role: "system", content: altSys },
+            { role: "user", content: userTxt },
+          ],
           response_format: {
             type: "json_schema",
             json_schema: {
@@ -360,7 +456,11 @@ No incluyas nada fuera del JSON. Texto exacto de la Biblia y su referencia legib
 
         const altContent = alt?.choices?.[0]?.message?.content || "{}";
         let altData = {};
-        try { altData = JSON.parse(altContent); } catch { altData = {}; }
+        try {
+          altData = JSON.parse(altContent);
+        } catch {
+          altData = {};
+        }
         const t = String(altData?.bible?.text || "").trim();
         const r2 = String(altData?.bible?.ref || "").trim();
         if (t && r2 && !banned.test(r2) && !used.has(NORM(r2))) {
@@ -375,14 +475,17 @@ No incluyas nada fuera del JSON. Texto exacto de la Biblia y su referencia legib
 
     const finalRef = String(out?.bible?.ref || "").trim();
     if (finalRef) mem.last_refs = [...(mem.last_refs || []), finalRef].slice(-8);
-    mem.last_user_text = userTxt; mem.last_user_ts = now; mem.last_bot = out;
+    mem.last_user_text = userTxt;
+    mem.last_user_ts = now;
+    mem.last_bot = out;
     await writeMem(userId, mem);
 
     res.json(out);
   } catch (e) {
     console.error("ASK ERROR:", e);
     res.json({
-      message: "La paz sea contigo. Decime en pocas palabras qué está pasando y vemos un paso simple y concreto.",
+      message:
+        "La paz sea contigo. Decime en pocas palabras qué está pasando y vemos un paso simple y concreto.",
       question: "¿Qué te gustaría trabajar primero?",
       bible: { text: "", ref: "" },
     });
@@ -429,7 +532,11 @@ app.get("/api/heygen/config", (_req, res) => {
 });
 
 // ---------- Avatar propio (proxy a GCP o tu host) ----------
-const AVATAR_API_BASE_URL = (process.env.AVATAR_API_BASE_URL || "http://34.67.119.151:8083").replace(/\/+$/, "");
+// (ACTUALIZADO) IP/puerto actuales como defaults
+const AVATAR_API_BASE_URL = (process.env.AVATAR_API_BASE_URL || "http://34.139.173.100:8083").replace(
+  /\/+$/,
+  ""
+);
 const AVATAR_DIRECT_PROXY = String(process.env.AVATAR_DIRECT_PROXY || "").trim() === "1";
 
 // Salud del upstream
@@ -464,8 +571,9 @@ app.get("/api/avatar/test-video", async (_req, res) => {
   }
 });
 
-// (NUEVO) Proxy MJPEG de baja latencia (multipart/x-mixed-replace)
+// (ACTUALIZADO) Proxy MJPEG de baja latencia (multipart/x-mixed-replace)
 const AVATAR_MJPEG_URL = (process.env.AVATAR_MJPEG_URL || `${AVATAR_API_BASE_URL}/mjpeg`).trim();
+
 app.get("/api/avatar/mjpeg", async (_req, res) => {
   try {
     const r = await fetch(AVATAR_MJPEG_URL);
@@ -484,6 +592,21 @@ app.get("/api/avatar/mjpeg", async (_req, res) => {
   } catch (e) {
     console.error("avatar mjpeg error:", e);
     res.status(502).json({ error: "mjpeg_proxy_failed", detail: String(e) });
+  }
+});
+
+// NUEVO: HEAD para ver Content-Type correcto en pruebas
+app.head("/api/avatar/mjpeg", async (_req, res) => {
+  try {
+    const r = await fetch(AVATAR_MJPEG_URL, { method: "HEAD" });
+    const ct = r.headers.get("content-type") || "multipart/x-mixed-replace; boundary=frame";
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Cache-Control", "no-store, no-transform");
+    res.setHeader("Content-Type", ct);
+    return res.status(r.status || 200).end();
+  } catch (e) {
+    console.error("avatar mjpeg HEAD error:", e);
+    return res.status(502).json({ error: "mjpeg_head_proxy_failed", detail: String(e) });
   }
 });
 
@@ -507,7 +630,9 @@ if (AVATAR_DIRECT_PROXY) {
 
   app.get("/api/avatar/talk/:id", async (req, res) => {
     try {
-      const r = await fetch(`${AVATAR_API_BASE_URL}/v1/video/talk/${encodeURIComponent(req.params.id)}`);
+      const r = await fetch(
+        `${AVATAR_API_BASE_URL}/v1/video/talk/${encodeURIComponent(req.params.id)}`
+      );
       const j = await r.json().catch(() => ({}));
       res.setHeader("Access-Control-Allow-Origin", "*");
       return res.status(r.status || 500).json(j);
@@ -539,8 +664,8 @@ const server = app.listen(PORT, () => console.log(`Servidor listo en puerto ${PO
 // ===== WebSocket PCM proxy → Avatar (STREAM en tiempo real) =====
 const { WebSocketServer, WebSocket } = require("ws");
 
-// URL del receptor PCM en tu servidor Avatar (configurable por env)
-const AVATAR_WS_URL = (process.env.AVATAR_WS_URL || "ws://34.139.173.100:8090/pcm").trim();
+// (ACTUALIZADO) URL del receptor PCM en tu servidor Avatar
+const AVATAR_WS_URL = (process.env.AVATAR_WS_URL || "ws://34.139.173.100:8083/pcm").trim();
 
 // Creamos un WSS y usamos el mismo server HTTP para upgrade
 const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false });
@@ -549,14 +674,16 @@ server.on("upgrade", (req, socket, head) => {
   try {
     const url = req.url || "";
     if (!url.startsWith("/ws/pcm")) {
-      socket.destroy(); // importante: no dejar sockets colgados
+      socket.destroy();
       return;
     }
     wss.handleUpgrade(req, socket, head, (client) => {
       wss.emit("connection", client, req);
     });
   } catch (e) {
-    try { socket.destroy(); } catch {}
+    try {
+      socket.destroy();
+    } catch {}
   }
 });
 
@@ -565,12 +692,16 @@ wss.on("connection", (client) => {
   const upstream = new WebSocket(AVATAR_WS_URL, { perMessageDeflate: false });
 
   const closeBoth = () => {
-    try { client.close(); } catch {}
-    try { upstream.close(); } catch {}
+    try {
+      client.close();
+    } catch {}
+    try {
+      upstream.close();
+    } catch {}
   };
 
   upstream.on("open", () => {
-    // Front → Upstream (PCM 16k mono LE, Int16 o Float32 empaquetado)
+    // Front → Upstream (PCM 16k mono LE, Int16/Float32 empaquetado)
     client.on("message", (msg, isBinary) => {
       if (upstream.readyState === WebSocket.OPEN) {
         upstream.send(msg, { binary: isBinary });
@@ -579,7 +710,7 @@ wss.on("connection", (client) => {
     client.on("close", closeBoth);
     client.on("error", closeBoth);
 
-    // Upstream → Front (mensajes de control/ACK/latidos opcionales)
+    // Upstream → Front (ACK/latidos opcionales)
     upstream.on("message", (msg, isBinary) => {
       if (client.readyState === WebSocket.OPEN) {
         client.send(msg, { binary: isBinary });
