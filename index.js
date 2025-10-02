@@ -1,7 +1,8 @@
-// index.js — Backend simple, dominios acotados y respuestas naturales (multi-idioma)
-// Cambios:
-// - Bible SIEMPRE presente en /api/ask (anti-repetición + ban Mateo 11:28 + fallback por idioma)
-// - OFFTOPIC reforzado para gastronomía/comidas
+// index.js — Backend monolítico, dominios acotados y respuestas naturales (multi-idioma)
+// Esta versión es AUTOCONTENIDA (sin require de ./service/welcometext)
+// - /api/welcome: Saludo por hora + nombre + (opcional hijo/hija 25%) + 1 frase IA + 1 pregunta IA (variada, íntima)
+// - /api/ask: TODA la Biblia viene de OpenAI. Si es inválida/repetida/prohibida, se pide una alternativa a OpenAI.
+// - Heygen: sin cambios.
 
 const express = require("express");
 const cors = require("cors");
@@ -12,41 +13,17 @@ const fs = require("fs/promises");
 const { query, ping } = require("./db/pg");
 require("dotenv").config();
 
+// Node 18+ tiene fetch global
+
 const app = express();
-app.use(cors({ origin: true })); // CORS permisivo
+app.use(cors({ origin: true }));
 app.use(bodyParser.json());
-
-// ---------- DB Health ----------
-app.get("/db/health", async (_req, res) => {
-  try {
-    const now = await ping();
-    res.json({ ok: true, now });
-  } catch (e) {
-    console.error("DB HEALTH ERROR:", e);
-    res.status(500).json({ ok: false, error: String(e) });
-  }
-});
-
-// (Opcional) Conteo rápido de usuarios
-app.get("/db/test", async (_req, res) => {
-  try {
-    const r = await query("SELECT COUNT(*)::int AS users FROM users");
-    res.json({ users: r.rows?.[0]?.users ?? 0 });
-  } catch (e) {
-    console.error("DB TEST ERROR:", e);
-    res.status(500).json({ ok: false, error: String(e) });
-  }
-});
-
-
-
 
 // ---------- OpenAI ----------
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 // ---------- Utils ----------
 const NORM = (s = "") => String(s).toLowerCase().replace(/\s+/g, " ").trim();
-const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
 
 function langLabel(l = "es") {
   const m = {
@@ -59,6 +36,18 @@ function langLabel(l = "es") {
     fr: "Français",
   };
   return m[l] || "Español";
+}
+
+// Hora local: si el móvil manda `hour` (0-23) o tzOffsetMinutes (min respecto a UTC).
+function resolveLocalHour({ hour = null, tzOffsetMinutes = null } = {}) {
+  if (Number.isInteger(hour) && hour >= 0 && hour <= 23) return hour;
+  if (Number.isInteger(tzOffsetMinutes)) {
+    const nowUtc = new Date(Date.now());
+    const localMs = nowUtc.getTime() - tzOffsetMinutes * 60 * 1000;
+    const local = new Date(localMs);
+    return local.getHours();
+  }
+  return new Date().getHours();
 }
 
 function greetingByHour(lang = "es", hour = null) {
@@ -75,109 +64,42 @@ function greetingByHour(lang = "es", hour = null) {
   }
 }
 
-const DAILY_PHRASES = {
+// Fallbacks mínimos (solo por si OpenAI falla por completo)
+const DAILY_FALLBACKS = {
   es: [
-    "Un gesto de bondad puede cambiar tu día.",
-    "La fe hace posible lo que parece imposible.",
-    "Hoy es buen día para empezar de nuevo.",
-    "La paz se cultiva con pasos pequeños.",
-    "El amor que das, vuelve a ti.",
+    "La paz también crece en lo pequeño.",
+    "Un paso honesto hoy abre caminos mañana.",
+    "No estás solo: vamos de a poco.",
   ],
   en: [
-    "A small kindness can change your day.",
-    "Faith makes the impossible possible.",
-    "Today is a good day to begin again.",
-    "Peace grows from small steps.",
-    "The love you give returns to you.",
+    "Small honest steps open the way.",
+    "You’re not alone; let’s start small.",
   ],
   pt: [
-    "Um gesto de bondade pode mudar o seu dia.",
-    "A fé torna possível o impossível.",
-    "Hoje é um bom dia para recomeçar.",
-    "A paz cresce com pequenos passos.",
-    "O amor que você dá volta para você.",
+    "Um passo sincero hoje abre caminhos.",
   ],
   it: [
-    "Un gesto di gentilezza può cambiare la tua giornata.",
-    "La fede rende possibile l’impossibile.",
-    "Oggi è un buon giorno per ricominciare.",
-    "La pace cresce a piccoli passi.",
-    "L’amore che doni ritorna a te.",
+    "Un passo sincero oggi apre la strada.",
   ],
   de: [
-    "Eine kleine Freundlichkeit kann deinen Tag verändern.",
-    "Glaube macht das Unmögliche möglich.",
-    "Heute ist ein guter Tag für einen Neuanfang.",
-    "Frieden wächst aus kleinen Schritten.",
-    "Die Liebe, die du gibst, kehrt zu dir zurück.",
+    "Ein ehrlicher Schritt heute öffnet Wege.",
   ],
   ca: [
-    "Un gest d’amabilitat pot canviar el teu dia.",
-    "La fe fa possible l’impossible.",
-    "Avui és un bon dia per començar de nou.",
-    "La pau creix amb petits passos.",
-    "L’amor que dones torna a tu.",
+    "Un pas sincer avui obre camins.",
   ],
   fr: [
-    "Un geste de bonté peut changer ta journée.",
-    "La foi rend possible l’impossible.",
-    "Aujourd’hui est un bon jour pour recommencer.",
-    "La paix grandit à petits pas.",
-    "L’amour que tu donnes te revient.",
+    "Un pas sincère aujourd’hui ouvre la voie.",
   ],
 };
 
-function dayPhrase(lang = "es") {
-  const arr = DAILY_PHRASES[lang] || DAILY_PHRASES["es"];
+function dayFallback(lang = "es") {
+  const arr = DAILY_FALLBACKS[lang] || DAILY_FALLBACKS["es"];
   return arr[Math.floor(Math.random() * arr.length)];
-}
-
-// ---------- Fallback de versículos (por idioma) ----------
-const FALLBACK_VERSES = {
-  es: [
-    { ref: "Salmos 34:18", text: "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu." },
-    { ref: "Isaías 41:10", text: "No temas, porque yo estoy contigo; no desmayes, porque yo soy tu Dios que te esfuerzo; siempre te ayudaré." },
-    { ref: "Salmo 23:1",  text: "El Señor es mi pastor; nada me faltará." },
-    { ref: "Romanos 12:12", text: "Gozosos en la esperanza; sufridos en la tribulación; constantes en la oración." },
-  ],
-  en: [
-    { ref: "Psalm 34:18", text: "The Lord is close to the brokenhearted and saves those who are crushed in spirit." },
-    { ref: "Isaiah 41:10", text: "Do not fear, for I am with you; do not be dismayed, for I am your God." },
-    { ref: "Psalm 23:1", text: "The Lord is my shepherd; I shall not want." },
-    { ref: "Romans 12:12", text: "Be joyful in hope, patient in affliction, faithful in prayer." },
-  ],
-  pt: [
-    { ref: "Salmos 34:18", text: "Perto está o Senhor dos que têm o coração quebrantado; e salva os contritos de espírito." },
-    { ref: "Isaías 41:10", text: "Não temas, porque eu sou contigo; não te assombres, porque eu sou teu Deus." },
-  ],
-  it: [
-    { ref: "Salmo 34:18", text: "Il Signore è vicino a chi ha il cuore spezzato; egli salva gli spiriti affranti." },
-    { ref: "Isaia 41:10", text: "Non temere, perché io sono con te; non smarrirti, perché io sono il tuo Dio." },
-  ],
-  de: [
-    { ref: "Psalm 34:18", text: "Der HERR ist nahe denen, die zerbrochenen Herzens sind." },
-    { ref: "Jesaja 41:10", text: "Fürchte dich nicht, denn ich bin mit dir." },
-  ],
-  ca: [
-    { ref: "Salm 34:19 (cat)", text: "El Senyor és a prop dels cors trencats, salva els que tenen l’esperit abatut." },
-    { ref: "Isaïes 41:10", text: "No tinguis por, que jo sóc amb tu; no t’esglaiïs, que jo sóc el teu Déu." },
-  ],
-  fr: [
-    { ref: "Psaume 34:19", text: "L’Éternel est près de ceux qui ont le cœur brisé; il sauve ceux qui ont l’esprit dans l’abattement." },
-    { ref: "Ésaïe 41:10", text: "Ne crains rien, car je suis avec toi." },
-  ],
-};
-function pickFallbackVerse(lang = "es", avoidSet = new Set()) {
-  const list = FALLBACK_VERSES[lang] || FALLBACK_VERSES["es"];
-  for (const v of list) {
-    if (!avoidSet.has(NORM(v.ref))) return v;
-  }
-  return list[0];
 }
 
 // ---------- Memoria en FS (simple) ----------
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
-async function ensureDataDir() { try { await fs.mkdir(DATA_DIR, { recursive: true }); } catch {} }
+async function ensureDataDir() { try { await fs.mkdir(DATA_DIR, { recursive: true }); } catch (e) {} }
 function memPath(uid) {
   const safe = String(uid || "anon").replace(/[^a-z0-9_-]/gi, "_");
   return path.join(DATA_DIR, `mem_${safe}.json`);
@@ -188,13 +110,17 @@ async function readMem(userId) {
     const raw = await fs.readFile(memPath(userId), "utf8");
     const m = JSON.parse(raw);
     return {
+      name: m.name || "",
+      sex: m.sex || "", // "male" | "female" | "" (unknown)
       last_user_text: m.last_user_text || "",
       last_user_ts: m.last_user_ts || 0,
       last_bot: m.last_bot || null,
       last_refs: Array.isArray(m.last_refs) ? m.last_refs : [],
     };
-  } catch {
+  } catch (e) {
     return {
+      name: "",
+      sex: "",
       last_user_text: "",
       last_user_ts: 0,
       last_bot: null,
@@ -213,9 +139,11 @@ const OFFTOPIC = [
   /\b(f[úu]tbol|futbol|deporte|champions|nba|tenis|selecci[oó]n|mundial|goles?)\b/i,
   /\b(pel[ií]cula|serie|netflix|hbo|max|disney|spotify|cantante|concierto|celebridad|famos[oa]s?)\b/i,
 
-  // técnica/ciencia/educación
-  /\b(program(a|ar|aci[oó]n)|c[oó]digo|javascript|react|inform[aá]tica|pc|ordenador|linux|windows|red(es)?|wifi|driver|api|prompt)\b/i,
-  /\b(matem[aá]ticas?|algebra|c[aá]lculo|geometr[ií]a|f[ií]sica|qu[ií]mica|biolog[ií]a|cient[ií]fico|ecuaci[oó]n)\b/i,
+  // técnica/ciencia/educación (ampliado)
+  /\b(program(a|ar|aci[oó]n)|c[oó]digo|javascript|react|inform[aá]tica|computaci[oó]n|pc|ordenador|linux|windows|macos|driver|api|prompt)\b/i,
+  /\b(ingenier[ií]a|software|hardware|servidor|cloud|nube|red(es)?|wifi|routing|docker|kubernetes)\b/i,
+  /\b(matem[aá]ticas?|algebra|c[aá]lculo|geometr[ií]a|trigonometr[ií]a)\b/i,
+  /\b(f[ií]sica|qu[ií]mica|biolog[ií]a|geolog[ií]a|astronom[ií]a|laboratorio)\b/i,
 
   // mecánica/electrónica/juegos
   /\b(mec[aá]nica|alternador|bater[ií]a del auto|motor|embrague|inyector|buj[ií]a|correa|nafta|diesel)\b/i,
@@ -226,7 +154,7 @@ const OFFTOPIC = [
   /\b(pa[ií]s|capital|mapa|d[oó]nde queda|ubicaci[oó]n|distancia|kil[oó]metros|frontera|r[íi]o|monta[ñn]a|cordillera)\b/i,
   /\b(viaje|hotel|playa|turismo|destino|vuelo|itinerario|tour|gu[ií]a tur[ií]stica)\b/i,
 
-  // gastronomía / comidas / bebidas (reforzado)
+  // gastronomía / comidas / bebidas
   /\b(gastronom[ií]a|gastronomia|cocina|recet(a|ario)s?|platos?|ingredientes?|men[uú]|men[uú]s|postres?|dulces?|salado?s?)\b/i,
   /\b(comida|comidas|almuerzo|cena|desayuno|merienda|vianda|raci[oó]n|calor[ií]as|nutrici[oó]n|dieta)\b/i,
   /\b(bebidas?|vino|cerveza|licor|coctel|c[oó]ctel|trago|fermentado|maridaje|bar|caf[eé]|cafeter[ií]a|restaurante|restaurantes?)\b/i,
@@ -260,36 +188,114 @@ function isGibberish(s) {
 // ---------- Health ----------
 app.get("/", (_req, res) => res.json({ ok: true, service: "backend", ts: Date.now() }));
 
+// ---------- DB Health ----------
+app.get("/db/health", async (_req, res) => {
+  try {
+    const now = await ping();
+    res.json({ ok: true, now });
+  } catch (e) {
+    console.error("DB HEALTH ERROR:", e);
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// (Opcional) Conteo rápido de usuarios
+app.get("/db/test", async (_req, res) => {
+  try {
+    const r = await query("SELECT COUNT(*)::int AS users FROM users");
+    res.json({ users: r.rows?.[0]?.users ?? 0 });
+  } catch (e) {
+    console.error("DB TEST ERROR:", e);
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
 // ---------- /api/welcome ----------
 app.post("/api/welcome", async (req, res) => {
   try {
-    const { lang = "es", name = "", userId = "anon", hour = null } = req.body || {};
-    const hi = greetingByHour(lang, hour);
-    const phrase = dayPhrase(lang);
-    const nm = String(name || "").trim();
-    const sal = nm ? `${hi}, ${nm}.` : `${hi}.`;
+    const {
+      lang = "es",
+      name = "",
+      sex = "",
+      userId = "anon",
+      history = [],
+      localHour = null, // opcional directo
+      hour = null,      // compat
+      tzOffsetMinutes = null, // compat
+    } = req.body || {};
 
-    const message =
-      lang === "en" ? `${sal} ${phrase} I'm here for you.` :
-      lang === "pt" ? `${sal} ${phrase} Estou aqui para você.` :
-      lang === "it" ? `${sal} ${phrase} Sono qui per te.` :
-      lang === "de" ? `${sal} ${phrase} Ich bin für dich da.` :
-      lang === "ca" ? `${sal} ${phrase} Sóc aquí per ajudar-te.` :
-      lang === "fr" ? `${sal} ${phrase} Je suis là pour toi.` :
-                      `${sal} ${phrase} Estoy aquí para lo que necesites.`;
+    const resolvedHour = Number.isInteger(localHour)
+      ? localHour
+      : resolveLocalHour({ hour, tzOffsetMinutes });
 
-    const question =
-      lang === "en" ? "What would you like to share today?" :
-      lang === "pt" ? "O que você gostaria de compartilhar hoje?" :
-      lang === "it" ? "Di cosa ti piacerebbe parlare oggi?" :
-      lang === "de" ? "Worüber möchtest du heute sprechen?" :
-      lang === "ca" ? "De què t’agradaria parlar avui?" :
-      lang === "fr" ? "De quoi aimerais-tu parler aujourd’hui ?" :
-                      "¿Qué te gustaría compartir hoy?";
+    // persistir nombre/sexo
+    const mem = await readMem(userId);
+    const nm = String(name || mem.name || "").trim();
+    const sx = String(sex || mem.sex || "").trim().toLowerCase(); // male|female|""
+    if (nm) mem.name = nm;
+    if (sx === "male" || sx === "female") mem.sex = sx;
+    await writeMem(userId, mem);
 
+    // saludo + nombre
+    let sal = nm ? `${greetingByHour(lang, resolvedHour)}, ${nm}.` : `${greetingByHour(lang, resolvedHour)}.`;
+
+    // 25% "Hijo/Hija mío/a" si hay sex
+    if (Math.random() < 0.25) {
+      if (mem.sex === "female") sal += " Hija mía,";
+      else if (mem.sex === "male") sal += " Hijo mío,";
+    }
+
+    // Pedimos a OpenAI: 1 frase breve + 1 pregunta variada (ambas en JSON)
+    const W_SYS = `
+Devuélveme SOLO un JSON en ${langLabel(lang)} con este esquema:
+{"phrase":"<frase alentadora breve, suave, de autoestima, sin clichés ni tono duro>",
+ "question":"<UNA pregunta íntima/acompañamiento (no cuestionario), distinta a '¿Qué te gustaría compartir hoy?'>"}
+Condiciones:
+- Evita fórmulas gastadas: nada de “cada pequeño paso cuenta” ni “camino hacia tus metas”.
+- La pregunta invita a hablar (“¿Querés que te escuche?”, “¿Cómo te gustaría empezar?”, “¿Preferís contarme algo sencillo?”… pero NO repitas literal estos ejemplos).
+- No incluyas nada fuera del JSON.
+`.trim();
+
+    let phrase = "";
+    let question = "";
+
+    try {
+      const r = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        temperature: 0.9,
+        max_tokens: 180,
+        messages: [
+          { role: "system", content: W_SYS },
+          ...(Array.isArray(history) ? history.slice(-6).map(h => ({ role: "user", content: String(h) })) : []),
+          { role: "user", content: nm ? `Nombre del usuario: ${nm}` : "Usuario anónimo" }
+        ],
+        response_format: { type: "json_object" },
+      });
+      const content = r?.choices?.[0]?.message?.content || "{}";
+      const data = JSON.parse(content);
+      phrase = String(data?.phrase || "").trim();
+      question = String(data?.question || "").trim();
+    } catch (e) {
+      // fallbacks mínimos si OpenAI falla
+      phrase = dayFallback(lang);
+      question =
+        lang === "en" ? "What would help you right now?" :
+        lang === "pt" ? "Em que posso te acompanhar agora?" :
+        lang === "it" ? "Di cosa vuoi parlare adesso?" :
+        lang === "de" ? "Wobei kann ich dich jetzt begleiten?" :
+        lang === "ca" ? "En què et puc acompanyar ara?" :
+        lang === "fr" ? "De quoi veux-tu parler maintenant ?" :
+                        "¿En qué te puedo acompañar ahora?";
+    }
+
+    const message = `${sal} ${phrase}`.replace(/\s+/g, " ").trim();
     res.json({ message, question });
-  } catch {
-    res.json({ message: "La paz sea contigo. ¿De qué te gustaría hablar hoy?", question: "¿Qué te gustaría compartir hoy?" });
+  } catch (e) {
+    console.error("WELCOME ERROR:", e);
+    res.json({
+      message: "La paz sea contigo.",
+      question: "¿En qué te puedo acompañar ahora?",
+    });
   }
 });
 
@@ -317,7 +323,7 @@ app.post("/api/ask", async (req, res) => {
         lang === "ca" ? "No ho he entès del tot. Ho pots repetir en poques paraules?" :
         lang === "fr" ? "Je n’ai pas bien compris. Peux-tu répéter en quelques mots ?" :
                         "No te entendí bien. ¿Podés repetirlo en pocas palabras?";
-      const out = { message: msg, question: "" };
+      const out = { message: msg, question: "", bible: { text: "", ref: "" } };
       mem.last_user_text = userTxt; mem.last_user_ts = now; mem.last_bot = out;
       await writeMem(userId, mem);
       return res.json(out);
@@ -341,35 +347,34 @@ app.post("/api/ask", async (req, res) => {
         lang === "ca" ? "Què t’ajudaria ara — les teves emocions, una relació o la teva vida de pregària?" :
         lang === "fr" ? "Qu’est-ce qui t’aiderait le plus — tes émotions, une relation ou ta vie de prière ?" :
                         "¿Qué te ayudaría ahora — tus emociones, una relación o tu vida de oración?";
-      const out = { message: msg, question: q };
+      const out = { message: msg, question: q, bible: { text: "", ref: "" } };
       mem.last_user_text = userTxt; mem.last_user_ts = now; mem.last_bot = out;
       await writeMem(userId, mem);
       return res.json(out);
     }
 
-    // -------- OpenAI: Instrucciones mínimas (con BIBLIA requerida) --------
+    // -------- OpenAI principal (message + question + bible) --------
     const SYS = `
 Eres cercano, claro y compasivo, desde una voz cristiana (católica).
 Alcance: espiritualidad/fe católica, psicología/autoayuda personal, relaciones y emociones. Evita lo demás.
 Varía el lenguaje; no repitas muletillas. No hagas cuestionarios; 1 sola pregunta breve y pertinente.
 Formato (JSON en ${langLabel(lang)}): {"message":"...", "question":"...?", "bible":{"text":"...","ref":"Libro 0:0"}}
 - "message": natural y concreto; si el usuario pide pasos, dáselos con claridad breve.
-- "question": **una** pregunta simple y útil (evita “desde cuándo” salvo que el usuario ya hable de tiempos).
-- "bible": **SIEMPRE** incluida; pertinente; no repetir continuamente la misma. Evita Mateo/Matthew 11:28 (todas las variantes).
+- "question": **una** pregunta simple y útil (sin interrogar de más).
+- "bible": SIEMPRE incluida; pertinente; NO Mateo/Matthew 11:28 (ninguna variante).
+NO incluyas el versículo dentro de "message"; va SOLO en "bible".
 No incluyas nada fuera del JSON.
 `.trim();
 
     const convo = [];
     const recent = Array.isArray(history) ? history.slice(-8) : [];
-    for (const h of recent) {
-      if (typeof h === "string") convo.push({ role: "user", content: h });
-    }
+    for (const h of recent) if (typeof h === "string") convo.push({ role: "user", content: h });
     convo.push({ role: "user", content: userTxt });
 
     const r = await openai.chat.completions.create({
       model: "gpt-4o",
       temperature: 0.6,
-      max_tokens: 360,
+      max_tokens: 380,
       messages: [{ role: "system", content: SYS }, ...convo],
       response_format: {
         type: "json_schema",
@@ -394,32 +399,82 @@ No incluyas nada fuera del JSON.
     });
 
     const content = r?.choices?.[0]?.message?.content || "{}";
-    let data = {}; try { data = JSON.parse(content); } catch { data = {}; }
+    let data = {};
+    try { data = JSON.parse(content); } catch (e) { data = {}; }
 
-    // Ensamblado de salida + versículo obligatorio con anti-repetición + ban Mateo 11:28
     let out = {
       message: String(data?.message || "").trim() || (lang === "en" ? "I’m with you." : "Estoy contigo."),
       question: String(data?.question || "").trim() || "",
+      bible: {
+        text: String(data?.bible?.text || "").trim(),
+        ref:  String(data?.bible?.ref  || "").trim(),
+      }
     };
 
+    // Validación de la cita (prohibida + repetida)
     const banned = /mateo\s*11\s*:\s*28|matt(hew)?\s*11\s*:\s*28|matteo\s*11\s*:\s*28|matthäus\s*11\s*:\s*28|matthieu\s*11\s*:\s*28|mateu\s*11\s*:\s*28|mateus\s*11\s*:\s*28/i;
-    const refRaw = String(data?.bible?.ref || "").trim();
-    const txtRaw = String(data?.bible?.text || "").trim();
-
     const used = new Set((mem.last_refs || []).map((x) => NORM(x)));
-    let finalVerse = null;
+    const invalid =
+      !out.bible.text ||
+      !out.bible.ref ||
+      banned.test(out.bible.ref) ||
+      used.has(NORM(out.bible.ref));
 
-    if (txtRaw && refRaw && !banned.test(refRaw) && !used.has(NORM(refRaw))) {
-      finalVerse = { ref: refRaw, text: txtRaw };
-    } else {
-      // fallback seguro por idioma
-      finalVerse = pickFallbackVerse(lang, used);
+    if (invalid) {
+      // Pedimos SOLO una alternativa de Biblia a OpenAI (sin listas fijas)
+      const altSys = `
+Devuélveme SOLO un JSON {"bible":{"text":"...","ref":"Libro 0:0"}} en ${langLabel(lang)}.
+Cita bíblica pertinente al siguiente mensaje del usuario, evita Mateo/Matthew 11:28 y evita estas referencias ya usadas: ${Array.from(used).join(", ") || "ninguna"}.
+No incluyas nada fuera del JSON. Texto exacto de la Biblia y su referencia legible.
+`.trim();
+
+      try {
+        const alt = await openai.chat.completions.create({
+          model: "gpt-4o-mini",
+          temperature: 0.5,
+          max_tokens: 180,
+          messages: [
+            { role: "system", content: altSys },
+            { role: "user", content: userTxt }
+          ],
+          response_format: {
+            type: "json_schema",
+            json_schema: {
+              name: "BibleOnly",
+              schema: {
+                type: "object",
+                properties: {
+                  bible: {
+                    type: "object",
+                    properties: { text: { type: "string" }, ref: { type: "string" } },
+                    required: ["text", "ref"]
+                  }
+                },
+                required: ["bible"],
+                additionalProperties: false
+              }
+            }
+          }
+        });
+
+        const altContent = alt?.choices?.[0]?.message?.content || "{}";
+        let altData = {};
+        try { altData = JSON.parse(altContent); } catch (e) { altData = {}; }
+        const t = String(altData?.bible?.text || "").trim();
+        const r2 = String(altData?.bible?.ref || "").trim();
+        if (t && r2 && !banned.test(r2) && !used.has(NORM(r2))) {
+          out.bible = { text: t, ref: r2 };
+        } else {
+          out.bible = { text: "", ref: "" };
+        }
+      } catch (e) {
+        out.bible = { text: "", ref: "" };
+      }
     }
 
-    out.bible = finalVerse;
-    mem.last_refs = [...(mem.last_refs || []), finalVerse.ref].slice(-8);
-
-    // Persistimos
+    // Persistimos refs válidas (solo si hay ref)
+    const finalRef = String(out?.bible?.ref || "").trim();
+    if (finalRef) mem.last_refs = [...(mem.last_refs || []), finalRef].slice(-8);
     mem.last_user_text = userTxt;
     mem.last_user_ts = now;
     mem.last_bot = out;
@@ -431,7 +486,7 @@ No incluyas nada fuera del JSON.
     res.json({
       message: "La paz sea contigo. Decime en pocas palabras qué está pasando y vemos un paso simple y concreto.",
       question: "¿Qué te gustaría trabajar primero?",
-      bible: { ref: "Salmos 34:18", text: "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu." }
+      bible: { text: "", ref: "" }
     });
   }
 });
@@ -478,8 +533,3 @@ app.get("/api/heygen/config", (_req, res) => {
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
-
-
-
-
-
