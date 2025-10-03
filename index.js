@@ -15,6 +15,17 @@ const fs = require("fs/promises");
 const pushAdminRouter = require("./routes/push_admin");
 require("dotenv").config();
 
+// --- WebRTC ingest hacia jesus-interactivo ---
+const { RTCPeerConnection, nonstandard: { RTCAudioSource } } = require("wrtc");
+const { spawn } = require("child_process");
+const ffmpegPath = require("ffmpeg-static");
+
+// URL del servidor jesus-interactivo (poner en variables de entorno de Railway)
+const JESUS_URL = process.env.JESUS_URL || ""; // ej: "http://34.xx.xx.xx:8080"
+if (!JESUS_URL) {
+  console.warn("[WARN] Falta JESUS_URL en variables de entorno (Railway)");
+}
+
 const app = express();
 app.use(cors({ origin: true })); // CORS permisivo
 app.use(bodyParser.json());
@@ -24,7 +35,6 @@ app.use((req, res, next) => {
   res.set('Content-Type', 'application/json; charset=utf-8');
   next();
 });
-
 
 // ---------- OpenAI ----------
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -460,15 +470,124 @@ app.get("/api/heygen/config", (_req, res) => {
   res.json({ voiceId, defaultAvatar, avatars, version });
 });
 
+// ---------- WebRTC ingest & viewer proxy (jesus-interactivo) ----------
+
+// Sesiones de ingest (para poder detener)
+const sessions = new Map(); // id -> { pc, source, ff, track }
+
+// Divide un Buffer PCM en frames de 20 ms (48kHz mono 16-bit → 1920 bytes)
+function chunkPCM(buf, chunkBytes = 1920) {
+  const chunks = [];
+  for (let i = 0; i + chunkBytes <= buf.length; i += chunkBytes) {
+    chunks.push(buf.slice(i, i + chunkBytes));
+  }
+  return chunks;
+}
+
+// POST /api/ingest/start  { ttsUrl: "https://..." }
+app.post("/api/ingest/start", async (req, res) => {
+  try {
+    const { ttsUrl } = req.body || {};
+    if (!ttsUrl) return res.status(400).json({ error: "missing_ttsUrl" });
+    if (!JESUS_URL) return res.status(500).json({ error: "missing_JESUS_URL" });
+
+    // 1) Armamos un PeerConnection con pista de audio (sendonly)
+    const pc = new RTCPeerConnection();
+    const source = new RTCAudioSource();
+    const track = source.createTrack();
+    pc.addTrack(track);
+
+    // 2) Señalizamos con jesus-interactivo (/ingest/offer)
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    const r = await fetch(`${JESUS_URL}/ingest/offer`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json; charset=utf-8" },
+      body: JSON.stringify({ sdp: offer.sdp, type: offer.type }),
+    });
+    if (!r.ok) {
+      const detail = await r.text().catch(()=> "");
+      return res.status(r.status).json({ error: "jesus_ingest_failed", detail });
+    }
+    const answer = await r.json();
+    await pc.setRemoteDescription(answer);
+
+    // 3) ffmpeg: decodificar ttsUrl → PCM16 mono 48kHz en tiempo real
+    const ff = spawn(ffmpegPath, [
+      "-re",
+      "-i", ttsUrl,
+      "-f", "s16le", "-acodec", "pcm_s16le",
+      "-ac", "1", "-ar", "48000",
+      "pipe:1",
+    ], { stdio: ["ignore", "pipe", "inherit"] });
+
+    ff.on("error", (e) => console.error("[ffmpeg error]", e));
+    ff.on("close", (code) => console.log("[ffmpeg closed]", code));
+
+    let leftover = Buffer.alloc(0);
+    ff.stdout.on("data", (buf) => {
+      const data = Buffer.concat([leftover, buf]);
+      const CHUNK = 1920; // 20 ms @ 48kHz mono 16-bit
+      const chunks = chunkPCM(data, CHUNK);
+      const used = chunks.length * CHUNK;
+      leftover = data.slice(used);
+
+      for (const c of chunks) {
+        // Formato que espera RTCAudioSource
+        const samples = new Int16Array(c.buffer, c.byteOffset, c.byteLength / 2);
+        source.onData({
+          samples,
+          sampleRate: 48000,
+          bitsPerSample: 16,
+          channelCount: 1,
+          numberOfFrames: 960, // 20 ms a 48kHz
+        });
+      }
+    });
+
+    // Guardamos sesión para poder detenerla
+    const id = Math.random().toString(36).slice(2, 10);
+    sessions.set(id, { pc, source, ff, track });
+    console.log("[ingest started]", id);
+    res.json({ ok: true, id });
+  } catch (e) {
+    console.error("INGEST START ERROR:", e);
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+// POST /api/ingest/stop  { id }
+app.post("/api/ingest/stop", async (req, res) => {
+  const { id } = req.body || {};
+  const s = id ? sessions.get(id) : null;
+  if (!s) return res.json({ ok: true, note: "no_session" });
+  try { s.ff.kill("SIGKILL"); } catch {}
+  try { s.track.stop(); } catch {}
+  try { await s.pc.close(); } catch {}
+  sessions.delete(id);
+  res.json({ ok: true });
+});
+
+// Proxy: el viewer (navegador/Bolt) negocia SDP contra Railway, que reenvía a jesus-interactivo
+// POST /api/viewer/offer  (body: {sdp, type})
+app.post("/api/viewer/offer", async (req, res) => {
+  try {
+    if (!JESUS_URL) return res.status(500).json({ error: "missing_JESUS_URL" });
+    const r = await fetch(`${JESUS_URL}/viewer/offer`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json; charset=utf-8" },
+      body: JSON.stringify(req.body),
+    });
+    const data = await r.json().catch(()=> ({}));
+    if (!r.ok) return res.status(r.status).json({ error: "viewer_proxy_failed", detail: data });
+    res.json(data);
+  } catch (e) {
+    console.error("VIEWER PROXY ERROR:", e);
+    res.status(500).json({ error: String(e) });
+  }
+});
+
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
-
-
-
-
-
-
-
-
-
