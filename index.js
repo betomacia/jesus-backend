@@ -8,7 +8,6 @@
 require("dotenv").config();
 
 const express = require("express");
-const cors = require("cors");
 const bodyParser = require("body-parser");
 const path = require("path");
 const fs = require("fs/promises");
@@ -52,7 +51,30 @@ if (!JESUS_URL) console.warn("[WARN] Falta JESUS_URL");
 if (!VOZ_URL)   console.warn("[WARN] Falta VOZ_URL");
 
 const app = express();
-app.use(cors({ origin: true }));
+
+// --- CORS global y preflight robusto ---
+const ALLOW_ORIGINS = (process.env.CORS_ALLOW_ORIGINS || "*")
+  .split(",")
+  .map(s => s.trim())
+  .filter(Boolean);
+
+app.use((req, res, next) => {
+  const reqOrigin = req.headers.origin;
+  let allow = "*";
+  if (ALLOW_ORIGINS.length && ALLOW_ORIGINS[0] !== "*") {
+    allow = (reqOrigin && ALLOW_ORIGINS.includes(reqOrigin)) ? reqOrigin : "null";
+  }
+  res.setHeader("Access-Control-Allow-Origin", allow);
+  res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  // Si algún día usas cookies: habilitar y NO usar "*" como origen
+  // res.setHeader("Access-Control-Allow-Credentials", "true");
+
+  if (req.method === "OPTIONS") return res.status(204).end();
+  next();
+});
+
 app.use(bodyParser.json());
 
 // Forzar JSON UTF-8 en todas las respuestas
