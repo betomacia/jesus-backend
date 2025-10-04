@@ -21,6 +21,8 @@ const fs = require("fs/promises");
 const OpenAI = require("openai");
 const { spawn } = require("child_process");
 const https = require("https");
+// ⬇️⬇️⬇️ NUEVO: para convertir WebStreams a streams de Node
+const { Readable } = require("node:stream");
 
 // Agent para hablar con JESUS_URL aun con cert autofirmado (solo backend↔backend)
 const INSECURE_AGENT =
@@ -62,8 +64,8 @@ if (!ffmpegPath) ffmpegPath = "ffmpeg"; // fallback
 // URLs de servicios
 const JESUS_URL = (process.env.JESUS_URL || "").trim(); // ej: "https://35.202.38.210:8443"
 const VOZ_URL   = (process.env.VOZ_URL   || "").trim(); // ej: "http://<IP-jesus-voz>:8000"
-if (!JESUS_URL) console.warn("[WARN] Falta JESUS_URL");
-if (!VOZ_URL)   console.warn("[WARN] Falta VOZ_URL");
+if (!JESUS_URL) console.warn("[WARN] Falta JESUS_URL]");
+if (!VOZ_URL)   console.warn("[WARN] Falta VOZ_URL]");
 
 const app = express();
 app.use(cors({ origin: true }));
@@ -459,8 +461,9 @@ app.get("/api/viewer/assets/:file", async (req, res) => {
     res.removeHeader("Content-Type");
     res.setHeader("Content-Type", r.headers.get("content-type") || "application/octet-stream");
     res.setHeader("Cache-Control", "no-store");
-    // Stream directo
-    return r.body.pipe(res);
+    // ⬇️ CONVERSIÓN WebStream -> Node stream (arregla r.body.pipe no definido)
+    const nodeStream = Readable.fromWeb(r.body);
+    return nodeStream.pipe(res);
   } catch (e) {
     res.status(502);
     res.set("Content-Type", "application/json; charset=utf-8");
