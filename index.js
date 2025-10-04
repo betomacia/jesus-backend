@@ -537,17 +537,45 @@ app.post("/api/viewer/offer", async (req, res) => {
       body: JSON.stringify(payload),
     });
 
-    let data = null;
-    try { data = await r.json(); } catch { data = await r.text().catch(()=> ""); }
-
-    if (!r.ok) {
-      console.error("[viewer_proxy_failed]", r.status, data);
-      return res.status(r.status || 500).json({ error: "viewer_proxy_failed", detail: data, jesus_url: JESUS_URL });
+    // Si la VM está en stub (501), devolvemos fallback amable (200)
+    if (r.status === 501) {
+      const idleUrl = `${JESUS_URL}/assets/idle_loop.mp4`;
+      const talkUrl = `${JESUS_URL}/assets/talk.mp4`;
+      return res.json({
+        stub: true,
+        note: "viewer not implemented yet; using fallback video",
+        idleUrl,
+        talkUrl,
+        webrtc: false,
+      });
     }
-    res.json(data);
+
+    // Respuesta normal OK -> reenviar JSON
+    if (r.ok) {
+      const data = await r.json().catch(() => ({}));
+      return res.json(data);
+    }
+
+    // Otros errores del server Python
+    const detail = await r.text().catch(() => "");
+    return res.status(r.status || 502).json({
+      error: "viewer_proxy_failed",
+      status: r.status || 502,
+      jesus_url: JESUS_URL,
+      detail,
+    });
   } catch (e) {
     console.error("VIEWER PROXY ERROR:", e);
-    res.status(500).json({ error: "viewer_proxy_exception", detail: String(e), jesus_url: JESUS_URL });
+    // Fallback por error de red/TLS/DNS
+    const idleUrl = JESUS_URL ? `${JESUS_URL}/assets/idle_loop.mp4` : null;
+    const talkUrl = JESUS_URL ? `${JESUS_URL}/assets/talk.mp4` : null;
+    return res.status(200).json({
+      stub: true,
+      note: "viewer unreachable; using fallback video",
+      idleUrl,
+      talkUrl,
+      webrtc: false,
+    });
   }
 });
 
