@@ -1,9 +1,9 @@
 // index.js — Backend minimal (sin DB) para Jesús Interactivo
-// - OpenAI: /api/welcome y /api/ask (misma lógica)
+// - OpenAI: /api/welcome y /api/ask
 // - Voz (jesus-voz): /api/tts_stream  -> genera audio y lo ingesta a jesus-interactivo
 // - Ingest directo: /api/ingest/start, /api/ingest/stop
-// - Viewer proxy: /api/viewer/offer  (+ proxy de assets /api/viewer/assets/*)
-// - Diag: /api/_diag/viewer_check (health de jesus-interactivo)
+// - Viewer proxy + assets proxy: /api/viewer/offer y /api/viewer/assets/*
+// - Diag: /api/_diag/viewer_check
 // - Health: "/"
 
 require("dotenv").config();
@@ -13,14 +13,13 @@ if (process.env.JESUS_INSECURE_TLS === "1") {
   process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 }
 
-const express   = require("express");
-const cors      = require("cors");
-const bodyParser= require("body-parser");
-const path      = require("path");
-const fs        = require("fs/promises");
-const OpenAI    = require("openai");
+const express = require("express");
+const cors = require("cors");
+const bodyParser = require("body-parser");
+const path = require("path");
+const fs = require("fs/promises");
+const OpenAI = require("openai");
 const { spawn } = require("child_process");
-const { Readable } = require("stream"); // para streamear fetch.body (WHATWG) -> res (Node)
 
 // ---- WebRTC ingest y FFmpeg ----
 let wrtc = null;
@@ -30,7 +29,7 @@ try {
   console.warn("[WARN] wrtc no instalado; /api/ingest/* se desactiva. Instala 'wrtc' si vas a hacer ingest desde este backend.");
 }
 const RTCPeerConnection = wrtc?.RTCPeerConnection;
-const RTCAudioSource    = wrtc?.nonstandard?.RTCAudioSource;
+const RTCAudioSource = wrtc?.nonstandard?.RTCAudioSource;
 
 // FFmpeg: env > ffmpeg-static > binario del sistema
 let ffmpegPath = process.env.FFMPEG_PATH || null;
@@ -63,11 +62,8 @@ const app = express();
 app.use(cors({ origin: true }));
 app.use(bodyParser.json());
 
-// Forzar JSON UTF-8 en todas las respuestas
-app.use((req, res, next) => {
-  res.set("Content-Type", "application/json; charset=utf-8");
-  next();
-});
+// Forzar JSON UTF-8 en todas las respuestas por defecto
+app.use((req, res, next) => { res.set("Content-Type", "application/json; charset=utf-8"); next(); });
 
 // ---------- OpenAI ----------
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -126,17 +122,14 @@ const DAILY_PHRASES = {
     "L’amour que tu donnes te revient.",
   ],
 };
-
 function dayPhrase(lang = "es") {
   const arr = DAILY_PHRASES[lang] || DAILY_PHRASES["es"];
   return arr[Math.floor(Math.random() * arr.length)];
 }
-
 function langLabel(l = "es") {
   const m = { es: "Español", en: "English", pt: "Português", it: "Italiano", de: "Deutsch", ca: "Català", fr: "Français" };
   return m[l] || "Español";
 }
-
 function greetingByHour(lang = "es", hour = null) {
   const h = Number.isInteger(hour) ? hour : new Date().getHours();
   const g = (m, a, n) => (h < 12 ? m : h < 19 ? a : n);
@@ -305,7 +298,7 @@ app.post("/api/ask", async (req, res) => {
     const mem = await readMem(userId);
     const now = Date.now();
 
-    // Duplicados rápidos (mismo texto en <7s)
+    // Duplicados rápidos
     if (userTxt && mem.last_user_text && userTxt === mem.last_user_text && now - mem.last_user_ts < 7000) {
       if (mem.last_bot) return res.json(mem.last_bot);
     }
@@ -327,7 +320,9 @@ app.post("/api/ask", async (req, res) => {
     }
 
     // Alcance
-    if (isOffTopic(userTxt) && !isReligiousException(userTxt)) {
+    const RELIGIOUS_ALLOW = [/\b(iglesia|templo|catedral|parroquia|misa|sacramento|oraci[oó]n|santuario|santo|santos|biblia|evangelio|rosario|confesi[oó]n|eucarist[ií]a|liturgia|vaticano|lourdes|f[aá]tima|peregrinaci[oó]n|camino de santiago)\b/i];
+    const isReligiousException = (s) => RELIGIOUS_ALLOW.some((r) => r.test(NORM(s)));
+    if (OFFTOPIC.some((r) => r.test(NORM(userTxt))) && !isReligiousException(userTxt)) {
       const msg =
         lang === "en" ? "I’m here for your inner life: faith, personal struggles and healing. I don’t give facts or opinions on sports, entertainment, technical, food or general topics." :
         lang === "pt" ? "Estou aqui para a sua vida interior: fé, questões pessoais e cura. Não trato esportes, entretenimento, técnica, gastronomia ou temas gerais." :
@@ -339,7 +334,7 @@ app.post("/api/ask", async (req, res) => {
       const q =
         lang === "en" ? "What would help you most right now—your emotions, a relationship, or your prayer life?" :
         lang === "pt" ? "O que mais ajudaria agora — suas emoções, uma relação, ou a sua vida de oração?" :
-        lang === "it" ? "Cosa ti aiuterebbe ora — le emozioni, una relazione o la tua vida di preghiera?" :
+        lang === "it" ? "Cosa ti aiuterebbe ora — le emozioni, una relazione o la tua vida de preghiera?" :
         lang === "de" ? "Was würde dir jetzt am meisten helfen – deine Gefühle, eine Beziehung oder dein Gebetsleben?" :
         lang === "ca" ? "Què t’ajudaria ara — les teves emocions, una relació o la teva vida de pregària?" :
         lang === "fr" ? "Qu’est-ce qui t’aiderait le plus — tes émotions, une relation ou ta vie de prière ?" :
@@ -350,7 +345,7 @@ app.post("/api/ask", async (req, res) => {
       return res.json(out);
     }
 
-    // -------- OpenAI: Instrucciones mínimas (BIBLIA requerida) --------
+    // -------- OpenAI --------
     const SYS = `
 Eres cercano, claro y compasivo, desde una voz cristiana (católica).
 Alcance: espiritualidad/fe católica, psicología/autoayuda personal, relaciones y emociones. Evita lo demás.
@@ -358,7 +353,7 @@ Varía el lenguaje; no repitas muletillas. No hagas cuestionarios; 1 sola pregun
 Formato (JSON en ${langLabel(lang)}): {"message":"...", "question":"...?", "bible":{"text":"...","ref":"Libro 0:0"}}
 - "message": natural y concreto; si el usuario pide pasos, dáselos con claridad breve.
 - "question": **una** pregunta simple y útil.
-- "bible": **SIEMPRE** incluida; pertinente; no repetir continuamente la misma. Evita Mateo/Matthew 11:28 (todas las variantes).
+- "bible": **SIEMPRE** incluida; pertinente; no repetir continuamente la misma. Evita Mateo/Matthew 11:28.
 No incluyas nada fuera del JSON.
 `.trim();
 
@@ -434,6 +429,85 @@ No incluyas nada fuera del JSON.
     });
   }
 });
+
+// ==================== PROXY DE ASSETS DEL VIEWER ====================
+// Sirve /api/viewer/assets/* reenviando a https://<JESUS_URL>/assets/* (evita el cert self-signed en el browser)
+app.get("/api/viewer/assets/:file", async (req, res) => {
+  try {
+    if (!JESUS_URL) return res.status(500).json({ error: "missing_JESUS_URL" });
+    const target = `${JESUS_URL}/assets/${encodeURIComponent(req.params.file)}`;
+    const r = await fetch(target, { method: "GET" });
+    if (!r.ok) {
+      const body = await r.text().catch(()=> "");
+      return res.status(r.status || 502).send(body || "asset fetch failed");
+    }
+    // Copiamos headers relevantes
+    for (const [k, v] of r.headers) {
+      const kl = String(k).toLowerCase();
+      if (kl === "content-length") continue; // tamaño puede cambiar al bufferizar
+      res.set(k, v);
+    }
+    const buf = Buffer.from(await r.arrayBuffer());
+    res.send(buf);
+  } catch (e) {
+    res.status(502).json({ error: "asset_proxy_exception", detail: String(e) });
+  }
+});
+
+// ==================== VIEWER PROXY ====================
+// POST /api/viewer/offer { sdp, type }
+app.post("/api/viewer/offer", async (req, res) => {
+  try {
+    if (!JESUS_URL) return res.status(500).json({ error: "missing_JESUS_URL" });
+    const payload = { sdp: req.body?.sdp, type: req.body?.type };
+    if (!payload.sdp || !payload.type) return res.status(400).json({ error: "bad_offer_payload" });
+
+    const r = await fetch(`${JESUS_URL}/viewer/offer`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json; charset=utf-8" },
+      body: JSON.stringify(payload),
+    });
+
+    if (r.ok) {
+      const data = await r.json().catch(() => ({}));
+      return res.json(data);
+    }
+
+    // Si el server python está en stub (501) → devolvemos fallback por nuestro propio dominio
+    if (r.status === 501) {
+      return res.json({
+        stub: true,
+        webrtc: false,
+        idleUrl: "/api/viewer/assets/idle_loop.mp4",
+        talkUrl: "/api/viewer/assets/talk.mp4",
+        note: "viewer not implemented yet; using fallback video",
+      });
+    }
+
+    const detail = await r.text().catch(() => "");
+    return res.status(r.status || 502).json({
+      error: "viewer_proxy_failed",
+      status: r.status || 502,
+      detail,
+      jesus_url: JESUS_URL,
+    });
+  } catch (e) {
+    console.error("VIEWER PROXY ERROR:", e);
+    // Fallback final por si hubo excepción de red/DNS/TLS
+    return res.status(200).json({
+      stub: true,
+      webrtc: false,
+      idleUrl: "/api/viewer/assets/idle_loop.mp4",
+      talkUrl: "/api/viewer/assets/talk.mp4",
+      note: "viewer unreachable; using fallback video",
+    });
+  }
+});
+
+// GET informativo (evita "Cannot GET /api/viewer/offer" al abrir en el browser)
+app.get("/api/viewer/offer", (_req, res) =>
+  res.status(405).json({ ok: false, error: "use_POST_here" })
+);
 
 // ---------- WebRTC ingest (audio → jesus-interactivo) ----------
 const sessions = new Map(); // id -> { pc, source, ff, track }
@@ -525,144 +599,6 @@ app.post("/api/ingest/stop", async (req, res) => {
   try { await s.pc.close(); } catch {}
   sessions.delete(id);
   res.json({ ok: true });
-});
-
-// ---------- Viewer proxy (browser ↔ jesus-interactivo) ----------
-// POST /api/viewer/offer { sdp, type }
-app.post("/api/viewer/offer", async (req, res) => {
-  try {
-    if (!JESUS_URL) return res.status(500).json({ error: "missing_JESUS_URL" });
-    const payload = { sdp: req.body?.sdp, type: req.body?.type };
-    if (!payload.sdp || !payload.type) return res.status(400).json({ error: "bad_offer_payload" });
-
-    const r = await fetch(`${JESUS_URL}/viewer/offer`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json; charset=utf-8" },
-      body: JSON.stringify(payload),
-    });
-
-    // Caso normal: backend Jesús ya implementado
-    if (r.ok) {
-      const data = await r.json().catch(() => ({}));
-      return res.json(data);
-    }
-
-    // Stub (501) -> devolvemos fallback y rutas proxys locales
-    if (r.status === 501) {
-      return res.json({
-        stub: true,
-        webrtc: false,
-        note: "viewer not implemented; using fallback video",
-        idleUrl: "/api/viewer/assets/idle_loop.mp4",
-        talkUrl: "/api/viewer/assets/talk.mp4",
-      });
-    }
-
-    // Otros errores
-    const detail = await r.text().catch(() => "");
-    console.error("[viewer_proxy_failed]", r.status, detail);
-    return res.status(r.status || 502).json({
-      error: "viewer_proxy_failed",
-      status: r.status || 502,
-      detail,
-      jesus_url: JESUS_URL,
-    });
-  } catch (e) {
-    console.error("VIEWER PROXY ERROR:", e);
-    // Fallback final (por si hay error de red/TLS)
-    return res.status(200).json({
-      stub: true,
-      webrtc: false,
-      note: "viewer unreachable; using fallback video",
-      idleUrl: "/api/viewer/assets/idle_loop.mp4",
-      talkUrl: "/api/viewer/assets/talk.mp4",
-    });
-  }
-});
-
-// Proxy de assets para que el navegador no tenga que ir al 8443 self-signed
-app.get("/api/viewer/assets/:file", async (req, res) => {
-  try {
-    if (!JESUS_URL) return res.status(500).send("missing_JESUS_URL");
-    const f = String(req.params.file || "");
-    if (!/^(idle_loop|talk)\.mp4$/.test(f)) return res.status(404).end();
-
-    const r = await fetch(`${JESUS_URL}/assets/${f}`);
-    if (!r.ok || !r.body) {
-      const t = await r.text().catch(() => "");
-      return res.status(r.status || 502).send(t || "asset_fetch_failed");
-    }
-
-    res.setHeader("Content-Type", "video/mp4");
-    res.setHeader("Cache-Control", "public, max-age=60");
-    // r.body es WHATWG ReadableStream → convertir a Node stream:
-    Readable.fromWeb(r.body).pipe(res);
-  } catch (e) {
-    console.error("ASSET PROXY ERROR:", e);
-    res.status(500).send("asset_proxy_error");
-  }
-});
-
-// ---------- Orquestación: texto -> jesus-voz -> ingest ----------
-// POST /api/tts_stream  { text, lang?, voice?, rate?, temp?, width_ms?, pitch_st?, gain_db? }
-app.post("/api/tts_stream", async (req, res) => {
-  try {
-    if (!VOZ_URL) return res.status(500).json({ error: "missing_VOZ_URL" });
-    if (!JESUS_URL) return res.status(500).json({ error: "missing_JESUS_URL" });
-
-    const {
-      text = "",
-      lang = process.env.VOZ_DEFAULT_LANG || "es",
-      voice,
-      rate  = process.env.VOZ_DEFAULT_RATE || "0.95",
-      temp  = process.env.VOZ_DEFAULT_TEMP || "0.6",
-      width_ms = process.env.VOZ_DEFAULT_WIDTH_MS || "",
-      pitch_st = process.env.VOZ_DEFAULT_PITCH_ST || "",
-      gain_db  = process.env.VOZ_DEFAULT_GAIN_DB  || "",
-    } = req.body || {};
-
-    const t = String(text || "").trim();
-    if (!t) return res.status(400).json({ error: "missing_text" });
-
-    const url = new URL("/tts_save", VOZ_URL);
-    url.searchParams.set("text", t);
-    if (lang) url.searchParams.set("lang", String(lang));
-    if (voice) url.searchParams.set("voice", String(voice));
-    if (rate) url.searchParams.set("rate", String(rate));
-    if (temp) url.searchParams.set("temp", String(temp));
-    if (width_ms) url.searchParams.set("width_ms", String(width_ms));
-    if (pitch_st) url.searchParams.set("pitch_st", String(pitch_st));
-    if (gain_db)  url.searchParams.set("gain_db", String(gain_db));
-
-    const r1 = await fetch(url.toString(), { method: "GET" });
-    if (!r1.ok) {
-      const detail = await r1.text().catch(()=> "");
-      return res.status(r1.status || 500).json({ error: "voz_tts_failed", detail });
-    }
-    const j1 = await r1.json().catch(()=> ({}));
-    const ttsUrl = j1?.url || j1?.file || j1?.audio || j1?.path || "";
-    if (!ttsUrl) return res.status(500).json({ error: "voz_no_url", detail: j1 });
-
-    // Inicia ingest (si wrtc disponible)
-    if (!RTCPeerConnection || !RTCAudioSource) {
-      return res.json({ ok: true, note: "wrtc_not_available_here", ttsUrl });
-    }
-
-    const r2 = await fetch(`${req.protocol}://${req.get("host")}/api/ingest/start`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json; charset=utf-8" },
-      body: JSON.stringify({ ttsUrl }),
-    });
-    const j2 = await r2.json().catch(()=> ({}));
-    if (!r2.ok || !j2?.ok) {
-      return res.status(r2.status || 500).json({ error: "ingest_start_failed", detail: j2 });
-    }
-
-    res.json({ ok: true, id: j2.id, ttsUrl });
-  } catch (e) {
-    console.error("TTS_STREAM ERROR:", e);
-    res.status(500).json({ error: "tts_stream_exception", detail: String(e) });
-  }
 });
 
 // ---------- Arranque ----------
