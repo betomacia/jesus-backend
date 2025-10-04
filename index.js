@@ -1,37 +1,40 @@
 // index.js — Backend minimal (sin DB) para Jesús Interactivo
-// - OpenAI: /api/welcome y /api/ask
-// - Viewer proxy: /api/viewer/offer  (mejor diagnóstico)
-// - Diagnóstico: /api/viewer/check
-// - Voz (jesus-voz)->Ingest (opcionales): /api/tts_stream, /api/ingest/*
+// - OpenAI: /api/welcome y /api/ask (misma lógica)
+// - Voz (jesus-voz): /api/tts_stream  -> genera audio y lo ingesta a jesus-interactivo
+// - Ingest directo: /api/ingest/start, /api/ingest/stop
+// - Viewer proxy: /api/viewer/offer
+// - Diag: /api/_diag/viewer_check (health de jesus-interactivo)
 // - Health: "/"
 
 require("dotenv").config();
 
+// ===== TLS: permitir self-signed si JESUS_INSECURE_TLS=1 (clave para Railway → 8443) =====
+if (process.env.JESUS_INSECURE_TLS === "1") {
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+}
+
 const express = require("express");
+const cors = require("cors");
 const bodyParser = require("body-parser");
 const path = require("path");
 const fs = require("fs/promises");
 const OpenAI = require("openai");
-const https = require("https");
 const { spawn } = require("child_process");
 
-// ====== Carga OPCIONAL de `wrtc` (si no está, solo se desactiva ingest) ======
-let HAVE_WRTC = true;
-let RTCPeerConnection = null;
-let RTCAudioSource = null;
+// ---- WebRTC ingest y FFmpeg ----
+let wrtc = null;
 try {
-  const wrtc = require("wrtc");
-  RTCPeerConnection = wrtc.RTCPeerConnection;
-  RTCAudioSource = wrtc.nonstandard.RTCAudioSource;
+  wrtc = require("wrtc");
 } catch (e) {
-  HAVE_WRTC = false;
-  console.warn("[WARN] 'wrtc' no está instalado. Endpoints de ingest deshabilitados. (npm i wrtc)");
+  console.warn("[WARN] wrtc no instalado; /api/ingest/* se desactiva. Instala 'wrtc' si vas a hacer ingest desde este backend.");
 }
+const RTCPeerConnection = wrtc?.RTCPeerConnection;
+const RTCAudioSource = wrtc?.nonstandard?.RTCAudioSource;
 
-// ====== FFmpeg: env > ffmpeg-static > binario del sistema ======
+// FFmpeg: env > ffmpeg-static > binario del sistema
 let ffmpegPath = process.env.FFMPEG_PATH || null;
 try { if (!ffmpegPath) ffmpegPath = require("ffmpeg-static"); } catch (_) {}
-if (!ffmpegPath) ffmpegPath = "ffmpeg";
+if (!ffmpegPath) ffmpegPath = "ffmpeg"; // fallback
 
 // Log rápido de ffmpeg en runtime
 (function checkFfmpeg() {
@@ -49,114 +52,170 @@ if (!ffmpegPath) ffmpegPath = "ffmpeg";
   }
 })();
 
-// ====== TLS auto-firmado opcional para jesus-interactivo ======
-const INSECURE_AGENT = (process.env.JESUS_INSECURE_TLS === "1")
-  ? new https.Agent({ rejectUnauthorized: false })
-  : undefined;
-
-// ====== URLs de servicios ======
+// URLs de servicios
 const JESUS_URL = (process.env.JESUS_URL || "").trim(); // ej: "https://35.202.38.210:8443"
 const VOZ_URL   = (process.env.VOZ_URL   || "").trim(); // ej: "http://<IP-jesus-voz>:8000"
 if (!JESUS_URL) console.warn("[WARN] Falta JESUS_URL");
 if (!VOZ_URL)   console.warn("[WARN] Falta VOZ_URL");
 
 const app = express();
-
-/* ======================= CORS global + preflight ======================= */
-const ALLOW_ORIGINS = (process.env.CORS_ALLOW_ORIGINS || "*")
-  .split(",")
-  .map(s => s.trim())
-  .filter(Boolean);
-
-app.use((req, res, next) => {
-  const reqOrigin = req.headers.origin;
-  let allow = "*";
-  if (ALLOW_ORIGINS.length && ALLOW_ORIGINS[0] !== "*") {
-    allow = (reqOrigin && ALLOW_ORIGINS.includes(reqOrigin)) ? reqOrigin : "null";
-  }
-  res.setHeader("Access-Control-Allow-Origin", allow);
-  res.setHeader("Vary", "Origin");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  if (req.method === "OPTIONS") return res.status(204).end();
-  next();
-});
-
+app.use(cors({ origin: true }));
 app.use(bodyParser.json());
 
 // Forzar JSON UTF-8 en todas las respuestas
 app.use((req, res, next) => { res.set("Content-Type", "application/json; charset=utf-8"); next(); });
 
-/* ======================= OpenAI ======================= */
+// ---------- OpenAI ----------
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
+// ---------- Utils ----------
 const NORM = (s = "") => String(s).toLowerCase().replace(/\s+/g, " ").trim();
 
 const DAILY_PHRASES = {
-  es: ["Un gesto de bondad puede cambiar tu día.","La fe hace posible lo que parece imposible.","Hoy es buen día para empezar de nuevo.","La paz se cultiva con pasos pequeños.","El amor que das, vuelve a ti."],
-  en: ["A small kindness can change your day.","Faith makes the impossible possible.","Today is a good day to begin again.","Peace grows from small steps.","The love you give returns to you."],
-  pt: ["Um gesto de bondade pode mudar o seu dia.","A fé torna possível o impossível.","Hoje é um bom dia para recomeçar.","A paz cresce com pequenos passos.","O amor que você dá volta para você."],
-  it: ["Un gesto di gentilezza può cambiare la tua giornata.","La fede rende possibile l’impossibile.","Oggi è un buon giorno per ricominciare.","La pace cresce a piccoli passi.","L’amore che doni ritorna a te."],
-  de: ["Eine kleine Freundlichkeit kann deinen Tag verändern.","Glaube macht das Unmögliche möglich.","Heute ist ein guter Tag für einen Neuanfang.","Frieden wächst aus kleinen Schritten.","Die Liebe, die du gibst, kehrt zu dir zurück."],
-  ca: ["Un gest d’amabilitat pot canviar el teu dia.","La fe fa possible l’impossible.","Avui és un bon dia per començar de nou.","La pau creix amb petits passos.","L’amor que dones torna a tu."],
-  fr: ["Un geste de bonté peut changer ta journée.","La foi rend possible l’impossible.","Aujourd’hui est un bon jour pour recommencer.","La paix grandit à petits pas.","L’amour que tu donnes te revient."],
+  es: [
+    "Un gesto de bondad puede cambiar tu día.",
+    "La fe hace posible lo que parece imposible.",
+    "Hoy es buen día para empezar de nuevo.",
+    "La paz se cultiva con pasos pequeños.",
+    "El amor que das, vuelve a ti.",
+  ],
+  en: [
+    "A small kindness can change your day.",
+    "Faith makes the impossible possible.",
+    "Today is a good day to begin again.",
+    "Peace grows from small steps.",
+    "The love you give returns to you.",
+  ],
+  pt: [
+    "Um gesto de bondade pode mudar o seu dia.",
+    "A fé torna possível o impossível.",
+    "Hoje é um bom dia para recomeçar.",
+    "A paz cresce com pequenos passos.",
+    "O amor que você dá volta para você.",
+  ],
+  it: [
+    "Un gesto di gentilezza può cambiare la tua giornata.",
+    "La fede rende possibile l’impossibile.",
+    "Oggi è un buon giorno per ricominciare.",
+    "La pace cresce a piccoli passi.",
+    "L’amore che doni ritorna a te.",
+  ],
+  de: [
+    "Eine kleine Freundlichkeit kann deinen Tag verändern.",
+    "Glaube macht das Unmögliche möglich.",
+    "Heute ist ein guter Tag für einen Neuanfang.",
+    "Frieden wächst aus kleinen Schritten.",
+    "Die Liebe, die du gibst, kehrt zu dir zurück.",
+  ],
+  ca: [
+    "Un gest d’amabilitat pot canviar el teu dia.",
+    "La fe fa possible l’impossible.",
+    "Avui és un bon dia per començar de nou.",
+    "La pau creix amb petits passos.",
+    "L’amor que dones torna a tu.",
+  ],
+  fr: [
+    "Un geste de bonté peut changer ta journée.",
+    "La foi rend possible l’impossible.",
+    "Aujourd’hui est un bon jour pour recommencer.",
+    "La paix grandit à petits pas.",
+    "L’amour que tu donnes te revient.",
+  ],
 };
-const dayPhrase = (lang="es") => (DAILY_PHRASES[lang] || DAILY_PHRASES.es)[Math.floor(Math.random()* (DAILY_PHRASES[lang] || DAILY_PHRASES.es).length)];
-const langLabel = (l="es") => ({ es:"Español", en:"English", pt:"Português", it:"Italiano", de:"Deutsch", ca:"Català", fr:"Français" }[l] || "Español");
-function greetingByHour(lang="es", hour=null){
-  const h = Number.isInteger(hour) ? hour : new Date().getHours();
-  const g = (m,a,n)=> (h<12?m:h<19?a:n);
-  switch(lang){case"en":return g("Good morning","Good afternoon","Good evening");
-    case"pt":return g("Bom dia","Boa tarde","Boa noite");
-    case"it":return g("Buongiorno","Buon pomeriggio","Buonasera");
-    case"de":return g("Guten Morgen","Guten Tag","Guten Abend");
-    case"ca":return g("Bon dia","Bona tarda","Bona nit");
-    case"fr":return g("Bonjour","Bon après-midi","Bonsoir");
-    default:return g("Buenos días","Buenas tardes","Buenas noches");}
+
+function dayPhrase(lang = "es") {
+  const arr = DAILY_PHRASES[lang] || DAILY_PHRASES["es"];
+  return arr[Math.floor(Math.random() * arr.length)];
 }
 
-// Versículos fallback
+function langLabel(l = "es") {
+  const m = { es: "Español", en: "English", pt: "Português", it: "Italiano", de: "Deutsch", ca: "Català", fr: "Français" };
+  return m[l] || "Español";
+}
+
+function greetingByHour(lang = "es", hour = null) {
+  const h = Number.isInteger(hour) ? hour : new Date().getHours();
+  const g = (m, a, n) => (h < 12 ? m : h < 19 ? a : n);
+  switch (lang) {
+    case "en": return g("Good morning", "Good afternoon", "Good evening");
+    case "pt": return g("Bom dia", "Boa tarde", "Boa noite");
+    case "it": return g("Buongiorno", "Buon pomeriggio", "Buonasera");
+    case "de": return g("Guten Morgen", "Guten Tag", "Guten Abend");
+    case "ca": return g("Bon dia", "Bona tarda", "Bona nit");
+    case "fr": return g("Bonjour", "Bon après-midi", "Bonsoir");
+    default:   return g("Buenos días", "Buenas tardes", "Buenas noches");
+  }
+}
+
+// ---------- Fallback de versículos ----------
 const FALLBACK_VERSES = {
-  es:[{ref:"Salmos 34:18",text:"Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu."},
-      {ref:"Isaías 41:10",text:"No temas, porque yo estoy contigo; no desmayes, porque yo soy tu Dios que te esfuerzo; siempre te ayudaré."},
-      {ref:"Salmo 23:1",text:"El Señor es mi pastor; nada me faltará."},
-      {ref:"Romanos 12:12",text:"Gozosos en la esperanza; sufridos en la tribulación; constantes en la oración."}],
-  en:[{ref:"Psalm 34:18",text:"The Lord is close to the brokenhearted and saves those who are crushed in spirit."},
-      {ref:"Isaiah 41:10",text:"Do not fear, for I am with you; do not be dismayed, for I am your God."},
-      {ref:"Psalm 23:1",text:"The Lord is my shepherd; I shall not want."},
-      {ref:"Romans 12:12",text:"Be joyful in hope, patient in affliction, faithful in prayer."}],
-  pt:[{ref:"Salmos 34:18",text:"Perto está o Senhor dos que têm o coração quebrantado; e salva os contritos de espírito."},
-      {ref:"Isaías 41:10",text:"Não temas, porque eu sou contigo; não te assombres, porque eu sou teu Deus."}],
-  it:[{ref:"Salmo 34:18",text:"Il Signore è vicino a chi ha il cuore spezzato; egli salva gli spiriti affranti."},
-      {ref:"Isaia 41:10",text:"Non temere, perché io sono con te; non smarrirti, perché io sono il tuo Dio."}],
-  de:[{ref:"Psalm 34:18",text:"Der HERR ist nahe denen, die zerbrochenen Herzens sind."},
-      {ref:"Jesaja 41:10",text:"Fürchte dich nicht, denn ich bin mit dir."}],
-  ca:[{ref:"Salm 34:19 (cat)",text:"El Senyor és a prop dels cors trencats, salva els que tenen l’esperit abatut."},
-      {ref:"Isaïes 41:10",text:"No tinguis por, que jo sóc amb tu; no t’esglaiïs, que jo sóc el teu Déu."}],
-  fr:[{ref:"Psaume 34:19",text:"L’Éternel est près de ceux qui ont le cœur brisé; il sauve ceux qui ont l’esprit dans l’abattement."},
-      {ref:"Ésaïe 41:10",text:"Ne crains rien, car je suis avec toi."}],
+  es: [
+    { ref: "Salmos 34:18", text: "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu." },
+    { ref: "Isaías 41:10", text: "No temas, porque yo estoy contigo; no desmayes, porque yo soy tu Dios que te esfuerzo; siempre te ayudaré." },
+    { ref: "Salmo 23:1",  text: "El Señor es mi pastor; nada me faltará." },
+    { ref: "Romanos 12:12", text: "Gozosos en la esperanza; sufridos en la tribulación; constantes en la oración." },
+  ],
+  en: [
+    { ref: "Psalm 34:18", text: "The Lord is close to the brokenhearted and saves those who are crushed in spirit." },
+    { ref: "Isaiah 41:10", text: "Do not fear, for I am with you; do not be dismayed, for I am your God." },
+    { ref: "Psalm 23:1", text: "The Lord is my shepherd; I shall not want." },
+    { ref: "Romans 12:12", text: "Be joyful in hope, patient in affliction, faithful in prayer." },
+  ],
+  pt: [
+    { ref: "Salmos 34:18", text: "Perto está o Senhor dos que têm o coração quebrantado; e salva os contritos de espírito." },
+    { ref: "Isaías 41:10", text: "Não temas, porque eu sou contigo; não te assombres, porque eu sou teu Deus." },
+  ],
+  it: [
+    { ref: "Salmo 34:18", text: "Il Signore è vicino a chi ha il cuore spezzato; egli salva gli spiriti affranti." },
+    { ref: "Isaia 41:10", text: "Non temere, perché io sono con te; non smarrirti, perché io sono il tuo Dio." },
+  ],
+  de: [
+    { ref: "Psalm 34:18", text: "Der HERR ist nahe denen, die zerbrochenen Herzens sind." },
+    { ref: "Jesaja 41:10", text: "Fürchte dich nicht, denn ich bin mit dir." },
+  ],
+  ca: [
+    { ref: "Salm 34:19 (cat)", text: "El Senyor és a prop dels cors trencats, salva els que tenen l’esperit abatut." },
+    { ref: "Isaïes 41:10", text: "No tinguis por, que jo sóc amb tu; no t’esglaiïs, que jo sóc el teu Déu." },
+  ],
+  fr: [
+    { ref: "Psaume 34:19", text: "L’Éternel est près de ceux qui ont le cœur brisé; il sauve ceux qui ont l’esprit dans l’abattement." },
+    { ref: "Ésaïe 41:10", text: "Ne crains rien, car je suis avec toi." },
+  ],
 };
-function pickFallbackVerse(lang="es", avoidSet=new Set()){
-  const list = FALLBACK_VERSES[lang] || FALLBACK_VERSES.es;
+function pickFallbackVerse(lang = "es", avoidSet = new Set()) {
+  const list = FALLBACK_VERSES[lang] || FALLBACK_VERSES["es"];
   for (const v of list) if (!avoidSet.has(NORM(v.ref))) return v;
   return list[0];
 }
 
-// Memoria simple en FS
+// ---------- Memoria simple en FS ----------
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
-async function ensureDataDir(){ try{ await fs.mkdir(DATA_DIR,{recursive:true}); }catch{} }
-function memPath(uid){ const safe = String(uid||"anon").replace(/[^a-z0-9_-]/gi,"_"); return path.join(DATA_DIR,`mem_${safe}.json`); }
-async function readMem(userId){
-  await ensureDataDir();
-  try{
-    const raw = await fs.readFile(memPath(userId),"utf8");
-    const m = JSON.parse(raw);
-    return { last_user_text:m.last_user_text||"", last_user_ts:m.last_user_ts||0, last_bot:m.last_bot||null, last_refs:Array.isArray(m.last_refs)?m.last_refs:[] };
-  }catch{ return { last_user_text:"", last_user_ts:0, last_bot:null, last_refs:[] }; }
+async function ensureDataDir() { try { await fs.mkdir(DATA_DIR, { recursive: true }); } catch {} }
+function memPath(uid) {
+  const safe = String(uid || "anon").replace(/[^a-z0-9_-]/gi, "_");
+  return path.join(DATA_DIR, `mem_${safe}.json`);
 }
-async function writeMem(userId,mem){ await ensureDataDir(); await fs.writeFile(memPath(userId), JSON.stringify(mem,null,2),"utf8"); }
+async function readMem(userId) {
+  await ensureDataDir();
+  try {
+    const raw = await fs.readFile(memPath(userId), "utf8");
+    const m = JSON.parse(raw);
+    return {
+      last_user_text: m.last_user_text || "",
+      last_user_ts: m.last_user_ts || 0,
+      last_bot: m.last_bot || null,
+      last_refs: Array.isArray(m.last_refs) ? m.last_refs : [],
+    };
+  } catch {
+    return { last_user_text: "", last_user_ts: 0, last_bot: null, last_refs: [] };
+  }
+}
+async function writeMem(userId, mem) {
+  await ensureDataDir();
+  await fs.writeFile(memPath(userId), JSON.stringify(mem, null, 2), "utf8");
+}
 
-// Filtros de alcance
+// ---------- Filtros de alcance ----------
 const OFFTOPIC = [
   /\b(f[úu]tbol|futbol|deporte|champions|nba|tenis|selecci[oó]n|mundial|goles?)\b/i,
   /\b(pel[ií]cula|serie|netflix|hbo|max|disney|spotify|cantante|concierto|celebridad|famos[oa]s?)\b/i,
@@ -167,109 +226,127 @@ const OFFTOPIC = [
   /\b(videojuego|fortnite|minecraft|playstation|xbox|nintendo|steam)\b/i,
   /\b(pa[ií]s|capital|mapa|d[oó]nde queda|ubicaci[oó]n|distancia|kil[oó]metros|frontera|r[íi]o|monta[ñn]a|cordillera)\b/i,
   /\b(viaje|hotel|playa|turismo|destino|vuelo|itinerario|tour|gu[ií]a tur[ií]stica)\b/i,
-  /\b(gastronom[ií]a|cocina|recet(a|ario)s?|platos?|ingredientes?|men[uú]|postres?|dulces?|salado?s?)\b/i,
-  /\b(comida|almuerzo|cena|desayuno|merienda|vianda|nutrici[oó]n|dieta)\b/i,
-  /\b(bebidas?|vino|cerveza|licor|coctel|c[oó]ctel|trago|fermentado|maridaje|bar|caf[eé]|cafeter[ií]a|restaurante)\b/i,
+  /\b(gastronom[ií]a|gastronomia|cocina|recet(a|ario)s?|platos?|ingredientes?|men[uú]|men[uú]s|postres?|dulces?|salado?s?)\b/i,
+  /\b(comida|comidas|almuerzo|cena|desayuno|merienda|vianda|raci[oó]n|calor[ií]as|nutrici[oó]n|dieta)\b/i,
+  /\b(bebidas?|vino|cerveza|licor|coctel|c[oó]ctel|trago|fermentado|maridaje|bar|caf[eé]|cafeter[ií]a|restaurante|restaurantes?)\b/i,
   /\b(pol[ií]tica|elecci[oó]n|partido|diputado|senador|presidente|gobierno)\b/i,
   /\b(criptomonedas?|bitcoin|acciones|bolsa|nasdaq|d[oó]lar|euro)\b/i,
 ];
 const RELIGIOUS_ALLOW = [/\b(iglesia|templo|catedral|parroquia|misa|sacramento|oraci[oó]n|santuario|santo|santos|biblia|evangelio|rosario|confesi[oó]n|eucarist[ií]a|liturgia|vaticano|lourdes|f[aá]tima|peregrinaci[oó]n|camino de santiago)\b/i];
-const isReligiousException = (s)=> RELIGIOUS_ALLOW.some((r)=> r.test(NORM(s)));
-const isOffTopic = (s)=> OFFTOPIC.some((r)=> r.test(NORM(s)));
-const isGibberish = (s)=>{
-  const x=(s||"").trim();
-  if(!x||x.length<2) return true;
-  const letters=(x.match(/[a-záéíóúüñàèìòùçâêîôûäëïöüß]/gi)||[]).length;
-  return letters < Math.ceil(x.length*0.25);
+const isReligiousException = (s) => RELIGIOUS_ALLOW.some((r) => r.test(NORM(s)));
+const isOffTopic = (s) => OFFTOPIC.some((r) => r.test(NORM(s)));
+const isGibberish = (s) => {
+  const x = (s || "").trim();
+  if (!x) return true;
+  if (x.length < 2) return true;
+  const letters = (x.match(/[a-záéíóúüñàèìòùçâêîôûäëïöüß]/gi) || []).length;
+  return letters < Math.ceil(x.length * 0.25);
 };
 
-/* ======================= Health ======================= */
+// ---------- Health ----------
 app.get("/", (_req, res) => res.json({ ok: true, service: "backend", ts: Date.now() }));
 
-/* ======================= /api/welcome ======================= */
-app.post("/api/welcome", async (req, res) => {
+// ---------- /api/_diag/viewer_check ----------
+app.get("/api/_diag/viewer_check", async (_req, res) => {
   try {
-    const { lang="es", name="", hour=null } = req.body || {};
-    const hi = greetingByHour(lang, hour);
-    const phrase = dayPhrase(lang);
-    const nm = String(name||"").trim();
-    const sal = nm ? `${hi}, ${nm}.` : `${hi}.`;
-
-    const message =
-      lang==="en"?`${sal} ${phrase} I'm here for you.`:
-      lang==="pt"?`${sal} ${phrase} Estou aqui para você.`:
-      lang==="it"?`${sal} ${phrase} Sono qui per te.`:
-      lang==="de"?`${sal} ${phrase} Ich bin für dich da.`:
-      lang==="ca"?`${sal} ${phrase} Sóc aquí per ajudar-te.`:
-      lang==="fr"?`${sal} ${phrase} Je suis là pour toi.`:
-                   `${sal} ${phrase} Estoy aquí para lo que necesites.`;
-
-    const question =
-      lang==="en"?"What would you like to share today?":
-      lang==="pt"?"O que você gostaria de compartilhar hoje?":
-      lang==="it"?"Di cosa ti piacerebbe parlare oggi?":
-      lang==="de"?"Worüber möchtest du heute sprechen?":
-      lang==="ca"?"De què t’agradaria parlar avui?":
-      lang==="fr"?"De quoi aimerais-tu parler aujourd’hui ?":
-                  "¿Qué te gustaría compartir hoy?";
-
-    res.json({ message, question });
-  } catch {
-    res.json({ message:"La paz sea contigo. ¿De qué te gustaría hablar hoy?", question:"¿Qué te gustaría compartir hoy?" });
+    if (!JESUS_URL) return res.status(500).json({ ok: false, error: "missing_JESUS_URL" });
+    const r = await fetch(`${JESUS_URL}/health`, { method: "GET" });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) return res.status(r.status).json({ ok: false, error: "health_non_200", detail: j, jesus_url: JESUS_URL });
+    res.json({ ok: true, jesus_url: JESUS_URL, health: j });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: "viewer_check_failed", detail: String(e), jesus_url: JESUS_URL });
   }
 });
 
-/* ======================= /api/ask (OpenAI) ======================= */
+// ---------- /api/welcome ----------
+app.post("/api/welcome", async (req, res) => {
+  try {
+    const { lang = "es", name = "", hour = null } = req.body || {};
+    const hi = greetingByHour(lang, hour);
+    const phrase = dayPhrase(lang);
+    const nm = String(name || "").trim();
+    const sal = nm ? `${hi}, ${nm}.` : `${hi}.`;
+
+    const message =
+      lang === "en" ? `${sal} ${phrase} I'm here for you.` :
+      lang === "pt" ? `${sal} ${phrase} Estou aqui para você.` :
+      lang === "it" ? `${sal} ${phrase} Sono qui per te.` :
+      lang === "de" ? `${sal} ${phrase} Ich bin für dich da.` :
+      lang === "ca" ? `${sal} ${phrase} Sóc aquí per ajudar-te.` :
+      lang === "fr" ? `${sal} ${phrase} Je suis là pour toi.` :
+                      `${sal} ${phrase} Estoy aquí para lo que necesites.`;
+
+    const question =
+      lang === "en" ? "What would you like to share today?" :
+      lang === "pt" ? "O que você gostaria de compartilhar hoje?" :
+      lang === "it" ? "Di cosa ti piacerebbe parlare oggi?" :
+      lang === "de" ? "Worüber möchtest du heute sprechen?" :
+      lang === "ca" ? "De què t’agradaria parlar avui?" :
+      lang === "fr" ? "De quoi aimerais-tu parler aujourd’hui ?" :
+                      "¿Qué te gustaría compartir hoy?";
+
+    res.json({ message, question });
+  } catch {
+    res.json({ message: "La paz sea contigo. ¿De qué te gustaría hablar hoy?", question: "¿Qué te gustaría compartir hoy?" });
+  }
+});
+
+// ---------- /api/ask (OpenAI) ----------
 app.post("/api/ask", async (req, res) => {
   try {
-    const { message="", history=[], userId="anon", lang="es" } = req.body || {};
-    const userTxt = String(message||"").trim();
+    const { message = "", history = [], userId = "anon", lang = "es" } = req.body || {};
+    const userTxt = String(message || "").trim();
 
     const mem = await readMem(userId);
     const now = Date.now();
 
-    if (userTxt && mem.last_user_text && userTxt===mem.last_user_text && now-mem.last_user_ts<7000) {
+    // Duplicados rápidos (mismo texto en <7s)
+    if (userTxt && mem.last_user_text && userTxt === mem.last_user_text && now - mem.last_user_ts < 7000) {
       if (mem.last_bot) return res.json(mem.last_bot);
     }
 
+    // Ruido
     if (isGibberish(userTxt)) {
       const msg =
-        lang==="en"?"I didn’t quite get that. Could you say it again in a few words?":
-        lang==="pt"?"Não entendi bem. Pode repetir em poucas palavras?":
-        lang==="it"?"Non ho capito bene. Puoi ripetere in poche parole?":
-        lang==="de"?"Ich habe es nicht ganz verstanden. Kannst du es in wenigen Worten wiederholen?":
-        lang==="ca"?"No ho he entès del tot. Ho pots repetir en poques paraules?":
-        lang==="fr"?"Je n’ai pas bien compris. Peux-tu répéter en quelques mots ?":
-                     "No te entendí bien. ¿Podés repetirlo en pocas palabras?";
+        lang === "en" ? "I didn’t quite get that. Could you say it again in a few words?" :
+        lang === "pt" ? "Não entendi bem. Pode repetir em poucas palavras?" :
+        lang === "it" ? "Non ho capito bene. Puoi ripetere in poche parole?" :
+        lang === "de" ? "Ich habe es nicht ganz verstanden. Kannst du es in wenigen Worten wiederholen?" :
+        lang === "ca" ? "No ho he entès del tot. Ho pots repetir en poques paraules?" :
+        lang === "fr" ? "Je n’ai pas bien compris. Peux-tu répéter en quelques mots ?" :
+                        "No te entendí bien. ¿Podés repetirlo en pocas palabras?";
       const out = { message: msg, question: "" };
       mem.last_user_text = userTxt; mem.last_user_ts = now; mem.last_bot = out;
       await writeMem(userId, mem);
       return res.json(out);
     }
 
+    // Alcance
     if (isOffTopic(userTxt) && !isReligiousException(userTxt)) {
       const msg =
-        lang==="en"?"I’m here for your inner life: faith, personal struggles and healing. I don’t give facts or opinions on sports, entertainment, technical, food or general topics.":
-        lang==="pt"?"Estou aqui para a sua vida interior: fé, questões pessoais e cura. Não trato esportes, entretenimento, técnica, gastronomia ou temas gerais.":
-        lang==="it"?"Sono qui per la tua vida interiore: fede, difficoltà personali e guarigione. Non tratto sport, spettacolo, tecnica, gastronomia o temi generali.":
-        lang==="de"?"Ich bin für dein inneres Leben da: Glaube, persönliche Themen und Heilung. Keine Fakten/Meinungen zu Sport, Unterhaltung, Technik, Gastronomie oder Allgemeinwissen.":
-        lang==="ca"?"Sóc aquí per a la teva vida interior: fe, dificultats personals i sanació. No tracto esports, entreteniment, tècnica, gastronomia o temes generals.":
-        lang==="fr"?"Je suis là pour ta vie intérieure : foi, difficultés personnelles et guérison. Je ne traite pas le sport, le divertissement, la technique, la gastronomie ni les sujets généraux.":
-                     "Estoy aquí para tu vida interior: fe, dificultades personales y sanación. No doy datos ni opiniones de deportes, espectáculos, técnica, gastronomía o temas generales.";
+        lang === "en" ? "I’m here for your inner life: faith, personal struggles and healing. I don’t give facts or opinions on sports, entertainment, technical, food or general topics." :
+        lang === "pt" ? "Estou aqui para a sua vida interior: fé, questões pessoais e cura. Não trato esportes, entretenimento, técnica, gastronomia ou temas gerais." :
+        lang === "it" ? "Sono qui per la tua vita interiore: fede, difficoltà personali e guarigione. Non tratto sport, spettacolo, tecnica, gastronomia o temi generali." :
+        lang === "de" ? "Ich bin für dein inneres Leben da: Glaube, persönliche Themen und Heilung. Keine Fakten/Meinungen zu Sport, Unterhaltung, Technik, Gastronomie oder Allgemeinwissen." :
+        lang === "ca" ? "Sóc aquí per a la teva vida interior: fe, dificultats personals i sanació. No tracto esports, entreteniment, tècnica, gastronomia o temes generals." :
+        lang === "fr" ? "Je suis là pour ta vie intérieure : foi, difficultés personnelles et guérison. Je ne traite pas le sport, le divertissement, la technique, la gastronomie ni les sujets généraux." :
+                        "Estoy aquí para tu vida interior: fe, dificultades personales y sanación. No doy datos ni opiniones de deportes, espectáculos, técnica, gastronomía o temas generales.";
       const q =
-        lang==="en"?"What would help you most right now—your emotions, a relationship, or your prayer life?":
-        lang==="pt"?"O que mais ajudaria agora — suas emoções, uma relação, ou a sua vida de oração?":
-        lang==="it"?"Cosa ti aiuterebbe ora — le emozioni, una relazione o la tua vida de preghiera?":
-        lang==="de"?"Was würde dir jetzt am meisten helfen – deine Gefühle, eine Beziehung oder dein Gebetsleben?":
-        lang==="ca"?"Què t’ajudaria ara — les teves emocions, una relació o la teva vida de pregària?":
-        lang==="fr"?"Qu’est-ce qui t’aiderait le plus — tes émotions, une relation ou ta vie de prière ?":
-                     "¿Qué te ayudaría ahora — tus emociones, una relación o tu vida de oración?";
+        lang === "en" ? "What would help you most right now—your emotions, a relationship, or your prayer life?" :
+        lang === "pt" ? "O que mais ajudaria agora — suas emoções, uma relação, ou a sua vida de oração?" :
+        lang === "it" ? "Cosa ti aiuterebbe ora — le emozioni, una relazione o la tua vida di preghiera?" :
+        lang === "de" ? "Was würde dir jetzt am meisten helfen – deine Gefühle, eine Beziehung oder dein Gebetsleben?" :
+        lang === "ca" ? "Què t’ajudaria ara — les teves emocions, una relació o la teva vida de pregària?" :
+        lang === "fr" ? "Qu’est-ce qui t’aiderait le plus — tes émotions, une relation ou ta vie de prière ?" :
+                        "¿Qué te ayudaría ahora — tus emociones, una relación o tu vida de oración?";
       const out = { message: msg, question: q };
       mem.last_user_text = userTxt; mem.last_user_ts = now; mem.last_bot = out;
       await writeMem(userId, mem);
       return res.json(out);
     }
 
+    // -------- OpenAI: Instrucciones mínimas (BIBLIA requerida) --------
     const SYS = `
 Eres cercano, claro y compasivo, desde una voz cristiana (católica).
 Alcance: espiritualidad/fe católica, psicología/autoayuda personal, relaciones y emociones. Evita lo demás.
@@ -337,7 +414,10 @@ No incluyas nada fuera del JSON.
     out.bible = finalVerse;
     mem.last_refs = [...(mem.last_refs || []), finalVerse.ref].slice(-8);
 
-    mem.last_user_text = userTxt; mem.last_user_ts = now; mem.last_bot = out;
+    // Persistimos
+    mem.last_user_text = userTxt;
+    mem.last_user_ts = now;
+    mem.last_bot = out;
     await writeMem(userId, mem);
 
     res.json(out);
@@ -351,72 +431,20 @@ No incluyas nada fuera del JSON.
   }
 });
 
-/* ======================= Viewer proxy (browser ↔ jesus-interactivo) ======================= */
-
-// Diagnóstico rápido
-app.get("/api/viewer/check", async (_req, res) => {
-  try {
-    if (!JESUS_URL) return res.status(500).json({ ok:false, error: "missing_JESUS_URL" });
-    const r = await fetch(JESUS_URL, { method:"GET", agent: INSECURE_AGENT });
-    const text = await r.text();
-    res.json({ ok: r.ok, status: r.status, jesus_url: JESUS_URL, snippet: text.slice(0, 200) });
-  } catch (e) {
-    res.status(502).json({ ok:false, error:"viewer_check_failed", detail: String(e), jesus_url: JESUS_URL });
-  }
-});
-
-// Proxy con validación y errores detallados
-app.post("/api/viewer/offer", async (req, res) => {
-  try {
-    if (!JESUS_URL) return res.status(500).json({ error: "missing_JESUS_URL" });
-
-    const { sdp, type } = req.body || {};
-    if (!sdp || !type) {
-      return res.status(400).json({ error: "bad_request", detail: "Expected body {sdp, type}" });
-    }
-
-    const r = await fetch(`${JESUS_URL}/viewer/offer`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json; charset=utf-8" },
-      body: JSON.stringify({ sdp, type }),
-      agent: INSECURE_AGENT,
-    });
-
-    const raw = await r.text(); // puede NO ser JSON si hay error
-    let data;
-    try { data = JSON.parse(raw); } catch { data = null; }
-
-    if (!r.ok) {
-      console.error("[viewer_proxy_failed]", {
-        status: r.status, statusText: r.statusText, jesus_url: JESUS_URL, raw: raw?.slice(0, 400)
-      });
-      return res.status(r.status || 502).json({
-        error: "viewer_proxy_failed",
-        status: r.status,
-        jesus_url: JESUS_URL,
-        detail: data || null,
-        raw: data ? undefined : (raw || "").slice(0, 400),
-      });
-    }
-
-    // éxito
-    return res.json(data ?? { ok: true, note: "no-json", raw: raw?.slice(0, 400) });
-  } catch (e) {
-    console.error("VIEWER PROXY ERROR:", e);
-    res.status(500).json({ error: "viewer_proxy_exception", detail: String(e), jesus_url: JESUS_URL });
-  }
-});
-
-/* ======================= Ingest / TTS (opcionales) ======================= */
+// ---------- WebRTC ingest (audio → jesus-interactivo) ----------
 const sessions = new Map(); // id -> { pc, source, ff, track }
+
 function chunkPCM(buf, chunkBytes = 1920) {
   const chunks = [];
   for (let i = 0; i + chunkBytes <= buf.length; i += chunkBytes) chunks.push(buf.slice(i, i + chunkBytes));
   return chunks;
 }
 
+// POST /api/ingest/start  { ttsUrl: "https://..." }
 app.post("/api/ingest/start", async (req, res) => {
-  if (!HAVE_WRTC) return res.status(501).json({ error: "wrtc_not_installed", hint: "Instala 'wrtc' para habilitar ingest." });
+  if (!RTCPeerConnection || !RTCAudioSource) {
+    return res.status(501).json({ error: "wrtc_not_available" });
+  }
   try {
     const { ttsUrl } = req.body || {};
     if (!ttsUrl) return res.status(400).json({ error: "missing_ttsUrl" });
@@ -434,15 +462,15 @@ app.post("/api/ingest/start", async (req, res) => {
       method: "POST",
       headers: { "Content-Type": "application/json; charset=utf-8" },
       body: JSON.stringify({ sdp: offer.sdp, type: offer.type }),
-      agent: INSECURE_AGENT,
     });
     if (!r.ok) {
       const detail = await r.text().catch(()=> "");
-      return res.status(r.status || 500).json({ error: "jesus_ingest_failed", detail: detail.slice(0, 400) });
+      return res.status(r.status || 500).json({ error: "jesus_ingest_failed", detail });
     }
     const answer = await r.json();
     await pc.setRemoteDescription(answer);
 
+    // ffmpeg lee el audio (mp3/wav/ogg) y lo pasa a PCM mono 48kHz
     const ff = spawn(ffmpegPath, [
       "-re", "-i", ttsUrl,
       "-f", "s16le", "-acodec", "pcm_s16le",
@@ -456,14 +484,20 @@ app.post("/api/ingest/start", async (req, res) => {
     let leftover = Buffer.alloc(0);
     ff.stdout.on("data", (buf) => {
       const data = Buffer.concat([leftover, buf]);
-      const CHUNK = 1920;
+      const CHUNK = 1920; // 20 ms @ 48kHz mono 16-bit
       const chunks = chunkPCM(data, CHUNK);
       const used = chunks.length * CHUNK;
       leftover = data.slice(used);
 
       for (const c of chunks) {
         const samples = new Int16Array(c.buffer, c.byteOffset, c.byteLength / 2);
-        source.onData({ samples, sampleRate: 48000, bitsPerSample: 16, channelCount: 1, numberOfFrames: 960 });
+        source.onData({
+          samples,
+          sampleRate: 48000,
+          bitsPerSample: 16,
+          channelCount: 1,
+          numberOfFrames: 960,
+        });
       }
     });
 
@@ -477,8 +511,8 @@ app.post("/api/ingest/start", async (req, res) => {
   }
 });
 
+// POST /api/ingest/stop { id }
 app.post("/api/ingest/stop", async (req, res) => {
-  if (!HAVE_WRTC) return res.json({ ok: true, note: "wrtc_not_installed" });
   const { id } = req.body || {};
   const s = id ? sessions.get(id) : null;
   if (!s) return res.json({ ok: true, note: "no_session" });
@@ -489,9 +523,37 @@ app.post("/api/ingest/stop", async (req, res) => {
   res.json({ ok: true });
 });
 
-// Orquestación: texto -> jesus-voz -> ingest
+// ---------- Viewer proxy (browser ↔ jesus-interactivo) ----------
+// POST /api/viewer/offer { sdp, type }
+app.post("/api/viewer/offer", async (req, res) => {
+  try {
+    if (!JESUS_URL) return res.status(500).json({ error: "missing_JESUS_URL" });
+    const payload = { sdp: req.body?.sdp, type: req.body?.type };
+    if (!payload.sdp || !payload.type) return res.status(400).json({ error: "bad_offer_payload" });
+
+    const r = await fetch(`${JESUS_URL}/viewer/offer`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json; charset=utf-8" },
+      body: JSON.stringify(payload),
+    });
+
+    let data = null;
+    try { data = await r.json(); } catch { data = await r.text().catch(()=> ""); }
+
+    if (!r.ok) {
+      console.error("[viewer_proxy_failed]", r.status, data);
+      return res.status(r.status || 500).json({ error: "viewer_proxy_failed", detail: data, jesus_url: JESUS_URL });
+    }
+    res.json(data);
+  } catch (e) {
+    console.error("VIEWER PROXY ERROR:", e);
+    res.status(500).json({ error: "viewer_proxy_exception", detail: String(e), jesus_url: JESUS_URL });
+  }
+});
+
+// ---------- Orquestación: texto -> jesus-voz -> ingest ----------
+// POST /api/tts_stream  { text, lang?, voice?, rate?, temp?, width_ms?, pitch_st?, gain_db? }
 app.post("/api/tts_stream", async (req, res) => {
-  if (!HAVE_WRTC) return res.status(501).json({ error: "wrtc_not_installed", hint: "Instala 'wrtc' para habilitar tts_stream." });
   try {
     if (!VOZ_URL) return res.status(500).json({ error: "missing_VOZ_URL" });
     if (!JESUS_URL) return res.status(500).json({ error: "missing_JESUS_URL" });
@@ -521,13 +583,18 @@ app.post("/api/tts_stream", async (req, res) => {
     if (gain_db)  url.searchParams.set("gain_db", String(gain_db));
 
     const r1 = await fetch(url.toString(), { method: "GET" });
-    const raw1 = await r1.text();
-    let j1; try { j1 = JSON.parse(raw1); } catch { j1 = null; }
-    if (!r1.ok || !j1) {
-      return res.status(r1.status || 500).json({ error: "voz_tts_failed", raw: raw1.slice(0, 400) });
+    if (!r1.ok) {
+      const detail = await r1.text().catch(()=> "");
+      return res.status(r1.status || 500).json({ error: "voz_tts_failed", detail });
     }
+    const j1 = await r1.json().catch(()=> ({}));
     const ttsUrl = j1?.url || j1?.file || j1?.audio || j1?.path || "";
     if (!ttsUrl) return res.status(500).json({ error: "voz_no_url", detail: j1 });
+
+    // Inicia ingest (si wrtc disponible)
+    if (!RTCPeerConnection || !RTCAudioSource) {
+      return res.json({ ok: true, note: "wrtc_not_available_here", ttsUrl });
+    }
 
     const r2 = await fetch(`${req.protocol}://${req.get("host")}/api/ingest/start`, {
       method: "POST",
@@ -542,10 +609,10 @@ app.post("/api/tts_stream", async (req, res) => {
     res.json({ ok: true, id: j2.id, ttsUrl });
   } catch (e) {
     console.error("TTS_STREAM ERROR:", e);
-    res.status(500).json({ error: String(e) });
+    res.status(500).json({ error: "tts_stream_exception", detail: String(e) });
   }
 });
 
-/* ======================= Arranque ======================= */
+// ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
