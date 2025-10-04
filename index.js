@@ -71,10 +71,16 @@ const app = express();
 app.use(cors({ origin: true }));
 app.use(bodyParser.json());
 
-// Forzar JSON UTF-8 por defecto, pero NO en rutas de assets binarios
+// Forzar JSON UTF-8 por defecto, pero NO en rutas de assets binarios ni audio/tts
 app.use((req, res, next) => {
   const p = req.path || "";
-  if (p.startsWith("/api/viewer/assets") || p.startsWith("/api/assets/")) return next();
+  if (
+    p.startsWith("/api/viewer/assets") ||
+    p.startsWith("/api/assets/") ||
+    p.startsWith("/api/files/") ||
+    p.startsWith("/api/tts") ||
+    p.startsWith("/api/voices")
+  ) return next();
   res.set("Content-Type", "application/json; charset=utf-8");
   next();
 });
@@ -441,6 +447,154 @@ No incluyas nada fuera del JSON.
       question: "¿Qué te gustaría trabajar primero?",
       bible: { ref: "Salmos 34:18", text: "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu." }
     });
+  }
+});
+
+// ==================== (NUEVO) PROXY DE VOZ — jesus-voz (VM) ====================
+
+const TTS_PROVIDER_DEFAULT = (process.env.TTS_PROVIDER || "xtts").trim();
+const publicBase = (req) => process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get("host")}`;
+const toQS = (obj) => {
+  const s = new URLSearchParams();
+  for (const [k, v] of Object.entries(obj || {})) {
+    if (v !== undefined && v !== null && v !== "") s.append(k, String(v));
+  }
+  return s.toString();
+};
+const mergeQS = (a = {}, b = {}) => {
+  const s = new URLSearchParams();
+  for (const [k, v] of Object.entries(a)) if (v !== undefined) s.append(k, v);
+  for (const [k, v] of Object.entries(b)) if (v !== undefined) s.set(k, String(v));
+  return s.toString();
+};
+async function pipeUpstream(up, res, fallbackType = "application/octet-stream") {
+  res.status(up.status);
+  const ct = up.headers.get("content-type");
+  if (ct) res.setHeader("Content-Type", ct);
+  else res.setHeader("Content-Type", fallbackType);
+  const cl = up.headers.get("content-length");
+  if (cl) res.setHeader("Content-Length", cl);
+  if (!up.body) return res.end();
+  // Web → Node stream
+  return Readable.fromWeb(up.body).pipe(res);
+}
+
+// Salud del proxy
+app.get("/api/health", async (req, res) => {
+  try {
+    if (!VOZ_URL) return res.status(500).json({ ok: false, error: "missing_VOZ_URL" });
+    const r = await fetch(`${VOZ_URL}/health`);
+    const j = await r.json().catch(() => ({}));
+    res.json({ ok: true, proxy: "railway", voz_url: VOZ_URL, provider_default: TTS_PROVIDER_DEFAULT, upstream: j });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// Listado de voces (por si lo necesitás)
+app.get("/api/voices", async (req, res) => {
+  try {
+    if (!VOZ_URL) return res.status(500).json({ ok: false, error: "missing_VOZ_URL" });
+    const url = new URL("/voices", VOZ_URL);
+    url.search = mergeQS(req.query, {});
+    const up = await fetch(url.toString());
+    const j = await up.json();
+    res.json(j);
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// Streaming TTS directo (audio/wav)
+app.get("/api/tts", async (req, res) => {
+  try {
+    if (!VOZ_URL) return res.status(500).json({ ok: false, error: "missing_VOZ_URL" });
+    const url = new URL("/tts", VOZ_URL);
+    url.search = mergeQS(req.query, { provider: TTS_PROVIDER_DEFAULT });
+    const up = await fetch(url.toString());
+    // En rutas de audio, aseguramos tipo
+    res.removeHeader("Content-Type");
+    await pipeUpstream(up, res, "audio/wav");
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// Generar y guardar WAV en la VM, devolviendo URL proxificada (https de Railway)
+app.get("/api/tts_save", async (req, res) => {
+  try {
+    if (!VOZ_URL) return res.status(500).json({ ok: false, error: "missing_VOZ_URL" });
+    const url = new URL("/tts_save", VOZ_URL);
+    url.search = mergeQS(req.query, { provider: TTS_PROVIDER_DEFAULT });
+    const up = await fetch(url.toString());
+    const j = await up.json();
+
+    const upstream = j.url || j.file || j.path;
+    let name = null;
+    try { name = new URL(upstream).pathname.split("/").pop(); } catch {}
+    if (name) {
+      const pub = `${publicBase(req)}/api/files/${encodeURIComponent(name)}`;
+      j.url = j.file = j.path = pub;
+    }
+    res.json(j);
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// Sirve /files/<wav> de la VM por HTTPS (evita mixed content)
+app.get("/api/files/:name", async (req, res) => {
+  try {
+    if (!VOZ_URL) return res.status(500).json({ ok: false, error: "missing_VOZ_URL" });
+    const up = await fetch(`${VOZ_URL}/files/${encodeURIComponent(req.params.name)}`);
+    res.removeHeader("Content-Type");
+    await pipeUpstream(up, res, "audio/wav");
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// (Opcional) Acepta tu JSON { text, lang, rate, temp, source, fx:{...} } y devuelve WAV proxificado
+app.post("/api/tts_from_json", async (req, res) => {
+  try {
+    if (!VOZ_URL) return res.status(500).json({ ok: false, error: "missing_VOZ_URL" });
+    const b = req.body || {};
+    const fx = b.fx || {};
+    // provider según "source" (ej: "xtts-jesus2")
+    const provider = (b.provider || (String(b.source || "").startsWith("xtts") ? "xtts" : TTS_PROVIDER_DEFAULT));
+    const params = {
+      text: b.text || "Hola",
+      lang: b.lang || "es",
+      rate: b.rate ?? "0.93",
+      temp: b.temp ?? "0.6",
+      provider,
+      fx: fx.fx ? 1 : fx.enable ? 1 : 0,
+      hpf: fx.hpf,
+      lpf: fx.lpf,
+      warm_db: fx.warm_db,
+      air_db: fx.air_db,
+      presence_db: fx.presence_db,
+      reverb_wet: fx.reverb_wet,
+      reverb_delay: fx.reverb_delay,
+      reverb_tail: fx.reverb_tail,
+      comp: fx.comp,
+      width_ms: fx.width_ms,
+      pitch_st: fx.pitch_st,
+      gain_db: fx.gain_db
+    };
+    const url = new URL("/tts_save", VOZ_URL);
+    url.search = toQS(params);
+    const up = await fetch(url.toString());
+    const j = await up.json();
+
+    const upstream = j.url || j.file || j.path;
+    let name = null;
+    try { name = new URL(upstream).pathname.split("/").pop(); } catch {}
+    const pub = name ? `${publicBase(req)}/api/files/${encodeURIComponent(name)}` : upstream;
+
+    res.json({ ok: true, url: pub, file: pub, tts: j });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
   }
 });
 
