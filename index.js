@@ -2,7 +2,7 @@
 // - OpenAI: /api/welcome y /api/ask (misma lógica)
 // - Voz (jesus-voz): /api/tts_stream  -> genera audio y lo ingesta a jesus-interactivo
 // - Ingest directo: /api/ingest/start, /api/ingest/stop
-// - Viewer proxy: /api/viewer/offer
+// - Viewer proxy: /api/viewer/offer  (+ proxy de assets /api/viewer/assets/*)
 // - Diag: /api/_diag/viewer_check (health de jesus-interactivo)
 // - Health: "/"
 
@@ -13,13 +13,14 @@ if (process.env.JESUS_INSECURE_TLS === "1") {
   process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 }
 
-const express = require("express");
-const cors = require("cors");
-const bodyParser = require("body-parser");
-const path = require("path");
-const fs = require("fs/promises");
-const OpenAI = require("openai");
+const express   = require("express");
+const cors      = require("cors");
+const bodyParser= require("body-parser");
+const path      = require("path");
+const fs        = require("fs/promises");
+const OpenAI    = require("openai");
 const { spawn } = require("child_process");
+const { Readable } = require("stream"); // para streamear fetch.body (WHATWG) -> res (Node)
 
 // ---- WebRTC ingest y FFmpeg ----
 let wrtc = null;
@@ -29,7 +30,7 @@ try {
   console.warn("[WARN] wrtc no instalado; /api/ingest/* se desactiva. Instala 'wrtc' si vas a hacer ingest desde este backend.");
 }
 const RTCPeerConnection = wrtc?.RTCPeerConnection;
-const RTCAudioSource = wrtc?.nonstandard?.RTCAudioSource;
+const RTCAudioSource    = wrtc?.nonstandard?.RTCAudioSource;
 
 // FFmpeg: env > ffmpeg-static > binario del sistema
 let ffmpegPath = process.env.FFMPEG_PATH || null;
@@ -63,7 +64,10 @@ app.use(cors({ origin: true }));
 app.use(bodyParser.json());
 
 // Forzar JSON UTF-8 en todas las respuestas
-app.use((req, res, next) => { res.set("Content-Type", "application/json; charset=utf-8"); next(); });
+app.use((req, res, next) => {
+  res.set("Content-Type", "application/json; charset=utf-8");
+  next();
+});
 
 // ---------- OpenAI ----------
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -327,7 +331,7 @@ app.post("/api/ask", async (req, res) => {
       const msg =
         lang === "en" ? "I’m here for your inner life: faith, personal struggles and healing. I don’t give facts or opinions on sports, entertainment, technical, food or general topics." :
         lang === "pt" ? "Estou aqui para a sua vida interior: fé, questões pessoais e cura. Não trato esportes, entretenimento, técnica, gastronomia ou temas gerais." :
-        lang === "it" ? "Sono qui per la tua vita interiore: fede, difficoltà personali e guarigione. Non tratto sport, spettacolo, tecnica, gastronomia o temi generali." :
+        lang === "it" ? "Sono qui per la tua vida interiore: fede, difficoltà personali e guarigione. Non tratto sport, spettacolo, tecnica, gastronomia o temi generali." :
         lang === "de" ? "Ich bin für dein inneres Leben da: Glaube, persönliche Themen und Heilung. Keine Fakten/Meinungen zu Sport, Unterhaltung, Technik, Gastronomie oder Allgemeinwissen." :
         lang === "ca" ? "Sóc aquí per a la teva vida interior: fe, dificultats personals i sanació. No tracto esports, entreteniment, tècnica, gastronomia o temes generals." :
         lang === "fr" ? "Je suis là pour ta vie intérieure : foi, difficultés personnelles et guérison. Je ne traite pas le sport, le divertissement, la technique, la gastronomie ni les sujets généraux." :
@@ -537,45 +541,65 @@ app.post("/api/viewer/offer", async (req, res) => {
       body: JSON.stringify(payload),
     });
 
-    // Si la VM está en stub (501), devolvemos fallback amable (200)
-    if (r.status === 501) {
-      const idleUrl = `${JESUS_URL}/assets/idle_loop.mp4`;
-      const talkUrl = `${JESUS_URL}/assets/talk.mp4`;
-      return res.json({
-        stub: true,
-        note: "viewer not implemented yet; using fallback video",
-        idleUrl,
-        talkUrl,
-        webrtc: false,
-      });
-    }
-
-    // Respuesta normal OK -> reenviar JSON
+    // Caso normal: backend Jesús ya implementado
     if (r.ok) {
       const data = await r.json().catch(() => ({}));
       return res.json(data);
     }
 
-    // Otros errores del server Python
+    // Stub (501) -> devolvemos fallback y rutas proxys locales
+    if (r.status === 501) {
+      return res.json({
+        stub: true,
+        webrtc: false,
+        note: "viewer not implemented; using fallback video",
+        idleUrl: "/api/viewer/assets/idle_loop.mp4",
+        talkUrl: "/api/viewer/assets/talk.mp4",
+      });
+    }
+
+    // Otros errores
     const detail = await r.text().catch(() => "");
+    console.error("[viewer_proxy_failed]", r.status, detail);
     return res.status(r.status || 502).json({
       error: "viewer_proxy_failed",
       status: r.status || 502,
-      jesus_url: JESUS_URL,
       detail,
+      jesus_url: JESUS_URL,
     });
   } catch (e) {
     console.error("VIEWER PROXY ERROR:", e);
-    // Fallback por error de red/TLS/DNS
-    const idleUrl = JESUS_URL ? `${JESUS_URL}/assets/idle_loop.mp4` : null;
-    const talkUrl = JESUS_URL ? `${JESUS_URL}/assets/talk.mp4` : null;
+    // Fallback final (por si hay error de red/TLS)
     return res.status(200).json({
       stub: true,
-      note: "viewer unreachable; using fallback video",
-      idleUrl,
-      talkUrl,
       webrtc: false,
+      note: "viewer unreachable; using fallback video",
+      idleUrl: "/api/viewer/assets/idle_loop.mp4",
+      talkUrl: "/api/viewer/assets/talk.mp4",
     });
+  }
+});
+
+// Proxy de assets para que el navegador no tenga que ir al 8443 self-signed
+app.get("/api/viewer/assets/:file", async (req, res) => {
+  try {
+    if (!JESUS_URL) return res.status(500).send("missing_JESUS_URL");
+    const f = String(req.params.file || "");
+    if (!/^(idle_loop|talk)\.mp4$/.test(f)) return res.status(404).end();
+
+    const r = await fetch(`${JESUS_URL}/assets/${f}`);
+    if (!r.ok || !r.body) {
+      const t = await r.text().catch(() => "");
+      return res.status(r.status || 502).send(t || "asset_fetch_failed");
+    }
+
+    res.setHeader("Content-Type", "video/mp4");
+    res.setHeader("Cache-Control", "public, max-age=60");
+    // r.body es WHATWG ReadableStream → convertir a Node stream:
+    Readable.fromWeb(r.body).pipe(res);
+  } catch (e) {
+    console.error("ASSET PROXY ERROR:", e);
+    res.status(500).send("asset_proxy_error");
   }
 });
 
