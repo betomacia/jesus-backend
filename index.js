@@ -1,7 +1,7 @@
 // index.js — Backend minimal (sin DB) para Jesús Interactivo
 // - OpenAI: /api/welcome y /api/ask
-// - Voz (jesus-voz): /api/tts_stream  -> genera audio y lo ingesta a jesus-interactivo
-// - Ingest directo: /api/ingest/start, /api/ingest/stop
+// - Voz (jesus-voz): /api/tts, /api/tts_save, /api/tts_from_json (proxy HTTPS a VM)
+// - Ingest (stub si no hay wrtc): /api/ingest/start, /api/ingest/stop
 // - Viewer proxy + assets proxy: /api/viewer/offer y /api/viewer/assets/* (+ /api/assets/idle|talk)
 // - Diag: /api/_diag/viewer_check
 // - Health: "/"
@@ -21,7 +21,6 @@ const fs = require("fs/promises");
 const OpenAI = require("openai");
 const { spawn } = require("child_process");
 const https = require("https");
-// ⬇️⬇️⬇️ NUEVO: para convertir WebStreams a streams de Node
 const { Readable } = require("node:stream");
 
 // Agent para hablar con JESUS_URL aun con cert autofirmado (solo backend↔backend)
@@ -35,7 +34,7 @@ let wrtc = null;
 try {
   wrtc = require("wrtc");
 } catch (e) {
-  console.warn("[WARN] wrtc no instalado; /api/ingest/* se desactiva. Instala 'wrtc' si vas a hacer ingest desde este backend.");
+  console.warn("[WARN] wrtc no instalado; /api/ingest/* corre en modo stub (200 sin P2P).");
 }
 const RTCPeerConnection = wrtc?.RTCPeerConnection;
 const RTCAudioSource = wrtc?.nonstandard?.RTCAudioSource;
@@ -63,10 +62,44 @@ if (!ffmpegPath) ffmpegPath = "ffmpeg"; // fallback
 
 // URLs de servicios
 const JESUS_URL = (process.env.JESUS_URL || "").trim(); // ej: "https://35.202.38.210:8443"
-const VOZ_URL   = (process.env.VOZ_URL   || "").trim(); // ej: "http://<IP-jesus-voz>:8000"
+const VOZ_URL   = (process.env.VOZ_URL   || "").trim(); // ej: "https://<tunnel>.trycloudflare.com"
 if (!JESUS_URL) console.warn("[WARN] Falta JESUS_URL]");
 if (!VOZ_URL)   console.warn("[WARN] Falta VOZ_URL]");
 
+// ====== Ajuste de velocidad global del TTS ======
+const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
+const RATE_MULT = clamp(parseFloat(process.env.TTS_RATE_MULT || "1.10"), 0.5, 2.0); // +10% por defecto
+const RATE_BASE = (() => {
+  const r = parseFloat(process.env.TTS_RATE_BASE || "");
+  return Number.isFinite(r) ? clamp(r, 0.25, 2.0) : null;
+})();
+const boostRate = (val) => {
+  let r = parseFloat(val);
+  if (!Number.isFinite(r)) r = RATE_BASE ?? 1.0;
+  return clamp(r * RATE_MULT, 0.25, 2.0);
+};
+
+// Helpers de QS
+const toQS = (obj) => {
+  const s = new URLSearchParams();
+  for (const [k, v] of Object.entries(obj || {})) {
+    if (v !== undefined && v !== null && v !== "") s.append(k, String(v));
+  }
+  return s.toString();
+};
+const mergeQSBoost = (a = {}, b = {}) => {
+  const s = new URLSearchParams();
+  for (const [k, v] of Object.entries(a)) if (v !== undefined && v !== null) s.append(k, String(v));
+  for (const [k, v] of Object.entries(b)) if (v !== undefined && v !== null) s.set(k, String(v));
+  // boost de rate
+  const hasRate = s.has("rate");
+  if (hasRate) s.set("rate", String(boostRate(s.get("rate"))));
+  else if (RATE_BASE !== null) s.set("rate", String(boostRate(RATE_BASE)));
+  return s.toString();
+};
+const publicBase = (req) => process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get("host")}`;
+
+// App
 const app = express();
 app.use(cors({ origin: true }));
 app.use(bodyParser.json());
@@ -184,7 +217,7 @@ const FALLBACK_VERSES = {
   ],
   it: [
     { ref: "Salmo 34:18", text: "Il Signore è vicino a chi ha il cuore spezzato; egli salva gli spiriti affranti." },
-    { ref: "Isaia 41:10", text: "Non temere, perché io sono con te; non smarrirti, perché io sono il tuo Dio." },
+    { ref: "Isaia 41:10", text: "Non temere, perché io sono con te; non smarrirti, perché io sei il tuo Dio." },
   ],
   de: [
     { ref: "Psalm 34:18", text: "Der HERR ist nahe denen, die zerbrochenen Herzens sind." },
@@ -251,7 +284,6 @@ const OFFTOPIC = [
 ];
 const RELIGIOUS_ALLOW = [/\b(iglesia|templo|catedral|parroquia|misa|sacramento|oraci[oó]n|santuario|santo|santos|biblia|evangelio|rosario|confesi[oó]n|eucarist[ií]a|liturgia|vaticano|lourdes|f[aá]tima|peregrinaci[oó]n|camino de santiago)\b/i];
 const isReligiousException = (s) => RELIGIOUS_ALLOW.some((r) => r.test(NORM(s)));
-const isOffTopic = (s) => OFFTOPIC.some((r) => r.test(NORM(s)));
 const isGibberish = (s) => {
   const x = (s || "").trim();
   if (!x) return true;
@@ -421,23 +453,24 @@ No incluyas nada fuera del JSON.
     const refRaw = String(data?.bible?.ref || "").trim();
     const txtRaw = String(data?.bible?.text || "").trim();
 
-    const used = new Set((mem.last_refs || []).map((x) => NORM(x)));
+    const used = new Set((await readMem(userId)).last_refs || []);
     let finalVerse = null;
 
     if (txtRaw && refRaw && !banned.test(refRaw) && !used.has(NORM(refRaw))) {
       finalVerse = { ref: refRaw, text: txtRaw };
     } else {
-      finalVerse = pickFallbackVerse(lang, used);
+      finalVerse = pickFallbackVerse(lang, new Set([...used].map(NORM)));
     }
 
     out.bible = finalVerse;
-    mem.last_refs = [...(mem.last_refs || []), finalVerse.ref].slice(-8);
+    const mem2 = await readMem(userId);
+    mem2.last_refs = [...(mem2.last_refs || []), finalVerse.ref].slice(-8);
 
     // Persistimos
-    mem.last_user_text = userTxt;
-    mem.last_user_ts = now;
-    mem.last_bot = out;
-    await writeMem(userId, mem);
+    mem2.last_user_text = userTxt;
+    mem2.last_user_ts = Date.now();
+    mem2.last_bot = out;
+    await writeMem(userId, mem2);
 
     res.json(out);
   } catch (e) {
@@ -450,23 +483,10 @@ No incluyas nada fuera del JSON.
   }
 });
 
-// ==================== (NUEVO) PROXY DE VOZ — jesus-voz (VM) ====================
+// ==================== PROXY DE VOZ — jesus-voz (VM) ====================
 
 const TTS_PROVIDER_DEFAULT = (process.env.TTS_PROVIDER || "xtts").trim();
-const publicBase = (req) => process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get("host")}`;
-const toQS = (obj) => {
-  const s = new URLSearchParams();
-  for (const [k, v] of Object.entries(obj || {})) {
-    if (v !== undefined && v !== null && v !== "") s.append(k, String(v));
-  }
-  return s.toString();
-};
-const mergeQS = (a = {}, b = {}) => {
-  const s = new URLSearchParams();
-  for (const [k, v] of Object.entries(a)) if (v !== undefined) s.append(k, v);
-  for (const [k, v] of Object.entries(b)) if (v !== undefined) s.set(k, String(v));
-  return s.toString();
-};
+
 async function pipeUpstream(up, res, fallbackType = "application/octet-stream") {
   res.status(up.status);
   const ct = up.headers.get("content-type");
@@ -475,7 +495,6 @@ async function pipeUpstream(up, res, fallbackType = "application/octet-stream") 
   const cl = up.headers.get("content-length");
   if (cl) res.setHeader("Content-Length", cl);
   if (!up.body) return res.end();
-  // Web → Node stream
   return Readable.fromWeb(up.body).pipe(res);
 }
 
@@ -485,18 +504,18 @@ app.get("/api/health", async (req, res) => {
     if (!VOZ_URL) return res.status(500).json({ ok: false, error: "missing_VOZ_URL" });
     const r = await fetch(`${VOZ_URL}/health`);
     const j = await r.json().catch(() => ({}));
-    res.json({ ok: true, proxy: "railway", voz_url: VOZ_URL, provider_default: TTS_PROVIDER_DEFAULT, upstream: j });
+    res.json({ ok: true, proxy: "railway", voz_url: VOZ_URL, rate_mult: RATE_MULT, upstream: j });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e) });
   }
 });
 
-// Listado de voces (por si lo necesitás)
+// Listado de voces (passthrough)
 app.get("/api/voices", async (req, res) => {
   try {
     if (!VOZ_URL) return res.status(500).json({ ok: false, error: "missing_VOZ_URL" });
     const url = new URL("/voices", VOZ_URL);
-    url.search = mergeQS(req.query, {});
+    url.search = mergeQSBoost(req.query, {});
     const up = await fetch(url.toString());
     const j = await up.json();
     res.json(j);
@@ -510,9 +529,8 @@ app.get("/api/tts", async (req, res) => {
   try {
     if (!VOZ_URL) return res.status(500).json({ ok: false, error: "missing_VOZ_URL" });
     const url = new URL("/tts", VOZ_URL);
-    url.search = mergeQS(req.query, { provider: TTS_PROVIDER_DEFAULT });
+    url.search = mergeQSBoost(req.query, { provider: TTS_PROVIDER_DEFAULT });
     const up = await fetch(url.toString());
-    // En rutas de audio, aseguramos tipo
     res.removeHeader("Content-Type");
     await pipeUpstream(up, res, "audio/wav");
   } catch (e) {
@@ -525,7 +543,7 @@ app.get("/api/tts_save", async (req, res) => {
   try {
     if (!VOZ_URL) return res.status(500).json({ ok: false, error: "missing_VOZ_URL" });
     const url = new URL("/tts_save", VOZ_URL);
-    url.search = mergeQS(req.query, { provider: TTS_PROVIDER_DEFAULT });
+    url.search = mergeQSBoost(req.query, { provider: TTS_PROVIDER_DEFAULT });
     const up = await fetch(url.toString());
     const j = await up.json();
 
@@ -554,18 +572,18 @@ app.get("/api/files/:name", async (req, res) => {
   }
 });
 
-// (Opcional) Acepta tu JSON { text, lang, rate, temp, source, fx:{...} } y devuelve WAV proxificado
+// Acepta tu JSON { text, lang, rate, temp, source, fx:{...} } y devuelve WAV proxificado (con rate boost)
 app.post("/api/tts_from_json", async (req, res) => {
   try {
     if (!VOZ_URL) return res.status(500).json({ ok: false, error: "missing_VOZ_URL" });
     const b = req.body || {};
     const fx = b.fx || {};
-    // provider según "source" (ej: "xtts-jesus2")
-    const provider = (b.provider || (String(b.source || "").startsWith("xtts") ? "xtts" : TTS_PROVIDER_DEFAULT));
+    const provider = (b.provider || (String(b.source || "").toLowerCase().startsWith("xtts") ? "xtts" : TTS_PROVIDER_DEFAULT));
+    const rateFinal = boostRate(b.rate ?? RATE_BASE ?? 1.0);
     const params = {
       text: b.text || "Hola",
       lang: b.lang || "es",
-      rate: b.rate ?? "0.93",
+      rate: rateFinal,
       temp: b.temp ?? "0.6",
       provider,
       fx: fx.fx ? 1 : fx.enable ? 1 : 0,
@@ -592,14 +610,13 @@ app.post("/api/tts_from_json", async (req, res) => {
     try { name = new URL(upstream).pathname.split("/").pop(); } catch {}
     const pub = name ? `${publicBase(req)}/api/files/${encodeURIComponent(name)}` : upstream;
 
-    res.json({ ok: true, url: pub, file: pub, tts: j });
+    res.json({ ok: true, url: pub, file: pub, tts: j, rate_applied: rateFinal });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e) });
   }
 });
 
 // ==================== PROXY DE ASSETS DEL VIEWER ====================
-// Sirve /api/viewer/assets/* reenviando a https://<JESUS_URL>/assets/* (evita cert self-signed en el browser)
 app.get("/api/viewer/assets/:file", async (req, res) => {
   try {
     if (!JESUS_URL) return res.status(500).json({ error: "missing_JESUS_URL" });
@@ -611,11 +628,9 @@ app.get("/api/viewer/assets/:file", async (req, res) => {
       res.set("Content-Type", "text/plain; charset=utf-8");
       return res.send(body || "asset fetch failed");
     }
-    // Tipo de contenido
     res.removeHeader("Content-Type");
     res.setHeader("Content-Type", r.headers.get("content-type") || "application/octet-stream");
     res.setHeader("Cache-Control", "no-store");
-    // ⬇️ CONVERSIÓN WebStream -> Node stream (arregla r.body.pipe no definido)
     const nodeStream = Readable.fromWeb(r.body);
     return nodeStream.pipe(res);
   } catch (e) {
@@ -636,7 +651,6 @@ app.get("/api/assets/talk", (req, res) => {
 });
 
 // ==================== VIEWER PROXY ====================
-// POST /api/viewer/offer { sdp, type }
 app.post("/api/viewer/offer", async (req, res) => {
   try {
     if (!JESUS_URL) return res.status(500).json({ error: "missing_JESUS_URL" });
@@ -655,7 +669,6 @@ app.post("/api/viewer/offer", async (req, res) => {
       return res.json(data);
     }
 
-    // Si el server python está en stub (501) → devolvemos fallback por nuestro propio dominio
     if (r.status === 501) {
       return res.json({
         stub: true,
@@ -675,7 +688,6 @@ app.post("/api/viewer/offer", async (req, res) => {
     });
   } catch (e) {
     console.error("VIEWER PROXY ERROR:", e);
-    // Fallback final por si hubo excepción de red/DNS/TLS
     return res.status(200).json({
       stub: true,
       webrtc: false,
@@ -686,12 +698,11 @@ app.post("/api/viewer/offer", async (req, res) => {
   }
 });
 
-// GET informativo (evita "Cannot GET /api/viewer/offer" al abrir en el browser)
 app.get("/api/viewer/offer", (_req, res) =>
   res.status(405).json({ ok: false, error: "use_POST_here" })
 );
 
-// ---------- WebRTC ingest (audio → jesus-interactivo) ----------
+// ==================== WebRTC ingest (con stub) ====================
 const sessions = new Map(); // id -> { pc, source, ff, track }
 
 function chunkPCM(buf, chunkBytes = 1920) {
@@ -700,11 +711,34 @@ function chunkPCM(buf, chunkBytes = 1920) {
   return chunks;
 }
 
-// POST /api/ingest/start  { ttsUrl: "https://..." }
+// Helper: generar TTS desde texto y devolver URL proxificada
+async function genTtsUrlFromTextViaSelf(req, payload) {
+  const resp = await fetch(`${publicBase(req)}/api/tts_from_json`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json; charset=utf-8" },
+    body: JSON.stringify(payload || {}),
+  });
+  const j = await resp.json().catch(()=> ({}));
+  return j?.url || j?.file || null;
+}
+
+// POST /api/ingest/start  { ttsUrl?: "https://...", text?: "..." , lang?: "es", rate?, temp?, fx? }
 app.post("/api/ingest/start", async (req, res) => {
+  // ======= STUB (Railway sin wrtc) =======
   if (!RTCPeerConnection || !RTCAudioSource) {
-    return res.status(501).json({ error: "wrtc_not_available" });
+    try {
+      const { ttsUrl, text, lang = "es", rate, temp, fx, source, provider } = req.body || {};
+      let finalUrl = ttsUrl || null;
+      if (!finalUrl && text) {
+        finalUrl = await genTtsUrlFromTextViaSelf(req, { text, lang, rate, temp, fx, source, provider });
+      }
+      return res.json({ ok: true, id: null, ttsUrl: finalUrl || null, note: "ingest_disabled" });
+    } catch {
+      return res.json({ ok: true, id: null, ttsUrl: null, note: "ingest_disabled" });
+    }
   }
+
+  // ======= IMPLEMENTACIÓN REAL (si hay wrtc y jesus-interactivo soporta ingest) =======
   try {
     const { ttsUrl } = req.body || {};
     if (!ttsUrl) return res.status(400).json({ error: "missing_ttsUrl" });
@@ -786,4 +820,4 @@ app.post("/api/ingest/stop", async (req, res) => {
 
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
+app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT} — TTS_RATE_MULT=${RATE_MULT}`));
