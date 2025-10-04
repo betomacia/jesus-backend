@@ -2,7 +2,7 @@
 // - OpenAI: /api/welcome y /api/ask
 // - Voz (jesus-voz): /api/tts_stream  -> genera audio y lo ingesta a jesus-interactivo
 // - Ingest directo: /api/ingest/start, /api/ingest/stop
-// - Viewer proxy + assets proxy: /api/viewer/offer y /api/viewer/assets/*
+// - Viewer proxy + assets proxy: /api/viewer/offer y /api/viewer/assets/* (+ /api/assets/idle|talk)
 // - Diag: /api/_diag/viewer_check
 // - Health: "/"
 
@@ -20,6 +20,13 @@ const path = require("path");
 const fs = require("fs/promises");
 const OpenAI = require("openai");
 const { spawn } = require("child_process");
+const https = require("https");
+
+// Agent para hablar con JESUS_URL aun con cert autofirmado (solo backend↔backend)
+const INSECURE_AGENT =
+  process.env.JESUS_INSECURE_TLS === "1"
+    ? new https.Agent({ rejectUnauthorized: false })
+    : undefined;
 
 // ---- WebRTC ingest y FFmpeg ----
 let wrtc = null;
@@ -62,8 +69,13 @@ const app = express();
 app.use(cors({ origin: true }));
 app.use(bodyParser.json());
 
-// Forzar JSON UTF-8 en todas las respuestas por defecto
-app.use((req, res, next) => { res.set("Content-Type", "application/json; charset=utf-8"); next(); });
+// Forzar JSON UTF-8 por defecto, pero NO en rutas de assets binarios
+app.use((req, res, next) => {
+  const p = req.path || "";
+  if (p.startsWith("/api/viewer/assets") || p.startsWith("/api/assets/")) return next();
+  res.set("Content-Type", "application/json; charset=utf-8");
+  next();
+});
 
 // ---------- OpenAI ----------
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -247,7 +259,7 @@ app.get("/", (_req, res) => res.json({ ok: true, service: "backend", ts: Date.no
 app.get("/api/_diag/viewer_check", async (_req, res) => {
   try {
     if (!JESUS_URL) return res.status(500).json({ ok: false, error: "missing_JESUS_URL" });
-    const r = await fetch(`${JESUS_URL}/health`, { method: "GET" });
+    const r = await fetch(`${JESUS_URL}/health`, { method: "GET", agent: INSECURE_AGENT });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) return res.status(r.status).json({ ok: false, error: "health_non_200", detail: j, jesus_url: JESUS_URL });
     res.json({ ok: true, jesus_url: JESUS_URL, health: j });
@@ -431,27 +443,39 @@ No incluyas nada fuera del JSON.
 });
 
 // ==================== PROXY DE ASSETS DEL VIEWER ====================
-// Sirve /api/viewer/assets/* reenviando a https://<JESUS_URL>/assets/* (evita el cert self-signed en el browser)
+// Sirve /api/viewer/assets/* reenviando a https://<JESUS_URL>/assets/* (evita cert self-signed en el browser)
 app.get("/api/viewer/assets/:file", async (req, res) => {
   try {
     if (!JESUS_URL) return res.status(500).json({ error: "missing_JESUS_URL" });
     const target = `${JESUS_URL}/assets/${encodeURIComponent(req.params.file)}`;
-    const r = await fetch(target, { method: "GET" });
+    const r = await fetch(target, { method: "GET", agent: INSECURE_AGENT });
     if (!r.ok) {
       const body = await r.text().catch(()=> "");
-      return res.status(r.status || 502).send(body || "asset fetch failed");
+      res.status(r.status || 502);
+      res.set("Content-Type", "text/plain; charset=utf-8");
+      return res.send(body || "asset fetch failed");
     }
-    // Copiamos headers relevantes
-    for (const [k, v] of r.headers) {
-      const kl = String(k).toLowerCase();
-      if (kl === "content-length") continue; // tamaño puede cambiar al bufferizar
-      res.set(k, v);
-    }
-    const buf = Buffer.from(await r.arrayBuffer());
-    res.send(buf);
+    // Tipo de contenido
+    res.removeHeader("Content-Type");
+    res.setHeader("Content-Type", r.headers.get("content-type") || "application/octet-stream");
+    res.setHeader("Cache-Control", "no-store");
+    // Stream directo
+    return r.body.pipe(res);
   } catch (e) {
-    res.status(502).json({ error: "asset_proxy_exception", detail: String(e) });
+    res.status(502);
+    res.set("Content-Type", "application/json; charset=utf-8");
+    res.json({ error: "asset_proxy_exception", detail: String(e) });
   }
+});
+
+// Atajos cómodos
+app.get("/api/assets/idle", (req, res) => {
+  req.params.file = "idle_loop.mp4";
+  return app._router.handle(req, res, () => {}, "get", "/api/viewer/assets/:file");
+});
+app.get("/api/assets/talk", (req, res) => {
+  req.params.file = "talk.mp4";
+  return app._router.handle(req, res, () => {}, "get", "/api/viewer/assets/:file");
 });
 
 // ==================== VIEWER PROXY ====================
@@ -466,6 +490,7 @@ app.post("/api/viewer/offer", async (req, res) => {
       method: "POST",
       headers: { "Content-Type": "application/json; charset=utf-8" },
       body: JSON.stringify(payload),
+      agent: INSECURE_AGENT,
     });
 
     if (r.ok) {
@@ -540,6 +565,7 @@ app.post("/api/ingest/start", async (req, res) => {
       method: "POST",
       headers: { "Content-Type": "application/json; charset=utf-8" },
       body: JSON.stringify({ sdp: offer.sdp, type: offer.type }),
+      agent: INSECURE_AGENT,
     });
     if (!r.ok) {
       const detail = await r.text().catch(()=> "");
