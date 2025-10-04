@@ -1,6 +1,6 @@
 // index.js — Backend minimal (sin DB) para Jesús Interactivo
-// Incluye: CORS global, fallback de voz (xtts→google), viewer proxy, ingest, memory sync,
-//           y /api/voice/original para reproducir MP3 originales desde jesus-voz.
+// CORS global, selector de voz fija para XTTS (VOICE_REF), fallback xtts→google,
+// viewer proxy, ingest opcional, memory sync no-op.
 
 require("dotenv").config();
 
@@ -18,17 +18,17 @@ const { spawn } = require("child_process");
 const https = require("https");
 const { Readable } = require("node:stream");
 
-// Agent para hablar con JESUS_URL aun con cert autofirmado (solo backend↔backend)
+// ===== TLS agent (self-signed) para JESUS_URL (backend↔backend) =====
 const INSECURE_AGENT =
   process.env.JESUS_INSECURE_TLS === "1"
     ? new https.Agent({ rejectUnauthorized: false })
     : undefined;
 
-// WebRTC ingest / ffmpeg (opcional)
+// ===== WebRTC ingest / ffmpeg (opcional) =====
 let wrtc = null;
 try { wrtc = require("wrtc"); } catch { console.warn("[WARN] wrtc no instalado; /api/ingest/* desactivado."); }
 const RTCPeerConnection = wrtc?.RTCPeerConnection;
-const RTCAudioSource = wrtc?.nonstandard?.RTCAudioSource;
+const RTCAudioSource   = wrtc?.nonstandard?.RTCAudioSource;
 
 let ffmpegPath = process.env.FFMPEG_PATH || null;
 try { if (!ffmpegPath) ffmpegPath = require("ffmpeg-static"); } catch {}
@@ -36,24 +36,28 @@ if (!ffmpegPath) ffmpegPath = "ffmpeg";
 (function checkFfmpeg() {
   try {
     const ps = spawn(ffmpegPath, ["-version"]);
-    ps.stdout.on("data", (d) => {
-      const first = String(d||"").split("\n")[0] || "";
-      if (first) console.log("[ffmpeg ok]", ffmpegPath, first.trim());
-    });
     ps.on("close", (code) => {
-      if (code !== 0) console.warn("[ffmpeg warn] exit", code, "path:", ffmpegPath);
+      if (code === 0) console.log("[ffmpeg ok]", ffmpegPath);
+      else console.warn("[ffmpeg warn] exit", code, "path:", ffmpegPath);
     });
   } catch (e) { console.error("[ffmpeg missing]", e.message); }
 })();
 
+// ===== Config =====
 const JESUS_URL = (process.env.JESUS_URL || "").trim();
 const VOZ_URL   = (process.env.VOZ_URL   || "").trim();
 if (!JESUS_URL) console.warn("[WARN] Falta JESUS_URL");
 if (!VOZ_URL)   console.warn("[WARN] Falta VOZ_URL");
 
+const TTS_PROVIDER_DEFAULT = (process.env.TTS_PROVIDER || "xtts").trim();
+
+// Voz fija para XTTS (referencia /refs/ del servidor jesus-voz)
+let CURRENT_REF = (process.env.VOICE_REF || "jesus2.mp3").trim(); // ej.: jesus2.mp3
+
+// ===== App =====
 const app = express();
 
-// ===== CORS fuerte para TODO (incluye errores/404) =====
+// ----- CORS global (incluye errores/404/500/OPTIONS) -----
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
@@ -78,13 +82,12 @@ app.use((req, res, next) => {
   next();
 });
 
-// ---------- OpenAI ----------
+// ===== OpenAI =====
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// ---------- Utilidad ----------
+// ===== Utils =====
 const NORM = (s="") => String(s).toLowerCase().replace(/\s+/g," ").trim();
 const publicBase = (req) => process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get("host")}`;
-const TTS_PROVIDER_DEFAULT = (process.env.TTS_PROVIDER || "xtts").trim();
 
 function toQS(obj) {
   const s = new URLSearchParams();
@@ -100,17 +103,14 @@ function mergeQS(a = {}, b = {}) {
 async function pipeUpstream(up, res, fallbackType = "application/octet-stream") {
   res.status(up.status);
   const ct = up.headers.get("content-type");
-  if (ct) res.setHeader("Content-Type", ct);
-  else res.setHeader("Content-Type", fallbackType);
-  const cl = up.headers.get("content-length");
-  if (cl) res.setHeader("Content-Length", cl);
-  const cr = up.headers.get("accept-ranges");
-  if (cr) res.setHeader("Accept-Ranges", cr);
+  if (ct) res.setHeader("Content-Type", ct); else res.setHeader("Content-Type", fallbackType);
+  const cl = up.headers.get("content-length"); if (cl) res.setHeader("Content-Length", cl);
+  const cr = up.headers.get("accept-ranges"); if (cr) res.setHeader("Accept-Ranges", cr);
   if (!up.body) return res.end();
   return Readable.fromWeb(up.body).pipe(res);
 }
 
-// ---------- Health mínimos ----------
+// ===== Health mínimos =====
 app.get("/", (_req, res) => res.json({ ok: true, service: "backend", ts: Date.now() }));
 
 app.get("/api/_diag/viewer_check", async (_req, res) => {
@@ -125,7 +125,7 @@ app.get("/api/_diag/viewer_check", async (_req, res) => {
   }
 });
 
-// ---------- Bienvenida ----------
+// ===== Bienvenida =====
 function greetingByHour(lang="es", hour=null) {
   const h = Number.isInteger(hour) ? hour : new Date().getHours();
   const g = (m,a,n)=> (h<12?m:h<19?a:n);
@@ -162,10 +162,10 @@ app.post("/api/welcome", (req,res)=>{
   }
 });
 
-// ---------- /api/ask ----------
+// ===== /api/ask =====
 app.post("/api/ask", async (req,res)=>{
   try{
-    const { message="", history=[], userId="anon", lang="es" } = req.body||{};
+    const { message="", history=[], lang="es" } = req.body||{};
     const SYS = `
 Eres cercano, claro y compasivo, desde una voz cristiana (católica).
 Responde en ${lang}. Devuelve SOLO JSON: {"message":"...", "question":"...","bible":{"text":"...","ref":"Libro 0:0"}}`.trim();
@@ -211,30 +211,61 @@ Responde en ${lang}. Devuelve SOLO JSON: {"message":"...", "question":"...","bib
   }
 });
 
-// ==================== VOZ (con fallback xtts→google) ====================
+// ====== VOZ (selector XTTS ref + fallback a google) ======
 
+// estado actual
+app.get("/api/voice/current", (_req,res)=>{
+  res.json({ ok:true, provider_default: TTS_PROVIDER_DEFAULT, fixed_ref: CURRENT_REF });
+});
+
+// set ref por POST
+app.post("/api/voice/set_ref", async (req,res)=>{
+  try{
+    const name = String(req.body?.name || "").trim();
+    if (!name) return res.status(400).json({ ok:false, error:"missing_name" });
+    if (!/^[a-zA-Z0-9_.-]+$/.test(name)) return res.status(400).json({ ok:false, error:"bad_name" });
+    CURRENT_REF = name;
+    res.json({ ok:true, fixed_ref: CURRENT_REF });
+  } catch(e){
+    res.status(500).json({ ok:false, error:String(e) });
+  }
+});
+
+// set ref por query (cómodo para probar rápido)
+app.get("/api/voice/use_ref", (req,res)=>{
+  const name = String(req.query?.name || "").trim();
+  if (!name) return res.status(400).json({ ok:false, error:"missing_name" });
+  if (!/^[a-zA-Z0-9_.-]+$/.test(name)) return res.status(400).json({ ok:false, error:"bad_name" });
+  CURRENT_REF = name;
+  res.json({ ok:true, fixed_ref: CURRENT_REF });
+});
+
+// health del proxy de voz
 app.get("/api/health", async (_req,res)=>{
   try{
     if (!VOZ_URL) return res.status(500).json({ ok:false, error:"missing_VOZ_URL" });
     const r = await fetch(`${VOZ_URL}/health`);
     const j = await r.json().catch(()=> ({}));
-    res.json({ ok:true, proxy:"railway", voz_url:VOZ_URL, provider_default:TTS_PROVIDER_DEFAULT, upstream:j });
+    res.json({ ok:true, proxy:"railway", voz_url:VOZ_URL, provider_default:TTS_PROVIDER_DEFAULT, fixed_ref: CURRENT_REF, upstream:j });
   }catch(e){ res.status(500).json({ ok:false, error:String(e) }); }
 });
 
-// Diagnóstico simple que genera un wav y mide tiempo
+// diagnóstico rápido
 app.get("/api/voice/diag", async (req,res)=>{
   try{
     if (!VOZ_URL) return res.status(500).json({ ok:false, error:"missing_VOZ_URL" });
     const text = req.query.text || "ping de prueba";
+    const base = { text, lang:"es", provider: TTS_PROVIDER_DEFAULT||"xtts", rate:"1.0", temp:"0.6", fx:"0" };
+    if ((base.provider||"").toLowerCase()==="xtts" && CURRENT_REF) base.ref = CURRENT_REF;
+
     const url = new URL("/tts_save", VOZ_URL);
-    url.search = new URLSearchParams({ text, lang:"es", provider:TTS_PROVIDER_DEFAULT||"xtts", rate:"1.0", temp:"0.6", fx:"0" }).toString();
+    url.search = toQS(base);
     const t0 = Date.now();
     const up = await fetch(url.toString());
     const ms = Date.now()-t0;
     const body = await up.text().catch(()=> "");
     let j = {}; try{ j = JSON.parse(body); }catch{ j = { raw: body } }
-    // Reescribimos URL pública si corresponde
+
     const upstream = j.url || j.file || j.path;
     if (upstream) {
       try {
@@ -242,37 +273,13 @@ app.get("/api/voice/diag", async (req,res)=>{
         j.url = `${publicBase(req)}/api/files/${encodeURIComponent(name)}`;
       } catch {}
     }
-    res.json({ ok: up.ok, upstream_status: up.status, ms, data: j });
+    res.json({ ok: up.ok, upstream_status: up.status, ms, data: j, fixed_ref: CURRENT_REF });
   } catch(e) {
     res.status(500).json({ ok:false, error:String(e) });
   }
 });
 
-// === MP3 originales (proxy de /refs del servidor jesus-voz) ===
-app.get("/api/voice/original", async (req, res) => {
-  try {
-    if (!VOZ_URL) return res.status(500).json({ ok:false, error:"missing_VOZ_URL" });
-    const name = String(req.query.name || "").trim(); // ej: jesus1.mp3
-    if (!name || !/^[a-z0-9._-]+$/i.test(name)) {
-      return res.status(400).json({ ok:false, error:"bad_name" });
-    }
-    const up = await fetch(`${VOZ_URL}/refs/${encodeURIComponent(name)}`);
-    if (!up.ok) {
-      const body = await up.text().catch(()=> "");
-      return res.status(up.status||404)
-        .set("Content-Type","application/json; charset=utf-8")
-        .send(body || JSON.stringify({ ok:false, error:"not_found" }));
-    }
-    res.removeHeader("Content-Type");
-    res.setHeader("Content-Type", up.headers.get("content-type") || "audio/mpeg");
-    // CORS ya está globalmente en *
-    return Readable.fromWeb(up.body).pipe(res);
-  } catch (e) {
-    res.status(500).json({ ok:false, error:String(e) });
-  }
-});
-
-// --- helpers de fallback ---
+// helper: intenta xtts (con ref) y si falla cae a google
 async function fetchTTSWithFallback(endpointPath, baseParams) {
   const providers = [
     String(baseParams.provider || TTS_PROVIDER_DEFAULT || "xtts"),
@@ -284,11 +291,17 @@ async function fetchTTSWithFallback(endpointPath, baseParams) {
   for (const provider of providers) {
     const url = new URL(endpointPath, VOZ_URL);
     const params = { ...baseParams, provider };
+    // si es xtts y hay ref, la pasamos
+    if (provider.toLowerCase() === "xtts" && CURRENT_REF) {
+      params.ref = CURRENT_REF;
+    } else {
+      delete params.ref;
+    }
     url.search = toQS(params);
     const up = await fetch(url.toString());
     const txt = await up.text().catch(()=> "");
     if (up.ok) {
-      return { ok:true, provider, status: up.status, body: txt };
+      return { ok:true, provider, status: up.status, body: txt, response: up };
     }
     last = { status: up.status||0, text: txt };
   }
@@ -300,7 +313,6 @@ async function fetchTTSWithFallback(endpointPath, baseParams) {
 app.get("/api/tts", async (req,res)=>{
   try{
     if (!VOZ_URL) return res.status(500).json({ ok:false, error:"missing_VOZ_URL" });
-
     const baseParams = {
       text: req.query.text || "Hola",
       lang: req.query.lang || "es",
@@ -314,10 +326,12 @@ app.get("/api/tts", async (req,res)=>{
       provider: req.query.provider || TTS_PROVIDER_DEFAULT
     };
 
-    // Intento 1: xtts (o default); si falla, google
+    // intento 1: xtts (con ref) → si falla: google
     for (const prov of [baseParams.provider, "google"].filter(Boolean)) {
       const url = new URL("/tts", VOZ_URL);
-      url.search = mergeQS(baseParams, { provider: prov });
+      const params = { ...baseParams, provider: prov };
+      if (prov.toLowerCase()==="xtts" && CURRENT_REF) params.ref = CURRENT_REF; else delete params.ref;
+      url.search = toQS(params);
       const up = await fetch(url.toString());
       if (up.ok) {
         res.removeHeader("Content-Type");
@@ -325,9 +339,8 @@ app.get("/api/tts", async (req,res)=>{
       }
     }
 
-    // Si ambos fallan, devolvemos detalle del último intento
-    const fallback = await fetchTTSWithFallback("/tts", baseParams);
-    return res.status(500).json({ ok:false, upstream_status:fallback.status, detail:fallback.detail||"tts upstream failed" });
+    const fb = await fetchTTSWithFallback("/tts", baseParams);
+    return res.status(500).json({ ok:false, upstream_status:fb.status, detail:fb.detail||"tts upstream failed" });
   }catch(e){
     res.status(500).json({ ok:false, error:String(e) });
   }
@@ -351,14 +364,12 @@ app.get("/api/tts_save", async (req,res)=>{
       provider: req.query.provider || TTS_PROVIDER_DEFAULT
     };
 
-    // Fallback automático xtts → google
     const resp = await fetchTTSWithFallback("/tts_save", baseParams);
     if (!resp.ok) {
       return res.status(500).json({ ok:false, upstream_status:resp.status, detail:resp.detail||"tts_save upstream failed" });
     }
 
     let j = {}; try { j = JSON.parse(resp.body); } catch { j = { raw: resp.body }; }
-
     const upstream = j.url || j.file || j.path;
     if (upstream) {
       try {
@@ -367,7 +378,6 @@ app.get("/api/tts_save", async (req,res)=>{
         j.url = j.file = j.path = pub;
       } catch {}
     }
-
     res.json(j);
   }catch(e){
     res.status(500).json({ ok:false, error:String(e) });
@@ -378,7 +388,9 @@ app.get("/api/tts_save", async (req,res)=>{
 app.get("/api/files/:name", async (req,res)=>{
   try{
     if (!VOZ_URL) return res.status(500).json({ ok:false, error:"missing_VOZ_URL" });
-    const up = await fetch(`${VOZ_URL}/files/${encodeURIComponent(req.params.name)}`);
+    const name = String(req.params.name||"").trim();
+    if (!/^[a-zA-Z0-9_.-]+$/.test(name)) return res.status(400).json({ ok:false, error:"bad_name" });
+    const up = await fetch(`${VOZ_URL}/files/${encodeURIComponent(name)}`);
     res.removeHeader("Content-Type");
     await pipeUpstream(up, res, "audio/wav");
   }catch(e){
@@ -386,7 +398,7 @@ app.get("/api/files/:name", async (req,res)=>{
   }
 });
 
-// POST JSON → WAV (útil para frontend, evita URLs largas)
+// POST JSON → WAV (corto)
 app.post("/api/tts_from_json", async (req,res)=>{
   try{
     if (!VOZ_URL) return res.status(500).json({ ok:false, error:"missing_VOZ_URL" });
@@ -416,13 +428,13 @@ app.post("/api/tts_from_json", async (req,res)=>{
         pub = `${publicBase(req)}/api/files/${encodeURIComponent(name)}`;
       } catch {}
     }
-    res.json({ ok:true, url: pub, file: pub, tts: j });
+    res.json({ ok:true, url: pub, file: pub, tts: j, fixed_ref: CURRENT_REF });
   }catch(e){
     res.status(500).json({ ok:false, error:String(e) });
   }
 });
 
-// ==================== Viewer assets/proxy ====================
+// ===== Viewer assets/proxy =====
 app.get("/api/viewer/assets/:file", async (req,res)=>{
   try{
     if (!JESUS_URL) return res.status(500).json({ error:"missing_JESUS_URL" });
@@ -443,7 +455,7 @@ app.get("/api/viewer/assets/:file", async (req,res)=>{
 app.get("/api/assets/idle",(req,res)=>{ req.params.file="idle_loop.mp4"; app._router.handle(req,res,()=>{},"get","/api/viewer/assets/:file"); });
 app.get("/api/assets/talk",(req,res)=>{ req.params.file="talk.mp4"; app._router.handle(req,res,()=>{},"get","/api/viewer/assets/:file"); });
 
-// ==================== Viewer offer ====================
+// ===== Viewer offer =====
 app.post("/api/viewer/offer", async (req,res)=>{
   try{
     if (!JESUS_URL) return res.status(500).json({ error:"missing_JESUS_URL" });
@@ -463,7 +475,7 @@ app.post("/api/viewer/offer", async (req,res)=>{
 });
 app.get("/api/viewer/offer", (_req,res)=> res.status(405).json({ ok:false, error:"use_POST_here" }));
 
-// ==================== Ingest (opcional) ====================
+// ===== Ingest (opcional) =====
 const sessions = new Map();
 function chunkPCM(buf, chunkBytes=1920){ const out=[]; for(let i=0;i+chunkBytes<=buf.length;i+=chunkBytes) out.push(buf.slice(i,i+chunkBytes)); return out; }
 
@@ -522,9 +534,9 @@ app.post("/api/ingest/stop", async (req,res)=>{
   res.json({ ok:true });
 });
 
-// ---------- Memory sync no-op (evita 404) ----------
+// ===== Memory sync no-op =====
 app.post("/api/memory/sync", (_req,res)=> res.json({ ok:true }));
 
-// ---------- Arranque ----------
+// ===== Arranque =====
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
+app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT} | VOICE_REF=${CURRENT_REF}`));
