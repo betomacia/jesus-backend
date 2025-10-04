@@ -1,7 +1,7 @@
 // index.js — Backend minimal (sin DB) para Jesús Interactivo
 // - OpenAI: /api/welcome y /api/ask
-// - Voz (jesus-voz): /api/tts, /api/tts_save, /api/tts_from_json (proxy HTTPS a VM)
-// - Ingest (stub si no hay wrtc): /api/ingest/start, /api/ingest/stop
+// - Voz (jesus-voz): /api/tts, /api/tts_save y /api/files/* (proxy HTTPS)
+// - Ingest directo: /api/ingest/start, /api/ingest/stop
 // - Viewer proxy + assets proxy: /api/viewer/offer y /api/viewer/assets/* (+ /api/assets/idle|talk)
 // - Diag: /api/_diag/viewer_check
 // - Health: "/"
@@ -34,7 +34,7 @@ let wrtc = null;
 try {
   wrtc = require("wrtc");
 } catch (e) {
-  console.warn("[WARN] wrtc no instalado; /api/ingest/* corre en modo stub (200 sin P2P).");
+  console.warn("[WARN] wrtc no instalado; /api/ingest/* se desactiva. Instala 'wrtc' si vas a hacer ingest desde este backend.");
 }
 const RTCPeerConnection = wrtc?.RTCPeerConnection;
 const RTCAudioSource = wrtc?.nonstandard?.RTCAudioSource;
@@ -62,44 +62,10 @@ if (!ffmpegPath) ffmpegPath = "ffmpeg"; // fallback
 
 // URLs de servicios
 const JESUS_URL = (process.env.JESUS_URL || "").trim(); // ej: "https://35.202.38.210:8443"
-const VOZ_URL   = (process.env.VOZ_URL   || "").trim(); // ej: "https://<tunnel>.trycloudflare.com"
+const VOZ_URL   = (process.env.VOZ_URL   || "").trim(); // ej: "http://<IP-jesus-voz>:8000"
 if (!JESUS_URL) console.warn("[WARN] Falta JESUS_URL]");
 if (!VOZ_URL)   console.warn("[WARN] Falta VOZ_URL]");
 
-// ====== Ajuste de velocidad global del TTS ======
-const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
-const RATE_MULT = clamp(parseFloat(process.env.TTS_RATE_MULT || "1.10"), 0.5, 2.0); // +10% por defecto
-const RATE_BASE = (() => {
-  const r = parseFloat(process.env.TTS_RATE_BASE || "");
-  return Number.isFinite(r) ? clamp(r, 0.25, 2.0) : null;
-})();
-const boostRate = (val) => {
-  let r = parseFloat(val);
-  if (!Number.isFinite(r)) r = RATE_BASE ?? 1.0;
-  return clamp(r * RATE_MULT, 0.25, 2.0);
-};
-
-// Helpers de QS
-const toQS = (obj) => {
-  const s = new URLSearchParams();
-  for (const [k, v] of Object.entries(obj || {})) {
-    if (v !== undefined && v !== null && v !== "") s.append(k, String(v));
-  }
-  return s.toString();
-};
-const mergeQSBoost = (a = {}, b = {}) => {
-  const s = new URLSearchParams();
-  for (const [k, v] of Object.entries(a)) if (v !== undefined && v !== null) s.append(k, String(v));
-  for (const [k, v] of Object.entries(b)) if (v !== undefined && v !== null) s.set(k, String(v));
-  // boost de rate
-  const hasRate = s.has("rate");
-  if (hasRate) s.set("rate", String(boostRate(s.get("rate"))));
-  else if (RATE_BASE !== null) s.set("rate", String(boostRate(RATE_BASE)));
-  return s.toString();
-};
-const publicBase = (req) => process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get("host")}`;
-
-// App
 const app = express();
 app.use(cors({ origin: true }));
 app.use(bodyParser.json());
@@ -111,8 +77,7 @@ app.use((req, res, next) => {
     p.startsWith("/api/viewer/assets") ||
     p.startsWith("/api/assets/") ||
     p.startsWith("/api/files/") ||
-    p.startsWith("/api/tts") ||
-    p.startsWith("/api/voices")
+    p.startsWith("/api/tts")
   ) return next();
   res.set("Content-Type", "application/json; charset=utf-8");
   next();
@@ -217,7 +182,7 @@ const FALLBACK_VERSES = {
   ],
   it: [
     { ref: "Salmo 34:18", text: "Il Signore è vicino a chi ha il cuore spezzato; egli salva gli spiriti affranti." },
-    { ref: "Isaia 41:10", text: "Non temere, perché io sono con te; non smarrirti, perché io sei il tuo Dio." },
+    { ref: "Isaia 41:10", text: "Non temere, perché io sono con te; non smarrirti, perché io sono il tuo Dio." },
   ],
   de: [
     { ref: "Psalm 34:18", text: "Der HERR ist nahe denen, die zerbrochenen Herzens sind." },
@@ -453,24 +418,23 @@ No incluyas nada fuera del JSON.
     const refRaw = String(data?.bible?.ref || "").trim();
     const txtRaw = String(data?.bible?.text || "").trim();
 
-    const used = new Set((await readMem(userId)).last_refs || []);
+    const used = new Set((mem.last_refs || []).map((x) => NORM(x)));
     let finalVerse = null;
 
     if (txtRaw && refRaw && !banned.test(refRaw) && !used.has(NORM(refRaw))) {
       finalVerse = { ref: refRaw, text: txtRaw };
     } else {
-      finalVerse = pickFallbackVerse(lang, new Set([...used].map(NORM)));
+      finalVerse = pickFallbackVerse(lang, used);
     }
 
     out.bible = finalVerse;
-    const mem2 = await readMem(userId);
-    mem2.last_refs = [...(mem2.last_refs || []), finalVerse.ref].slice(-8);
+    mem.last_refs = [...(mem.last_refs || []), finalVerse.ref].slice(-8);
 
     // Persistimos
-    mem2.last_user_text = userTxt;
-    mem2.last_user_ts = Date.now();
-    mem2.last_bot = out;
-    await writeMem(userId, mem2);
+    mem.last_user_text = userTxt;
+    mem.last_user_ts = now;
+    mem.last_bot = out;
+    await writeMem(userId, mem);
 
     res.json(out);
   } catch (e) {
@@ -486,7 +450,29 @@ No incluyas nada fuera del JSON.
 // ==================== PROXY DE VOZ — jesus-voz (VM) ====================
 
 const TTS_PROVIDER_DEFAULT = (process.env.TTS_PROVIDER || "xtts").trim();
+const TTS_RATE_BUMP = parseFloat(process.env.TTS_RATE_BUMP || "1"); // ej: 1.05 para +5% global
+const publicBase = (req) => process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get("host")}`;
 
+const mergeQS = (a = {}, b = {}) => {
+  const s = new URLSearchParams();
+  for (const [k, v] of Object.entries(a)) if (v !== undefined) s.append(k, String(v));
+  for (const [k, v] of Object.entries(b)) if (v !== undefined) s.set(k, String(v));
+  return s;
+};
+function applyRateBump(searchParams) {
+  try {
+    if (!TTS_RATE_BUMP || isNaN(TTS_RATE_BUMP) || TTS_RATE_BUMP === 1) return searchParams;
+    const s = new URLSearchParams(searchParams);
+    const r = parseFloat(s.get("rate") || "1");
+    if (!isNaN(r)) {
+      const out = Math.max(0.25, Math.min(2.0, r * TTS_RATE_BUMP));
+      s.set("rate", String(out));
+    }
+    return s;
+  } catch {
+    return searchParams;
+  }
+}
 async function pipeUpstream(up, res, fallbackType = "application/octet-stream") {
   res.status(up.status);
   const ct = up.headers.get("content-type");
@@ -504,21 +490,7 @@ app.get("/api/health", async (req, res) => {
     if (!VOZ_URL) return res.status(500).json({ ok: false, error: "missing_VOZ_URL" });
     const r = await fetch(`${VOZ_URL}/health`);
     const j = await r.json().catch(() => ({}));
-    res.json({ ok: true, proxy: "railway", voz_url: VOZ_URL, rate_mult: RATE_MULT, upstream: j });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e) });
-  }
-});
-
-// Listado de voces (passthrough)
-app.get("/api/voices", async (req, res) => {
-  try {
-    if (!VOZ_URL) return res.status(500).json({ ok: false, error: "missing_VOZ_URL" });
-    const url = new URL("/voices", VOZ_URL);
-    url.search = mergeQSBoost(req.query, {});
-    const up = await fetch(url.toString());
-    const j = await up.json();
-    res.json(j);
+    res.json({ ok: true, proxy: "railway", voz_url: VOZ_URL, provider_default: TTS_PROVIDER_DEFAULT, upstream: j });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e) });
   }
@@ -529,7 +501,8 @@ app.get("/api/tts", async (req, res) => {
   try {
     if (!VOZ_URL) return res.status(500).json({ ok: false, error: "missing_VOZ_URL" });
     const url = new URL("/tts", VOZ_URL);
-    url.search = mergeQSBoost(req.query, { provider: TTS_PROVIDER_DEFAULT });
+    const q = mergeQS(req.query, { provider: TTS_PROVIDER_DEFAULT });
+    url.search = applyRateBump(q).toString();
     const up = await fetch(url.toString());
     res.removeHeader("Content-Type");
     await pipeUpstream(up, res, "audio/wav");
@@ -543,7 +516,8 @@ app.get("/api/tts_save", async (req, res) => {
   try {
     if (!VOZ_URL) return res.status(500).json({ ok: false, error: "missing_VOZ_URL" });
     const url = new URL("/tts_save", VOZ_URL);
-    url.search = mergeQSBoost(req.query, { provider: TTS_PROVIDER_DEFAULT });
+    const q = mergeQS(req.query, { provider: TTS_PROVIDER_DEFAULT });
+    url.search = applyRateBump(q).toString();
     const up = await fetch(url.toString());
     const j = await up.json();
 
@@ -572,51 +546,7 @@ app.get("/api/files/:name", async (req, res) => {
   }
 });
 
-// Acepta tu JSON { text, lang, rate, temp, source, fx:{...} } y devuelve WAV proxificado (con rate boost)
-app.post("/api/tts_from_json", async (req, res) => {
-  try {
-    if (!VOZ_URL) return res.status(500).json({ ok: false, error: "missing_VOZ_URL" });
-    const b = req.body || {};
-    const fx = b.fx || {};
-    const provider = (b.provider || (String(b.source || "").toLowerCase().startsWith("xtts") ? "xtts" : TTS_PROVIDER_DEFAULT));
-    const rateFinal = boostRate(b.rate ?? RATE_BASE ?? 1.0);
-    const params = {
-      text: b.text || "Hola",
-      lang: b.lang || "es",
-      rate: rateFinal,
-      temp: b.temp ?? "0.6",
-      provider,
-      fx: fx.fx ? 1 : fx.enable ? 1 : 0,
-      hpf: fx.hpf,
-      lpf: fx.lpf,
-      warm_db: fx.warm_db,
-      air_db: fx.air_db,
-      presence_db: fx.presence_db,
-      reverb_wet: fx.reverb_wet,
-      reverb_delay: fx.reverb_delay,
-      reverb_tail: fx.reverb_tail,
-      comp: fx.comp,
-      width_ms: fx.width_ms,
-      pitch_st: fx.pitch_st,
-      gain_db: fx.gain_db
-    };
-    const url = new URL("/tts_save", VOZ_URL);
-    url.search = toQS(params);
-    const up = await fetch(url.toString());
-    const j = await up.json();
-
-    const upstream = j.url || j.file || j.path;
-    let name = null;
-    try { name = new URL(upstream).pathname.split("/").pop(); } catch {}
-    const pub = name ? `${publicBase(req)}/api/files/${encodeURIComponent(name)}` : upstream;
-
-    res.json({ ok: true, url: pub, file: pub, tts: j, rate_applied: rateFinal });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e) });
-  }
-});
-
-// ==================== PROXY DE ASSETS DEL VIEWER ====================
+// ==================== VIEWER: assets proxy ====================
 app.get("/api/viewer/assets/:file", async (req, res) => {
   try {
     if (!JESUS_URL) return res.status(500).json({ error: "missing_JESUS_URL" });
@@ -631,16 +561,13 @@ app.get("/api/viewer/assets/:file", async (req, res) => {
     res.removeHeader("Content-Type");
     res.setHeader("Content-Type", r.headers.get("content-type") || "application/octet-stream");
     res.setHeader("Cache-Control", "no-store");
-    const nodeStream = Readable.fromWeb(r.body);
-    return nodeStream.pipe(res);
+    return Readable.fromWeb(r.body).pipe(res);
   } catch (e) {
     res.status(502);
     res.set("Content-Type", "application/json; charset=utf-8");
     res.json({ error: "asset_proxy_exception", detail: String(e) });
   }
 });
-
-// Atajos cómodos
 app.get("/api/assets/idle", (req, res) => {
   req.params.file = "idle_loop.mp4";
   return app._router.handle(req, res, () => {}, "get", "/api/viewer/assets/:file");
@@ -697,12 +624,11 @@ app.post("/api/viewer/offer", async (req, res) => {
     });
   }
 });
-
 app.get("/api/viewer/offer", (_req, res) =>
   res.status(405).json({ ok: false, error: "use_POST_here" })
 );
 
-// ==================== WebRTC ingest (con stub) ====================
+// ---------- WebRTC ingest (audio → jesus-interactivo) ----------
 const sessions = new Map(); // id -> { pc, source, ff, track }
 
 function chunkPCM(buf, chunkBytes = 1920) {
@@ -711,34 +637,10 @@ function chunkPCM(buf, chunkBytes = 1920) {
   return chunks;
 }
 
-// Helper: generar TTS desde texto y devolver URL proxificada
-async function genTtsUrlFromTextViaSelf(req, payload) {
-  const resp = await fetch(`${publicBase(req)}/api/tts_from_json`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json; charset=utf-8" },
-    body: JSON.stringify(payload || {}),
-  });
-  const j = await resp.json().catch(()=> ({}));
-  return j?.url || j?.file || null;
-}
-
-// POST /api/ingest/start  { ttsUrl?: "https://...", text?: "..." , lang?: "es", rate?, temp?, fx? }
 app.post("/api/ingest/start", async (req, res) => {
-  // ======= STUB (Railway sin wrtc) =======
   if (!RTCPeerConnection || !RTCAudioSource) {
-    try {
-      const { ttsUrl, text, lang = "es", rate, temp, fx, source, provider } = req.body || {};
-      let finalUrl = ttsUrl || null;
-      if (!finalUrl && text) {
-        finalUrl = await genTtsUrlFromTextViaSelf(req, { text, lang, rate, temp, fx, source, provider });
-      }
-      return res.json({ ok: true, id: null, ttsUrl: finalUrl || null, note: "ingest_disabled" });
-    } catch {
-      return res.json({ ok: true, id: null, ttsUrl: null, note: "ingest_disabled" });
-    }
+    return res.status(501).json({ error: "wrtc_not_available" });
   }
-
-  // ======= IMPLEMENTACIÓN REAL (si hay wrtc y jesus-interactivo soporta ingest) =======
   try {
     const { ttsUrl } = req.body || {};
     if (!ttsUrl) return res.status(400).json({ error: "missing_ttsUrl" });
@@ -765,7 +667,6 @@ app.post("/api/ingest/start", async (req, res) => {
     const answer = await r.json();
     await pc.setRemoteDescription(answer);
 
-    // ffmpeg lee el audio (mp3/wav/ogg) y lo pasa a PCM mono 48kHz
     const ff = spawn(ffmpegPath, [
       "-re", "-i", ttsUrl,
       "-f", "s16le", "-acodec", "pcm_s16le",
@@ -806,7 +707,6 @@ app.post("/api/ingest/start", async (req, res) => {
   }
 });
 
-// POST /api/ingest/stop { id }
 app.post("/api/ingest/stop", async (req, res) => {
   const { id } = req.body || {};
   const s = id ? sessions.get(id) : null;
@@ -820,4 +720,4 @@ app.post("/api/ingest/stop", async (req, res) => {
 
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT} — TTS_RATE_MULT=${RATE_MULT}`));
+app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
