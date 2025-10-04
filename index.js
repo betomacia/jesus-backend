@@ -1,5 +1,6 @@
 // index.js — Backend minimal (sin DB) para Jesús Interactivo
-// Incluye: CORS global, fallback de voz (xtts→google), viewer proxy, ingest, memory sync.
+// Incluye: CORS global, fallback de voz (xtts→google), viewer proxy, ingest, memory sync,
+//           y /api/voice/original para reproducir MP3 originales desde jesus-voz.
 
 require("dotenv").config();
 
@@ -17,6 +18,7 @@ const { spawn } = require("child_process");
 const https = require("https");
 const { Readable } = require("node:stream");
 
+// Agent para hablar con JESUS_URL aun con cert autofirmado (solo backend↔backend)
 const INSECURE_AGENT =
   process.env.JESUS_INSECURE_TLS === "1"
     ? new https.Agent({ rejectUnauthorized: false })
@@ -34,9 +36,12 @@ if (!ffmpegPath) ffmpegPath = "ffmpeg";
 (function checkFfmpeg() {
   try {
     const ps = spawn(ffmpegPath, ["-version"]);
+    ps.stdout.on("data", (d) => {
+      const first = String(d||"").split("\n")[0] || "";
+      if (first) console.log("[ffmpeg ok]", ffmpegPath, first.trim());
+    });
     ps.on("close", (code) => {
-      if (code === 0) console.log("[ffmpeg ok]", ffmpegPath);
-      else console.warn("[ffmpeg warn] exit", code, "path:", ffmpegPath);
+      if (code !== 0) console.warn("[ffmpeg warn] exit", code, "path:", ffmpegPath);
     });
   } catch (e) { console.error("[ffmpeg missing]", e.message); }
 })();
@@ -54,7 +59,6 @@ app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
-  res.setHeader("Timing-Allow-Origin", "*");
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
 });
@@ -244,8 +248,32 @@ app.get("/api/voice/diag", async (req,res)=>{
   }
 });
 
+// === MP3 originales (proxy de /refs del servidor jesus-voz) ===
+app.get("/api/voice/original", async (req, res) => {
+  try {
+    if (!VOZ_URL) return res.status(500).json({ ok:false, error:"missing_VOZ_URL" });
+    const name = String(req.query.name || "").trim(); // ej: jesus1.mp3
+    if (!name || !/^[a-z0-9._-]+$/i.test(name)) {
+      return res.status(400).json({ ok:false, error:"bad_name" });
+    }
+    const up = await fetch(`${VOZ_URL}/refs/${encodeURIComponent(name)}`);
+    if (!up.ok) {
+      const body = await up.text().catch(()=> "");
+      return res.status(up.status||404)
+        .set("Content-Type","application/json; charset=utf-8")
+        .send(body || JSON.stringify({ ok:false, error:"not_found" }));
+    }
+    res.removeHeader("Content-Type");
+    res.setHeader("Content-Type", up.headers.get("content-type") || "audio/mpeg");
+    // CORS ya está globalmente en *
+    return Readable.fromWeb(up.body).pipe(res);
+  } catch (e) {
+    res.status(500).json({ ok:false, error:String(e) });
+  }
+});
+
 // --- helpers de fallback ---
-async function fetchTTSWithFallback(endpointPath, baseParams, expectJson=false) {
+async function fetchTTSWithFallback(endpointPath, baseParams) {
   const providers = [
     String(baseParams.provider || TTS_PROVIDER_DEFAULT || "xtts"),
     "google"
@@ -298,7 +326,7 @@ app.get("/api/tts", async (req,res)=>{
     }
 
     // Si ambos fallan, devolvemos detalle del último intento
-    const fallback = await fetchTTSWithFallback("/tts", baseParams, false);
+    const fallback = await fetchTTSWithFallback("/tts", baseParams);
     return res.status(500).json({ ok:false, upstream_status:fallback.status, detail:fallback.detail||"tts upstream failed" });
   }catch(e){
     res.status(500).json({ ok:false, error:String(e) });
@@ -324,7 +352,7 @@ app.get("/api/tts_save", async (req,res)=>{
     };
 
     // Fallback automático xtts → google
-    const resp = await fetchTTSWithFallback("/tts_save", baseParams, true);
+    const resp = await fetchTTSWithFallback("/tts_save", baseParams);
     if (!resp.ok) {
       return res.status(500).json({ ok:false, upstream_status:resp.status, detail:resp.detail||"tts_save upstream failed" });
     }
@@ -376,7 +404,7 @@ app.post("/api/tts_from_json", async (req,res)=>{
       provider: b.provider || (String(b.source||"").startsWith("xtts") ? "xtts" : TTS_PROVIDER_DEFAULT)
     };
 
-    const resp = await fetchTTSWithFallback("/tts_save", baseParams, true);
+    const resp = await fetchTTSWithFallback("/tts_save", baseParams);
     if (!resp.ok) return res.status(500).json({ ok:false, upstream_status:resp.status, detail:resp.detail||"tts_save upstream failed" });
 
     let j = {}; try { j = JSON.parse(resp.body); } catch { j = { raw: resp.body }; }
