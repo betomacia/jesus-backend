@@ -1,13 +1,15 @@
 // index.js — Backend minimal (sin DB) para Jesús Interactivo
 // - OpenAI: /api/welcome y /api/ask
-// - Voz (jesus-voz): /api/tts y /api/tts_save (proxy HTTPS) + /api/files/*
+// - Voz (jesus-voz): /api/tts, /api/tts_save, /api/files/:name, /api/voice/diag
 // - Ingest directo: /api/ingest/start, /api/ingest/stop
 // - Viewer proxy + assets proxy: /api/viewer/offer y /api/viewer/assets/* (+ /api/assets/idle|talk)
+// - Memoria: /api/memory/sync
 // - Diag: /api/_diag/viewer_check
-// - Health: "/"
+// - Health: "/" y /api/health
 
 require("dotenv").config();
 
+// ===== TLS: permitir self-signed si JESUS_INSECURE_TLS=1 (clave para Railway → 8443) =====
 if (process.env.JESUS_INSECURE_TLS === "1") {
   process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 }
@@ -22,7 +24,7 @@ const { spawn } = require("child_process");
 const https = require("https");
 const { Readable } = require("node:stream");
 
-// ---- TLS agent para self-signed (backend↔backend)
+// Agent para hablar con JESUS_URL aun con cert autofirmado (solo backend↔backend)
 const INSECURE_AGENT =
   process.env.JESUS_INSECURE_TLS === "1"
     ? new https.Agent({ rejectUnauthorized: false })
@@ -30,14 +32,20 @@ const INSECURE_AGENT =
 
 // ---- WebRTC ingest y FFmpeg ----
 let wrtc = null;
-try { wrtc = require("wrtc"); } catch (_) { console.warn("[WARN] wrtc no instalado; /api/ingest/* desactivado."); }
+try {
+  wrtc = require("wrtc");
+} catch (e) {
+  console.warn("[WARN] wrtc no instalado; /api/ingest/* se desactiva. Instala 'wrtc' si vas a hacer ingest desde este backend.");
+}
 const RTCPeerConnection = wrtc?.RTCPeerConnection;
 const RTCAudioSource = wrtc?.nonstandard?.RTCAudioSource;
 
+// FFmpeg: env > ffmpeg-static > binario del sistema
 let ffmpegPath = process.env.FFMPEG_PATH || null;
 try { if (!ffmpegPath) ffmpegPath = require("ffmpeg-static"); } catch (_) {}
-if (!ffmpegPath) ffmpegPath = "ffmpeg";
+if (!ffmpegPath) ffmpegPath = "ffmpeg"; // fallback
 
+// Log rápido de ffmpeg en runtime
 (function checkFfmpeg() {
   try {
     const ps = spawn(ffmpegPath, ["-version"]);
@@ -48,42 +56,34 @@ if (!ffmpegPath) ffmpegPath = "ffmpeg";
       else console.warn("[ffmpeg warn] exit", code, "path:", ffmpegPath);
     });
     ps.on("error", (e) => console.error("[ffmpeg error]", e.message));
-  } catch (e) { console.error("[ffmpeg missing]", e.message); }
+  } catch (e) {
+    console.error("[ffmpeg missing]", e.message);
+  }
 })();
 
 // URLs de servicios
 const JESUS_URL = (process.env.JESUS_URL || "").trim(); // ej: "https://35.202.38.210:8443"
-const VOZ_URL   = (process.env.VOZ_URL   || "").trim(); // ej: "https://administration-health-...trycloudflare.com"
-if (!JESUS_URL) console.warn("[WARN] Falta JESUS_URL");
-if (!VOZ_URL)   console.warn("[WARN] Falta VOZ_URL");
+const VOZ_URL   = (process.env.VOZ_URL   || "").trim(); // ej: "http://34.46.235.163:8000"
+if (!JESUS_URL) console.warn("[WARN] Falta JESUS_URL]");
+if (!VOZ_URL)   console.warn("[WARN] Falta VOZ_URL]");
 
 const app = express();
-app.set("trust proxy", 1);
 
-// ---------- CORS ROBUSTO (preflight + headers en todo) ----------
-const corsOptions = {
-  origin: true,
-  credentials: false,
-  methods: ["GET","HEAD","PUT","PATCH","POST","DELETE","OPTIONS"],
-  allowedHeaders: ["Content-Type","Authorization","Range"],
-  exposedHeaders: ["Content-Length","Content-Range","Content-Type"]
-};
-app.use(cors(corsOptions));
-app.options("*", cors(corsOptions));
+// ====== CORS “de hierro” para TODO (incluye 404/errores) ======
 app.use((req, res, next) => {
-  const origin = req.headers.origin || "*";
-  res.setHeader("Access-Control-Allow-Origin", origin);
-  res.setHeader("Vary", "Origin");
-  res.setHeader("Access-Control-Allow-Methods", "GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization,Range");
-  res.setHeader("Access-Control-Expose-Headers", "Content-Length,Content-Range,Content-Type");
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  // Ayuda a WebAudio + media elements cross-origin
+  res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
   if (req.method === "OPTIONS") return res.sendStatus(204);
-  next();
+  return next();
 });
+app.use(cors({ origin: true })); // por si tu hosting reescribe
 
 app.use(bodyParser.json());
 
-// Forzar JSON UTF-8 por defecto, excepto binarios/audio
+// Forzar JSON UTF-8 por defecto, pero NO en rutas de assets binarios ni audio/tts
 app.use((req, res, next) => {
   const p = req.path || "";
   if (
@@ -103,45 +103,113 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 // ---------- Utils ----------
 const NORM = (s = "") => String(s).toLowerCase().replace(/\s+/g, " ").trim();
 
-const DAILY_PHRASES = {/* … mismo objeto del usuario … */ 
-  es:["Un gesto de bondad puede cambiar tu día.","La fe hace posible lo que parece imposible.","Hoy es buen día para empezar de nuevo.","La paz se cultiva con pasos pequeños.","El amor que das, vuelve a ti."],
-  en:["A small kindness can change your day.","Faith makes the impossible possible.","Today is a good day to begin again.","Peace grows from small steps.","The love you give returns to you."],
-  pt:["Um gesto de bondade pode mudar o seu dia.","A fé torna possível o impossível.","Hoje é um bom dia para recomeçar.","A paz cresce com pequenos passos.","O amor que você dá volta para você."],
-  it:["Un gesto di gentilezza può cambiare la tua giornata.","La fede rende possibile l’impossibile.","Oggi è un buon giorno per ricominciare.","La pace cresce a piccoli passi.","L’amore che doni ritorna a te."],
-  de:["Eine kleine Freundlichkeit kann deinen Tag verändern.","Glaube macht das Unmögliche möglich.","Heute ist ein guter Tag für einen Neuanfang.","Frieden wächst aus kleinen Schritten.","Die Liebe, die du gibst, kehrt zu dir zurück."],
-  ca:["Un gest d’amabilitat pot canviar el teu dia.","La fe fa possible l’impossible.","Avui és un bon dia per començar de nou.","La pau creix amb petits passos.","L’amor que dones torna a tu."],
-  fr:["Un geste de bonté peut changer ta journée.","La foi rend possible l’impossible.","Aujourd’hui est un bon jour pour recommencer.","La paix grandit à petits pas.","L’amour que tu donnes te revient."]
+const DAILY_PHRASES = {
+  es: [
+    "Un gesto de bondad puede cambiar tu día.",
+    "La fe hace posible lo que parece imposible.",
+    "Hoy es buen día para empezar de nuevo.",
+    "La paz se cultiva con pasos pequeños.",
+    "El amor que das, vuelve a ti.",
+  ],
+  en: [
+    "A small kindness can change your day.",
+    "Faith makes the impossible possible.",
+    "Today is a good day to begin again.",
+    "Peace grows from small steps.",
+    "The love you give returns to you.",
+  ],
+  pt: [
+    "Um gesto de bondade pode mudar o seu dia.",
+    "A fé torna possível o impossível.",
+    "Hoje é um bom dia para recomeçar.",
+    "A paz cresce com pequenos passos.",
+    "O amor que você dá volta para você.",
+  ],
+  it: [
+    "Un gesto di gentilezza può cambiare la tua giornata.",
+    "La fede rende possibile l’impossibile.",
+    "Oggi è un buon giorno per ricominciare.",
+    "La pace cresce a piccoli passi.",
+    "L’amore che doni ritorna a te.",
+  ],
+  de: [
+    "Eine kleine Freundlichkeit kann deinen Tag verändern.",
+    "Glaube macht das Unmögliche möglich.",
+    "Heute ist ein guter Tag für einen Neuanfang.",
+    "Frieden wächst aus kleinen Schritten.",
+    "Die Liebe, die du gibst, kehrt zu dir zurück.",
+  ],
+  ca: [
+    "Un gest d’amabilitat pot canviar el teu dia.",
+    "La fe fa possible l’impossible.",
+    "Avui és un bon dia per començar de nou.",
+    "La pau creix amb petits passos.",
+    "L’amor que dones torna a tu.",
+  ],
+  fr: [
+    "Un geste de bonté peut changer ta journée.",
+    "La foi rend possible l’impossible.",
+    "Aujourd’hui est un bon jour pour recommencer.",
+    "La paix grandit à petits pas.",
+    "L’amour que tu donnes te revient.",
+  ],
 };
 function dayPhrase(lang = "es") {
   const arr = DAILY_PHRASES[lang] || DAILY_PHRASES["es"];
   return arr[Math.floor(Math.random() * arr.length)];
 }
 function langLabel(l = "es") {
-  const m = { es:"Español", en:"English", pt:"Português", it:"Italiano", de:"Deutsch", ca:"Català", fr:"Français" };
+  const m = { es: "Español", en: "English", pt: "Português", it: "Italiano", de: "Deutsch", ca: "Català", fr: "Français" };
   return m[l] || "Español";
 }
 function greetingByHour(lang = "es", hour = null) {
   const h = Number.isInteger(hour) ? hour : new Date().getHours();
-  const g = (m,a,n)=> (h<12?m: h<19?a:n);
+  const g = (m, a, n) => (h < 12 ? m : h < 19 ? a : n);
   switch (lang) {
-    case "en": return g("Good morning","Good afternoon","Good evening");
-    case "pt": return g("Bom dia","Boa tarde","Boa noite");
-    case "it": return g("Buongiorno","Buon pomeriggio","Buonasera");
-    case "de": return g("Guten Morgen","Guten Tag","Guten Abend");
-    case "ca": return g("Bon dia","Bona tarda","Bona nit");
-    case "fr": return g("Bonjour","Bon après-midi","Bonsoir");
-    default:   return g("Buenos días","Buenas tardes","Buenas noches");
+    case "en": return g("Good morning", "Good afternoon", "Good evening");
+    case "pt": return g("Bom dia", "Boa tarde", "Boa noite");
+    case "it": return g("Buongiorno", "Buon pomeriggio", "Buonasera");
+    case "de": return g("Guten Morgen", "Guten Tag", "Guten Abend");
+    case "ca": return g("Bon dia", "Bona tarda", "Bona nit");
+    case "fr": return g("Bonjour", "Bon après-midi", "Bonsoir");
+    default:   return g("Buenos días", "Buenas tardes", "Buenas noches");
   }
 }
 
-const FALLBACK_VERSES = {/* … mismo objeto del usuario … */ 
-  es:[{ref:"Salmos 34:18",text:"Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu."},{ref:"Isaías 41:10",text:"No temas, porque yo estoy contigo; no desmayes, porque yo soy tu Dios que te esfuerzo; siempre te ayudaré."},{ref:"Salmo 23:1",text:"El Señor es mi pastor; nada me faltará."},{ref:"Romanos 12:12",text:"Gozosos en la esperanza; sufridos en la tribulación; constantes en la oración."}],
-  en:[{ref:"Psalm 34:18",text:"The Lord is close to the brokenhearted and saves those who are crushed in spirit."},{ref:"Isaiah 41:10",text:"Do not fear, for I am with you;"},{ref:"Psalm 23:1",text:"The Lord is my shepherd; I shall not want."},{ref:"Romans 12:12",text:"Be joyful in hope, patient in affliction, faithful in prayer."}],
-  pt:[{ref:"Salmos 34:18",text:"Perto está o Senhor dos que têm o coração quebrantado; e salva os contritos de espírito."},{ref:"Isaías 41:10",text:"Não temas, porque eu sou contigo; não te assombres, porque eu sou teu Deus."}],
-  it:[{ref:"Salmo 34:18",text:"Il Signore è vicino a chi ha il cuore spezzato; egli salva gli spiriti affranti."},{ref:"Isaia 41:10",text:"Non temere, perché io sono con te; non smarrirti, perché io sono il tuo Dio."}],
-  de:[{ref:"Psalm 34:18",text:"Der HERR ist nahe denen, die zerbrochenen Herzens sind."},{ref:"Jesaja 41:10",text:"Fürchte dich nicht, denn ich bin mit dir."}],
-  ca:[{ref:"Salm 34:19 (cat)",text:"El Senyor és a prop dels cors trencats, salva els que tenen l’esperit abatut."},{ref:"Isaïes 41:10",text:"No tinguis por, que jo sóc amb tu; no t’esglaiïs, que jo sóc el teu Déu."}],
-  fr:[{ref:"Psaume 34:19",text:"L’Éternel est près de ceux qui ont le cœur brisé; il sauve ceux qui ont l’esprit dans l’abattement."},{ref:"Ésaïe 41:10",text:"Ne crains rien, car je suis avec toi."}]
+// ---------- Fallback de versículos ----------
+const FALLBACK_VERSES = {
+  es: [
+    { ref: "Salmos 34:18", text: "Cercano está Jehová a los quebrantados de corazón; y salva a los contritos de espíritu." },
+    { ref: "Isaías 41:10", text: "No temas, porque yo estoy contigo; no desmayes, porque yo soy tu Dios que te esfuerzo; siempre te ayudaré." },
+    { ref: "Salmo 23:1",  text: "El Señor es mi pastor; nada me faltará." },
+    { ref: "Romanos 12:12", text: "Gozosos en la esperanza; sufridos en la tribulación; constantes en la oración." },
+  ],
+  en: [
+    { ref: "Psalm 34:18", text: "The Lord is close to the brokenhearted and saves those who are crushed in spirit." },
+    { ref: "Isaiah 41:10", text: "Do not fear, for I am with you; do not be dismayed, for I am your God." },
+    { ref: "Psalm 23:1", text: "The Lord is my shepherd; I shall not want." },
+    { ref: "Romans 12:12", text: "Be joyful in hope, patient in affliction, faithful in prayer." },
+  ],
+  pt: [
+    { ref: "Salmos 34:18", text: "Perto está o Senhor dos que têm o coração quebrantado; e salva os contritos de espírito." },
+    { ref: "Isaías 41:10", text: "Não temas, porque eu sou contigo; não te assombres, porque eu sou teu Deus." },
+  ],
+  it: [
+    { ref: "Salmo 34:18", text: "Il Signore è vicino a chi ha il cuore spezzato; egli salva gli spiriti affranti." },
+    { ref: "Isaia 41:10", text: "Non temere, perché io sono con te; non smarrirti, perché io sono il tuo Dio." },
+  ],
+  de: [
+    { ref: "Psalm 34:18", text: "Der HERR ist nahe denen, die zerbrochenen Herzens sind." },
+    { ref: "Jesaja 41:10", text: "Fürchte dich nicht, denn ich bin mit dir." },
+  ],
+  ca: [
+    { ref: "Salm 34:19 (cat)", text: "El Senyor és a prop dels cors trencats, salva els que tenen l’esperit abatut." },
+    { ref: "Isaïes 41:10", text: "No tinguis por, que jo sóc amb tu; no t’esglaiïs, que jo sóc el teu Déu." },
+  ],
+  fr: [
+    { ref: "Psaume 34:19", text: "L’Éternel est près de ceux qui ont le cœur brisé; il sauve ceux qui ont l’esprit dans l’abattement." },
+    { ref: "Ésaïe 41:10", text: "Ne crains rien, car je suis avec toi." },
+  ],
 };
 function pickFallbackVerse(lang = "es", avoidSet = new Set()) {
   const list = FALLBACK_VERSES[lang] || FALLBACK_VERSES["es"];
@@ -149,7 +217,7 @@ function pickFallbackVerse(lang = "es", avoidSet = new Set()) {
   return list[0];
 }
 
-// ---------- Memoria simple ----------
+// ---------- Memoria simple en FS ----------
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
 async function ensureDataDir() { try { await fs.mkdir(DATA_DIR, { recursive: true }); } catch {} }
 function memPath(uid) {
@@ -176,7 +244,7 @@ async function writeMem(userId, mem) {
   await fs.writeFile(memPath(userId), JSON.stringify(mem, null, 2), "utf8");
 }
 
-// ---------- Filtros ----------
+// ---------- Filtros de alcance ----------
 const OFFTOPIC = [
   /\b(f[úu]tbol|futbol|deporte|champions|nba|tenis|selecci[oó]n|mundial|goles?)\b/i,
   /\b(pel[ií]cula|serie|netflix|hbo|max|disney|spotify|cantante|concierto|celebridad|famos[oa]s?)\b/i,
@@ -193,11 +261,21 @@ const OFFTOPIC = [
   /\b(pol[ií]tica|elecci[oó]n|partido|diputado|senador|presidente|gobierno)\b/i,
   /\b(criptomonedas?|bitcoin|acciones|bolsa|nasdaq|d[oó]lar|euro)\b/i,
 ];
+const RELIGIOUS_ALLOW = [/\b(iglesia|templo|catedral|parroquia|misa|sacramento|oraci[oó]n|santuario|santo|santos|biblia|evangelio|rosario|confesi[oó]n|eucarist[ií]a|liturgia|vaticano|lourdes|f[aá]tima|peregrinaci[oó]n|camino de santiago)\b/i];
+const isReligiousException = (s) => RELIGIOUS_ALLOW.some((r) => r.test(NORM(s)));
+const isOffTopic = (s) => OFFTOPIC.some((r) => r.test(NORM(s)));
+const isGibberish = (s) => {
+  const x = (s || "").trim();
+  if (!x) return true;
+  if (x.length < 2) return true;
+  const letters = (x.match(/[a-záéíóúüñàèìòùçâêîôûäëïöüß]/gi) || []).length;
+  return letters < Math.ceil(x.length * 0.25);
+};
 
 // ---------- Health ----------
 app.get("/", (_req, res) => res.json({ ok: true, service: "backend", ts: Date.now() }));
 
-// ---------- Diag viewer ----------
+// ---------- /api/_diag/viewer_check ----------
 app.get("/api/_diag/viewer_check", async (_req, res) => {
   try {
     if (!JESUS_URL) return res.status(500).json({ ok: false, error: "missing_JESUS_URL" });
@@ -210,7 +288,7 @@ app.get("/api/_diag/viewer_check", async (_req, res) => {
   }
 });
 
-// ---------- OpenAI welcome/ask ----------
+// ---------- /api/welcome ----------
 app.post("/api/welcome", async (req, res) => {
   try {
     const { lang = "es", name = "", hour = null } = req.body || {};
@@ -218,6 +296,7 @@ app.post("/api/welcome", async (req, res) => {
     const phrase = dayPhrase(lang);
     const nm = String(name || "").trim();
     const sal = nm ? `${hi}, ${nm}.` : `${hi}.`;
+
     const message =
       lang === "en" ? `${sal} ${phrase} I'm here for you.` :
       lang === "pt" ? `${sal} ${phrase} Estou aqui para você.` :
@@ -226,6 +305,7 @@ app.post("/api/welcome", async (req, res) => {
       lang === "ca" ? `${sal} ${phrase} Sóc aquí per ajudar-te.` :
       lang === "fr" ? `${sal} ${phrase} Je suis là pour toi.` :
                       `${sal} ${phrase} Estoy aquí para lo que necesites.`;
+
     const question =
       lang === "en" ? "What would you like to share today?" :
       lang === "pt" ? "O que você gostaria de compartilhar hoje?" :
@@ -234,32 +314,28 @@ app.post("/api/welcome", async (req, res) => {
       lang === "ca" ? "De què t’agradaria parlar avui?" :
       lang === "fr" ? "De quoi aimerais-tu parler aujourd’hui ?" :
                       "¿Qué te gustaría compartir hoy?";
+
     res.json({ message, question });
   } catch {
     res.json({ message: "La paz sea contigo. ¿De qué te gustaría hablar hoy?", question: "¿Qué te gustaría compartir hoy?" });
   }
 });
 
+// ---------- /api/ask (OpenAI) ----------
 app.post("/api/ask", async (req, res) => {
   try {
     const { message = "", history = [], userId = "anon", lang = "es" } = req.body || {};
     const userTxt = String(message || "").trim();
 
-    // ruido
-    const isGibberish = (s) => {
-      const x = (s || "").trim();
-      if (!x || x.length < 2) return true;
-      const letters = (x.match(/[a-záéíóúüñàèìòùçâêîôûäëïöüß]/gi) || []).length;
-      return letters < Math.ceil(x.length * 0.25);
-    };
-
     const mem = await readMem(userId);
     const now = Date.now();
 
+    // Duplicados rápidos
     if (userTxt && mem.last_user_text && userTxt === mem.last_user_text && now - mem.last_user_ts < 7000) {
       if (mem.last_bot) return res.json(mem.last_bot);
     }
 
+    // Ruido
     if (isGibberish(userTxt)) {
       const msg =
         lang === "en" ? "I didn’t quite get that. Could you say it again in a few words?" :
@@ -275,11 +351,14 @@ app.post("/api/ask", async (req, res) => {
       return res.json(out);
     }
 
-    if (OFFTOPIC.some((r) => r.test(NORM(userTxt)))) {
+    // Alcance
+    const RELIGIOUS_ALLOW = [/\b(iglesia|templo|catedral|parroquia|misa|sacramento|oraci[oó]n|santuario|santo|santos|biblia|evangelio|rosario|confesi[oó]n|eucarist[ií]a|liturgia|vaticano|lourdes|f[aá]tima|peregrinaci[oó]n|camino de santiago)\b/i];
+    const isReligiousException = (s) => RELIGIOUS_ALLOW.some((r) => r.test(NORM(s)));
+    if (OFFTOPIC.some((r) => r.test(NORM(userTxt))) && !isReligiousException(userTxt)) {
       const msg =
         lang === "en" ? "I’m here for your inner life: faith, personal struggles and healing. I don’t give facts or opinions on sports, entertainment, technical, food or general topics." :
         lang === "pt" ? "Estou aqui para a sua vida interior: fé, questões pessoais e cura. Não trato esportes, entretenimento, técnica, gastronomia ou temas gerais." :
-        lang === "it" ? "Sono qui per la tua vita interiore: fede, difficoltà personali e guarigione. Non tratto sport, spettacolo, tecnica, gastronomia o temi generali." :
+        lang === "it" ? "Sono qui per la tua vida interiore: fede, difficoltà personali e guarigione. Non tratto sport, spettacolo, tecnica, gastronomia o temi generali." :
         lang === "de" ? "Ich bin für dein inneres Leben da: Glaube, persönliche Themen und Heilung. Keine Fakten/Meinungen zu Sport, Unterhaltung, Technik, Gastronomie oder Allgemeinwissen." :
         lang === "ca" ? "Sóc aquí per a la teva vida interior: fe, dificultats personals i sanació. No tracto esports, entreteniment, tècnica, gastronomia o temes generals." :
         lang === "fr" ? "Je suis là pour ta vie intérieure : foi, difficultés personnelles et guérison. Je ne traite pas le sport, le divertissement, la technique, la gastronomie ni les sujets généraux." :
@@ -298,6 +377,7 @@ app.post("/api/ask", async (req, res) => {
       return res.json(out);
     }
 
+    // -------- OpenAI --------
     const SYS = `
 Eres cercano, claro y compasivo, desde una voz cristiana (católica).
 Alcance: espiritualidad/fe católica, psicología/autoayuda personal, relaciones y emociones. Evita lo demás.
@@ -355,6 +435,7 @@ No incluyas nada fuera del JSON.
 
     const used = new Set((mem.last_refs || []).map((x) => NORM(x)));
     let finalVerse = null;
+
     if (txtRaw && refRaw && !banned.test(refRaw) && !used.has(NORM(refRaw))) {
       finalVerse = { ref: refRaw, text: txtRaw };
     } else {
@@ -364,8 +445,9 @@ No incluyas nada fuera del JSON.
     out.bible = finalVerse;
     mem.last_refs = [...(mem.last_refs || []), finalVerse.ref].slice(-8);
 
+    // Persistimos
     mem.last_user_text = userTxt;
-    mem.last_user_ts = Date.now();
+    mem.last_user_ts = now;
     mem.last_bot = out;
     await writeMem(userId, mem);
 
@@ -380,7 +462,8 @@ No incluyas nada fuera del JSON.
   }
 });
 
-// ======== PROXY DE VOZ (jesus-voz VM) ========
+// ==================== (VOZ) ====================
+
 const TTS_PROVIDER_DEFAULT = (process.env.TTS_PROVIDER || "xtts").trim();
 const publicBase = (req) => process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get("host")}`;
 const toQS = (obj) => {
@@ -392,7 +475,7 @@ const toQS = (obj) => {
 };
 const mergeQS = (a = {}, b = {}) => {
   const s = new URLSearchParams();
-  for (const [k, v] of Object.entries(a)) if (v !== undefined) s.append(k, String(v));
+  for (const [k, v] of Object.entries(a)) if (v !== undefined) s.append(k, v);
   for (const [k, v] of Object.entries(b)) if (v !== undefined) s.set(k, String(v));
   return s.toString();
 };
@@ -403,22 +486,53 @@ async function pipeUpstream(up, res, fallbackType = "application/octet-stream") 
   else res.setHeader("Content-Type", fallbackType);
   const cl = up.headers.get("content-length");
   if (cl) res.setHeader("Content-Length", cl);
-  // CORS (por si algún proxy/middleware no aplicó)
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Expose-Headers", "Content-Length,Content-Type,Content-Range");
+  const cr = up.headers.get("accept-ranges");
+  if (cr) res.setHeader("Accept-Ranges", cr);
   if (!up.body) return res.end();
   return Readable.fromWeb(up.body).pipe(res);
 }
 
+// Salud del proxy
 app.get("/api/health", async (_req, res) => {
   try {
     if (!VOZ_URL) return res.status(500).json({ ok: false, error: "missing_VOZ_URL" });
     const r = await fetch(`${VOZ_URL}/health`);
     const j = await r.json().catch(() => ({}));
     res.json({ ok: true, proxy: "railway", voz_url: VOZ_URL, provider_default: TTS_PROVIDER_DEFAULT, upstream: j });
-  } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
 });
 
+// DIAGNÓSTICO de voz (nuevo)
+app.get("/api/voice/diag", async (_req, res) => {
+  try {
+    if (!VOZ_URL) return res.status(500).json({ ok: false, error: "missing_VOZ_URL" });
+
+    const health = await fetch(`${VOZ_URL}/health`).then(r => r.json()).catch(e => ({ error: String(e) }));
+    const probeUrl = new URL("/tts_save", VOZ_URL);
+    probeUrl.search = new URLSearchParams({
+      text: "ping",
+      lang: "es",
+      provider: TTS_PROVIDER_DEFAULT || "xtts",
+      rate: "1.0",
+      temp: "0.6",
+      fx: "0",
+    }).toString();
+    const t0 = Date.now();
+    const probe = await fetch(probeUrl.toString());
+    const ms = Date.now() - t0;
+    const body = await probe.text().catch(()=> "");
+    let probeJson = null;
+    try { probeJson = JSON.parse(body); } catch { probeJson = { raw: body } }
+
+    res.json({ ok: true, voz_url: VOZ_URL, health, latency_ms: ms, probe: probeJson });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// Listado de voces (passthrough)
 app.get("/api/voices", async (req, res) => {
   try {
     if (!VOZ_URL) return res.status(500).json({ ok: false, error: "missing_VOZ_URL" });
@@ -427,28 +541,43 @@ app.get("/api/voices", async (req, res) => {
     const up = await fetch(url.toString());
     const j = await up.json();
     res.json(j);
-  } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
 });
 
-// Streaming WAV (rápido)
+// Streaming TTS directo (audio/wav) con manejo de error detallado
 app.get("/api/tts", async (req, res) => {
   try {
     if (!VOZ_URL) return res.status(500).json({ ok: false, error: "missing_VOZ_URL" });
     const url = new URL("/tts", VOZ_URL);
     url.search = mergeQS(req.query, { provider: TTS_PROVIDER_DEFAULT });
     const up = await fetch(url.toString());
+    if (!up.ok) {
+      const detail = await up.text().catch(()=> "");
+      return res.status(up.status || 500).json({ ok: false, upstream_status: up.status, detail, to: url.toString() });
+    }
+    res.removeHeader("Content-Type");
     await pipeUpstream(up, res, "audio/wav");
-  } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
 });
 
-// Generar/guardar + URL proxificada
+// Generar y guardar WAV en la VM, devolviendo URL proxificada (https de Railway)
 app.get("/api/tts_save", async (req, res) => {
   try {
     if (!VOZ_URL) return res.status(500).json({ ok: false, error: "missing_VOZ_URL" });
     const url = new URL("/tts_save", VOZ_URL);
     url.search = mergeQS(req.query, { provider: TTS_PROVIDER_DEFAULT });
     const up = await fetch(url.toString());
-    const j = await up.json();
+    const txt = await up.text().catch(()=> "");
+    if (!up.ok) {
+      return res.status(up.status || 500).json({ ok: false, upstream_status: up.status, detail: txt, to: url.toString() });
+    }
+
+    let j = {};
+    try { j = JSON.parse(txt); } catch { j = { raw: txt }; }
 
     const upstream = j.url || j.file || j.path;
     let name = null;
@@ -457,20 +586,26 @@ app.get("/api/tts_save", async (req, res) => {
       const pub = `${publicBase(req)}/api/files/${encodeURIComponent(name)}`;
       j.url = j.file = j.path = pub;
     }
+
     res.json(j);
-  } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
 });
 
-// Sirve /files/<wav> con CORS
+// Sirve /files/<wav> de la VM por HTTPS (evita mixed content)
 app.get("/api/files/:name", async (req, res) => {
   try {
     if (!VOZ_URL) return res.status(500).json({ ok: false, error: "missing_VOZ_URL" });
     const up = await fetch(`${VOZ_URL}/files/${encodeURIComponent(req.params.name)}`);
+    res.removeHeader("Content-Type");
     await pipeUpstream(up, res, "audio/wav");
-  } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
 });
 
-// JSON → TTS guardar
+// Acepta tu JSON { text, lang, rate, temp, source, fx:{...} } y devuelve WAV proxificado
 app.post("/api/tts_from_json", async (req, res) => {
   try {
     if (!VOZ_URL) return res.status(500).json({ ok: false, error: "missing_VOZ_URL" });
@@ -480,28 +615,45 @@ app.post("/api/tts_from_json", async (req, res) => {
     const params = {
       text: b.text || "Hola",
       lang: b.lang || "es",
-      rate: b.rate ?? "1.0",
+      rate: b.rate ?? "1.10",      // un pelín más rápido por defecto
       temp: b.temp ?? "0.6",
       provider,
       fx: fx.fx ? 1 : fx.enable ? 1 : 0,
-      hpf: fx.hpf, lpf: fx.lpf, warm_db: fx.warm_db, air_db: fx.air_db,
-      presence_db: fx.presence_db, reverb_wet: fx.reverb_wet, reverb_delay: fx.reverb_delay,
-      reverb_tail: fx.reverb_tail, comp: fx.comp, width_ms: fx.width_ms, pitch_st: fx.pitch_st, gain_db: fx.gain_db
+      hpf: fx.hpf,
+      lpf: fx.lpf,
+      warm_db: fx.warm_db,
+      air_db: fx.air_db,
+      presence_db: fx.presence_db,
+      reverb_wet: fx.reverb_wet,
+      reverb_delay: fx.reverb_delay,
+      reverb_tail: fx.reverb_tail,
+      comp: fx.comp,
+      width_ms: fx.width_ms,
+      pitch_st: fx.pitch_st,
+      gain_db: fx.gain_db
     };
     const url = new URL("/tts_save", VOZ_URL);
     url.search = toQS(params);
     const up = await fetch(url.toString());
-    const j = await up.json();
+    const txt = await up.text().catch(()=> "");
+    if (!up.ok) {
+      return res.status(up.status || 500).json({ ok: false, upstream_status: up.status, detail: txt, to: url.toString() });
+    }
+    let j = {};
+    try { j = JSON.parse(txt); } catch { j = { raw: txt }; }
 
     const upstream = j.url || j.file || j.path;
     let name = null;
     try { name = new URL(upstream).pathname.split("/").pop(); } catch {}
     const pub = name ? `${publicBase(req)}/api/files/${encodeURIComponent(name)}` : upstream;
+
     res.json({ ok: true, url: pub, file: pub, tts: j });
-  } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
 });
 
-// ======== PROXY DE ASSETS DEL VIEWER ========
+// ==================== PROXY DE ASSETS DEL VIEWER ====================
 app.get("/api/viewer/assets/:file", async (req, res) => {
   try {
     if (!JESUS_URL) return res.status(500).json({ error: "missing_JESUS_URL" });
@@ -519,10 +671,13 @@ app.get("/api/viewer/assets/:file", async (req, res) => {
     const nodeStream = Readable.fromWeb(r.body);
     return nodeStream.pipe(res);
   } catch (e) {
-    res.status(502).json({ error: "asset_proxy_exception", detail: String(e) });
+    res.status(502);
+    res.set("Content-Type", "application/json; charset=utf-8");
+    res.json({ error: "asset_proxy_exception", detail: String(e) });
   }
 });
 
+// Atajos cómodos
 app.get("/api/assets/idle", (req, res) => {
   req.params.file = "idle_loop.mp4";
   return app._router.handle(req, res, () => {}, "get", "/api/viewer/assets/:file");
@@ -532,7 +687,7 @@ app.get("/api/assets/talk", (req, res) => {
   return app._router.handle(req, res, () => {}, "get", "/api/viewer/assets/:file");
 });
 
-// ======== VIEWER PROXY ========
+// ==================== VIEWER PROXY ====================
 app.post("/api/viewer/offer", async (req, res) => {
   try {
     if (!JESUS_URL) return res.status(500).json({ error: "missing_JESUS_URL" });
@@ -579,12 +734,11 @@ app.post("/api/viewer/offer", async (req, res) => {
     });
   }
 });
-
 app.get("/api/viewer/offer", (_req, res) =>
   res.status(405).json({ ok: false, error: "use_POST_here" })
 );
 
-// ======== WebRTC ingest (audio → jesus-interactivo) ========
+// ---------- WebRTC ingest (audio → jesus-interactivo) ----------
 const sessions = new Map(); // id -> { pc, source, ff, track }
 
 function chunkPCM(buf, chunkBytes = 1920) {
@@ -624,6 +778,7 @@ app.post("/api/ingest/start", async (req, res) => {
     const answer = await r.json();
     await pc.setRemoteDescription(answer);
 
+    // ffmpeg lee el audio (mp3/wav/ogg) y lo pasa a PCM mono 48kHz
     const ff = spawn(ffmpegPath, [
       "-re", "-i", ttsUrl,
       "-f", "s16le", "-acodec", "pcm_s16le",
@@ -664,6 +819,7 @@ app.post("/api/ingest/start", async (req, res) => {
   }
 });
 
+// POST /api/ingest/stop { id }
 app.post("/api/ingest/stop", async (req, res) => {
   const { id } = req.body || {};
   const s = id ? sessions.get(id) : null;
@@ -675,12 +831,13 @@ app.post("/api/ingest/stop", async (req, res) => {
   res.json({ ok: true });
 });
 
-// ======== Memory sync (para evitar 404) ========
-app.post("/api/memory/sync", async (req, res) => {
+// ---------- Memoria (no-op para evitar 404) ----------
+app.post("/api/memory/sync", async (_req, res) => {
   try {
-    // En el futuro podrías persistir req.body.memory
     res.json({ ok: true });
-  } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
+  } catch {
+    res.json({ ok: true });
+  }
 });
 
 // ---------- Arranque ----------
