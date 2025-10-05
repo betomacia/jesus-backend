@@ -1,6 +1,7 @@
 // index.js — Backend minimal (sin DB) para Jesús Interactivo
-// CORS global, selector de voz por idioma + voz fija XTTS (VOICE_REF),
-// fallback xtts→google, viewer proxy, ingest opcional, memory sync no-op.
+// Versión ESTABLE: sin anti-dup, sin auto-provider, sin afinados.
+// /api/tts = streaming, /api/tts_save = guarda y devuelve URL proxificada.
+// viewer proxy, ingest opcional, /api/ask rápido.
 
 require("dotenv").config();
 
@@ -22,7 +23,7 @@ const INSECURE_AGENT =
     ? new https.Agent({ rejectUnauthorized: false })
     : undefined;
 
-// ===== WebRTC ingest / ffmpeg (opcional) =====
+// ===== wrtc (opcional) + ffmpeg =====
 let wrtc = null;
 try { wrtc = require("wrtc"); } catch { console.warn("[WARN] wrtc no instalado; /api/ingest/* desactivado."); }
 const RTCPeerConnection = wrtc?.RTCPeerConnection;
@@ -47,38 +48,12 @@ const VOZ_URL   = (process.env.VOZ_URL   || "").trim();
 if (!JESUS_URL) console.warn("[WARN] Falta JESUS_URL");
 if (!VOZ_URL)   console.warn("[WARN] Falta VOZ_URL");
 
-const TTS_PROVIDER_DEFAULT = (process.env.TTS_PROVIDER || "xtts").trim();
-let CURRENT_REF = (process.env.VOICE_REF || "jesus2.mp3").trim(); // ej.: jesus2.mp3
+// 🔑 RÁPIDO por defecto
+const TTS_PROVIDER_DEFAULT = (process.env.TTS_PROVIDER || "google").trim();
 
-// ===== Selector automático por idioma + tuning =====
-const PROVIDER_BY_LANG = {
-  es: "xtts", it: "xtts", fr: "xtts",
-  en: "google", pt: "google", de: "google", ca: "google",
-};
-const VOICE_TUNING = {
-  es: { rate: "1.10", temp: "0.55" },
-  it: { rate: "1.08", temp: "0.55" },
-  fr: { rate: "1.06", temp: "0.55" },
-  en: { rate: "1.02", temp: "0.55" },
-  pt: { rate: "1.10", temp: "0.55" },
-  de: { rate: "1.00", temp: "0.55" },
-  ca: { rate: "1.06", temp: "0.55" },
-};
-function pickProvider(lang, fallback) {
-  const l = String(lang || "es").toLowerCase();
-  return PROVIDER_BY_LANG[l] || fallback || TTS_PROVIDER_DEFAULT || "google";
-}
-function tuneByLang(params) {
-  const l = String(params.lang || "es").toLowerCase();
-  const t = VOICE_TUNING[l];
-  if (t) {
-    if (params.rate === undefined || params.rate === null || params.rate === "") params.rate = t.rate;
-    if (params.temp === undefined || params.temp === null || params.temp === "") params.temp = t.temp;
-  }
-  return params;
-}
+// ref fija para xtts (si usás xtts)
+let CURRENT_REF = (process.env.VOICE_REF || "jesus2.mp3").trim();
 
-// ===== App =====
 const app = express();
 
 // ----- CORS global -----
@@ -110,15 +85,12 @@ async function pipeUpstream(up, res, fallbackType = "application/octet-stream") 
   return Readable.fromWeb(up.body).pipe(res);
 }
 
-// ===== JSON por defecto salvo binarios/audio y viewer endpoints
+// ===== JSON por defecto salvo binarios/audio/viewer
 app.use((req, res, next) => {
   const p = req.path || "";
-  if (
-    p.startsWith("/api/viewer/") || // incluye offer y assets
-    p.startsWith("/api/assets/") ||
-    p.startsWith("/api/files/") ||
-    p.startsWith("/api/tts")
-  ) return next();
+  if (p.startsWith("/api/viewer/") || p.startsWith("/api/assets/") || p.startsWith("/api/files/") || p.startsWith("/api/tts")) {
+    return next();
+  }
   res.set("Content-Type", "application/json; charset=utf-8");
   next();
 });
@@ -126,20 +98,10 @@ app.use((req, res, next) => {
 // ===== OpenAI =====
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// ===== Logs básicos =====
-app.use((req, _res, next) => {
-  if (req.path === "/api/tts" || req.path === "/api/tts_save" || req.path === "/api/tts_fast") {
-    const q = req.query || {};
-    const txt = String(q.text || "").slice(0, 120).replace(/\s+/g, " ");
-    console.log(`[tts hit] ${req.path} lang=${q.lang || "es"} provider=${q.provider || "-"} text="${txt}"`);
-  }
-  next();
-});
-
-// ===== Health mínimos =====
+// ===== Health =====
 app.get("/", (_req, res) => res.json({ ok: true, service: "backend", ts: Date.now() }));
 
-// ===== Bienvenida =====
+// ===== Bienvenida mínima (texto + pregunta, para UI) =====
 function greetingByHour(lang="es", hour=null) {
   const h = Number.isInteger(hour) ? hour : new Date().getHours();
   const g = (m,a,n)=> (h<12?m:h<19?a:n);
@@ -166,17 +128,15 @@ app.post("/api/welcome", (req,res)=>{
     const phrase = dayPhrase(lang);
     const nm = String(name||"").trim();
     const sal = nm ? `${hi}, ${nm}.` : `${hi}.`;
-    const message =
-      lang==="en"? `${sal} ${phrase} I'm here for you.` : `${sal} ${phrase} Estoy aquí para lo que necesites.`;
-    const question =
-      lang==="en"? "What would you like to share today?" : "¿Qué te gustaría compartir hoy?";
+    const message = lang==="en" ? `${sal} ${phrase} I'm here for you.` : `${sal} ${phrase} Estoy aquí para lo que necesites.`;
+    const question = lang==="en" ? "What would you like to share today?" : "¿Qué te gustaría compartir hoy?";
     res.json({ message, question });
   }catch{
     res.json({ message:"La paz sea contigo. ¿De qué te gustaría hablar hoy?", question:"¿Qué te gustaría compartir hoy?" });
   }
 });
 
-// ===== /api/ask (rápido) =====
+// ===== /api/ask (rápido, sin florituras) =====
 app.post("/api/ask", async (req,res)=>{
   try{
     const { message="", history=[], lang="es" } = req.body||{};
@@ -225,28 +185,12 @@ Responde en ${lang}. Devuelve SOLO JSON: {"message":"...", "question":"...","bib
   }
 });
 
-// ====== VOZ (selector XTTS ref + fallback a google) ======
+// ===== VOZ (estado simple) =====
 app.get("/api/voice/current", (_req,res)=>{
-  res.json({ ok:true, provider_default: TTS_PROVIDER_DEFAULT, fixed_ref: CURRENT_REF, PROVIDER_BY_LANG, VOICE_TUNING });
+  res.json({ ok:true, provider_default: TTS_PROVIDER_DEFAULT, fixed_ref: CURRENT_REF });
 });
-app.post("/api/voice/set_ref", async (req,res)=>{
-  try{
-    const name = String(req.body?.name || "").trim();
-    if (!name) return res.status(400).json({ ok:false, error:"missing_name" });
-    if (!/^[a-zA-Z0-9_.-]+$/.test(name)) return res.status(400).json({ ok:false, error:"bad_name" });
-    CURRENT_REF = name;
-    res.json({ ok:true, fixed_ref: CURRENT_REF });
-  } catch(e){
-    res.status(500).json({ ok:false, error:String(e) });
-  }
-});
-app.get("/api/voice/use_ref", (req,res)=>{
-  const name = String(req.query?.name || "").trim();
-  if (!name) return res.status(400).json({ ok:false, error:"missing_name" });
-  if (!/^[a-zA-Z0-9_.-]+$/.test(name)) return res.status(400).json({ ok:false, error:"bad_name" });
-  CURRENT_REF = name;
-  res.json({ ok:true, fixed_ref: CURRENT_REF });
-});
+
+// ===== Diag upstream =====
 app.get("/api/health", async (_req,res)=>{
   try{
     if (!VOZ_URL) return res.status(500).json({ ok:false, error:"missing_VOZ_URL" });
@@ -255,11 +199,12 @@ app.get("/api/health", async (_req,res)=>{
     res.json({ ok:true, proxy:"railway", voz_url:VOZ_URL, provider_default:TTS_PROVIDER_DEFAULT, fixed_ref: CURRENT_REF, upstream:j });
   }catch(e){ res.status(500).json({ ok:false, error:String(e) }); }
 });
+
 app.get("/api/voice/diag", async (req,res)=>{
   try{
     if (!VOZ_URL) return res.status(500).json({ ok:false, error:"missing_VOZ_URL" });
     const text = req.query.text || "ping de prueba";
-    const base = { text, lang:"es", provider: TTS_PROVIDER_DEFAULT||"xtts", rate:"1.0", temp:"0.6", fx:"0" };
+    const base = { text, lang:"es", provider: TTS_PROVIDER_DEFAULT||"google", rate:"1.0", temp:"0.6", fx:"0" };
     const url = new URL("/tts_save", VOZ_URL);
     url.search = toQS(base);
     const t0 = Date.now();
@@ -280,13 +225,10 @@ app.get("/api/voice/diag", async (req,res)=>{
   }
 });
 
-// helper: intenta xtts (con ref) y si falla cae a google
+// ===== helper: fallback xtts → google, pero SIN auto nada =====
 async function fetchTTSWithFallback(endpointPath, baseParams) {
-  const providers = [
-    String(baseParams.provider || TTS_PROVIDER_DEFAULT || "xtts"),
-    "google"
-  ].filter((v,i,arr)=> arr.indexOf(v)===i);
-
+  const prefer = String(baseParams.provider || TTS_PROVIDER_DEFAULT || "google");
+  const providers = [prefer, (prefer.toLowerCase()==="xtts" ? "google" : "xtts")];
   let last = { status: 0, text: "" };
   for (const provider of providers) {
     const url = new URL(endpointPath, VOZ_URL);
@@ -301,7 +243,7 @@ async function fetchTTSWithFallback(endpointPath, baseParams) {
   return { ok:false, status:last.status, detail:last.text };
 }
 
-// ===== STREAMING WAV (chunked) =====
+// ===== STREAMING WAV (chunked), rápido =====
 app.get("/api/tts", async (req, res) => {
   try {
     if (!VOZ_URL) return res.status(500).json({ ok: false, error: "missing_VOZ_URL" });
@@ -314,20 +256,16 @@ app.get("/api/tts", async (req, res) => {
     const baseParams = {
       text: req.query.text || "Hola",
       lang: req.query.lang || "es",
-      rate: req.query.rate,
-      temp: req.query.temp,
-      fx: req.query.fx || "0",
-      hpf: req.query.hpf, lpf: req.query.lpf, warm_db: req.query.warm_db,
-      air_db: req.query.air_db, presence_db: req.query.presence_db,
-      reverb_wet: req.query.reverb_wet, reverb_delay: req.query.reverb_delay, reverb_tail: req.query.reverb_tail,
-      comp: req.query.comp, width_ms: req.query.width_ms, pitch_st: req.query.pitch_st, gain_db: req.query.gain_db,
+      rate: req.query.rate || "1.10",
+      temp: req.query.temp || "0.55",
+      fx: "0",
       provider: req.query.provider || TTS_PROVIDER_DEFAULT,
       t: Date.now().toString(),
     };
-    baseParams.provider = pickProvider(baseParams.lang, baseParams.provider);
-    tuneByLang(baseParams);
 
-    for (const prov of [baseParams.provider, "google"].filter(Boolean)) {
+    // 1) intenta proveedor pedido/default (por defecto: google)
+    // 2) cae al otro si falla
+    for (const prov of [baseParams.provider, (baseParams.provider.toLowerCase()==="xtts"?"google":"xtts")]) {
       const url = new URL("/tts", VOZ_URL);
       const params = { ...baseParams, provider: prov };
       if (prov.toLowerCase() === "xtts" && CURRENT_REF) params.ref = CURRENT_REF; else delete params.ref;
@@ -345,109 +283,36 @@ app.get("/api/tts", async (req, res) => {
       if (!up.body) return res.end();
 
       const reader = up.body.getReader();
-      let aborted = false;
-      req.on("aborted", () => { aborted = true; try { reader.cancel(); } catch {} });
-
       let first = true;
       let total = 0;
 
       async function pump() {
-        if (aborted) return;
         const { value, done } = await reader.read();
         if (done) {
           try { res.end(); } catch {}
           const ms = Date.now() - t0;
-          console.log(`[tts stream] done bytes=${total} ms=${ms}`);
+          console.log(`[tts stream] done bytes=${total} ms=${ms}, provider=${prov}`);
           return;
         }
-        try {
-          total += value.byteLength;
-          if (first) {
-            const ms1 = Date.now() - t0;
-            first = false;
-            console.log(`[tts stream] firstByte at ${ms1}ms, provider=${prov}`);
-          }
-          res.write(Buffer.from(value));
-        } catch (e) {
-          console.error("[tts stream write err]", e);
-          try { res.end(); } catch {}
-          try { reader.cancel(); } catch {}
-          return;
+        total += value.byteLength;
+        if (first) {
+          const ms1 = Date.now() - t0;
+          first = false;
+          console.log(`[tts stream] firstByte at ${ms1}ms, provider=${prov}`);
         }
+        res.write(Buffer.from(value));
         return pump();
       }
       return pump();
     }
 
-    const fb = await fetchTTSWithFallback("/tts", baseParams);
-    return res.status(500).json({ ok: false, upstream_status: fb.status, detail: fb.detail || "tts upstream failed" });
+    return res.status(502).json({ ok:false, error:"tts upstream failed" });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e) });
   }
 });
 
-// ===== FAST LANE: fuerza Google, sin FX, opcional =====
-app.get("/api/tts_fast", async (req, res) => {
-  try {
-    if (!VOZ_URL) return res.status(500).json({ ok:false, error:"missing_VOZ_URL" });
-
-    try { req.socket.setNoDelay(true); } catch {}
-    res.setHeader("Cache-Control", "no-store");
-    res.setHeader("X-Accel-Buffering", "no");
-    res.setHeader("Connection", "keep-alive");
-
-    const baseParams = {
-      text: req.query.text || "Hola",
-      lang: (req.query.lang || "es"),
-      rate: req.query.rate || "1.10",
-      temp: req.query.temp || "0.55",
-      provider: "google",
-      fx: "0",
-      t: Date.now().toString(),
-    };
-
-    const url = new URL("/tts", VOZ_URL);
-    url.search = toQS(baseParams);
-
-    const t0 = Date.now();
-    const up = await fetch(url.toString(), { headers: { "Accept": "audio/wav" } });
-    if (!up.ok) return res.status(502).json({ ok:false, status: up.status });
-
-    res.status(200);
-    res.setHeader("Content-Type", up.headers.get("content-type") || "audio/wav");
-    res.removeHeader("Content-Length");
-    if (typeof res.flushHeaders === "function") res.flushHeaders();
-
-    if (!up.body) return res.end();
-
-    const reader = up.body.getReader();
-    let first = true;
-    let total = 0;
-
-    async function pump() {
-      const { value, done } = await reader.read();
-      if (done) {
-        try { res.end(); } catch {}
-        const ms = Date.now() - t0;
-        console.log(`[tts fast] done bytes=${total} ms=${ms}`);
-        return;
-      }
-      total += value.byteLength;
-      if (first) {
-        const ms1 = Date.now() - t0;
-        first = false;
-        console.log(`[tts fast] firstByte at ${ms1}ms`);
-      }
-      res.write(Buffer.from(value));
-      return pump();
-    }
-    return pump();
-  } catch (e) {
-    res.status(500).json({ ok:false, error:String(e) });
-  }
-});
-
-// ===== Genera WAV y guarda (fallback / descargas) =====
+// ===== Genera WAV y guarda (para reproducir vía <audio src>) =====
 app.get("/api/tts_save", async (req,res)=>{
   try{
     if (!VOZ_URL) return res.status(500).json({ ok:false, error:"missing_VOZ_URL" });
@@ -455,25 +320,17 @@ app.get("/api/tts_save", async (req,res)=>{
     const baseParams = {
       text: req.query.text || "Hola",
       lang: req.query.lang || "es",
-      rate: req.query.rate,
-      temp: req.query.temp,
-      fx: req.query.fx || "0",
-      hpf: req.query.hpf, lpf: req.query.lpf, warm_db: req.query.warm_db,
-      air_db: req.query.air_db, presence_db: req.query.presence_db,
-      reverb_wet: req.query.reverb_wet, reverb_delay: req.query.reverb_delay, reverb_tail: req.query.reverb_tail,
-      comp: req.query.comp, width_ms: req.query.width_ms, pitch_st: req.query.pitch_st, gain_db: req.query.gain_db,
-      provider: req.query.provider || TTS_PROVIDER_DEFAULT
+      rate: req.query.rate || "1.10",
+      temp: req.query.temp || "0.55",
+      fx: "0",
+      provider: req.query.provider || TTS_PROVIDER_DEFAULT,
+      t: Date.now().toString()
     };
 
-    baseParams.provider = pickProvider(baseParams.lang, baseParams.provider);
-    tuneByLang(baseParams);
+    const resp = await fetchTTSWithFallback("/tts_save", baseParams);
+    if (!resp.ok) return res.status(500).json({ ok:false, upstream_status:resp.status, detail:resp.detail||"tts_save upstream failed" });
 
-    const url = new URL("/tts_save", VOZ_URL); url.search = toQS(baseParams);
-    const up = await fetch(url.toString());
-    const txt = await up.text().catch(()=> "");
-    if (!up.ok) return res.status(500).json({ ok:false, detail: txt || "tts_save upstream failed" });
-
-    let j = {}; try { j = JSON.parse(txt); } catch { j = { raw: txt }; }
+    let j = {}; try { j = JSON.parse(resp.body); } catch { j = { raw: resp.body }; }
     const upstream = j.url || j.file || j.path;
     if (upstream) {
       try {
@@ -546,7 +403,6 @@ app.get("/api/viewer/offer", (_req,res)=> res.status(405).json({ ok:false, error
 // ===== Ingest (opcional) =====
 const sessions = new Map();
 function chunkPCM(buf, chunkBytes=1920){ const out=[]; for(let i=0;i+chunkBytes<=buf.length;i+=chunkBytes) out.push(buf.slice(i,i+chunkBytes)); return out; }
-
 app.post("/api/ingest/start", async (req,res)=>{
   if (!RTCPeerConnection || !RTCAudioSource) return res.status(501).json({ error:"wrtc_not_available" });
   try{
@@ -602,21 +458,18 @@ app.post("/api/ingest/stop", async (req,res)=>{
   res.json({ ok:true });
 });
 
-// ===== Diag: medir TTFB directo al upstream =====
+// ===== Probe =====
 app.get("/api/_diag/tts_probe", async (req, res) => {
   try {
     if (!VOZ_URL) return res.status(500).json({ ok:false, error:"missing_VOZ_URL" });
     const baseParams = {
       text: req.query.text || "hola",
       lang: req.query.lang || "es",
-      rate: req.query.rate,
-      temp: req.query.temp,
+      rate: req.query.rate || "1.10",
+      temp: req.query.temp || "0.55",
       provider: req.query.provider || TTS_PROVIDER_DEFAULT,
       t: Date.now().toString(),
     };
-    baseParams.provider = pickProvider(baseParams.lang, baseParams.provider);
-    tuneByLang(baseParams);
-
     const url = new URL("/tts", VOZ_URL); url.search = toQS(baseParams);
     const t0 = Date.now();
     const up = await fetch(url.toString());
@@ -631,7 +484,7 @@ app.get("/api/_diag/tts_probe", async (req, res) => {
       if (tFirst === null) tFirst = Date.now() - t0;
       if (total > 96*1024) break;
     }
-    res.json({ ok:true, status: up.status, connect_ms: tConn, first_byte_ms: tFirst ?? -1, sampled_bytes: total, provider_used: baseParams.provider });
+    res.json({ ok:true, status: up.status, connect_ms: tConn, first_byte_ms: tFirst ?? -1, sampled_bytes: total });
   } catch (e) {
     res.status(500).json({ ok:false, error:String(e) });
   }
@@ -642,4 +495,4 @@ app.post("/api/memory/sync", (_req,res)=> res.json({ ok:true }));
 
 // ===== Arranque =====
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT} | VOICE_REF=${CURRENT_REF}`));
+app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT} | VOICE_REF=${CURRENT_REF} | TTS_PROVIDER=${TTS_PROVIDER_DEFAULT}`));
