@@ -1,6 +1,6 @@
 // index.js — Backend minimal (sin DB) para Jesús Interactivo
-// CORS global, selector de voz fija para XTTS (VOICE_REF), fallback xtts→google,
-// viewer proxy, ingest opcional, memory sync no-op.
+// CORS global, selector de voz por idioma + voz fija XTTS (VOICE_REF),
+// fallback xtts→google, viewer proxy, ingest opcional, memory sync no-op.
 
 require("dotenv").config();
 
@@ -53,6 +53,41 @@ const TTS_PROVIDER_DEFAULT = (process.env.TTS_PROVIDER || "xtts").trim();
 
 // Voz fija para XTTS (referencia /refs/ del servidor jesus-voz)
 let CURRENT_REF = (process.env.VOICE_REF || "jesus2.mp3").trim(); // ej.: jesus2.mp3
+
+// ===== Selector automático por idioma + tuning =====
+const PROVIDER_BY_LANG = {
+  es: "xtts",  // timbre clonado
+  it: "xtts",
+  fr: "xtts",
+  en: "google", // prosodia muy estable
+  pt: "google",
+  de: "google",
+  ca: "google",
+};
+
+const VOICE_TUNING = {
+  es: { rate: "1.10", temp: "0.55" },
+  it: { rate: "1.08", temp: "0.55" },
+  fr: { rate: "1.06", temp: "0.55" },
+  en: { rate: "1.02", temp: "0.55" },
+  pt: { rate: "1.10", temp: "0.55" },
+  de: { rate: "1.00", temp: "0.55" },
+  ca: { rate: "1.06", temp: "0.55" },
+};
+
+function pickProvider(lang, fallback) {
+  const l = String(lang || "es").toLowerCase();
+  return PROVIDER_BY_LANG[l] || fallback || TTS_PROVIDER_DEFAULT || "google";
+}
+function tuneByLang(params) {
+  const l = String(params.lang || "es").toLowerCase();
+  const t = VOICE_TUNING[l];
+  if (t) {
+    if (params.rate === undefined || params.rate === null || params.rate === "") params.rate = t.rate;
+    if (params.temp === undefined || params.temp === null || params.temp === "") params.temp = t.temp;
+  }
+  return params;
+}
 
 // ===== App =====
 const app = express();
@@ -215,7 +250,7 @@ Responde en ${lang}. Devuelve SOLO JSON: {"message":"...", "question":"...","bib
 
 // estado actual
 app.get("/api/voice/current", (_req,res)=>{
-  res.json({ ok:true, provider_default: TTS_PROVIDER_DEFAULT, fixed_ref: CURRENT_REF });
+  res.json({ ok:true, provider_default: TTS_PROVIDER_DEFAULT, fixed_ref: CURRENT_REF, PROVIDER_BY_LANG, VOICE_TUNING });
 });
 
 // set ref por POST
@@ -308,22 +343,21 @@ async function fetchTTSWithFallback(endpointPath, baseParams) {
 }
 
 // ===== STREAMING WAV (chunked) =====
-// 👉 Forzamos transferencia en chunks (sin Content-Length) para que el audio empiece inmediatamente.
 app.get("/api/tts", async (req, res) => {
   try {
     if (!VOZ_URL) return res.status(500).json({ ok: false, error: "missing_VOZ_URL" });
 
-    // 👉 anti-buffering y menor latencia en la conexión
+    // 👉 anti-buffering y menor latencia
     try { req.socket.setNoDelay(true); } catch {}
     res.setHeader("Cache-Control", "no-store");
-    res.setHeader("X-Accel-Buffering", "no"); // Nginx: desactiva buffering
+    res.setHeader("X-Accel-Buffering", "no");
     res.setHeader("Connection", "keep-alive");
 
     const baseParams = {
       text: req.query.text || "Hola",
       lang: req.query.lang || "es",
-      rate: req.query.rate || "1.10",
-      temp: req.query.temp || "0.6",
+      rate: req.query.rate,
+      temp: req.query.temp,
       fx: req.query.fx || "0",
       hpf: req.query.hpf, lpf: req.query.lpf, warm_db: req.query.warm_db,
       air_db: req.query.air_db, presence_db: req.query.presence_db,
@@ -332,6 +366,10 @@ app.get("/api/tts", async (req, res) => {
       provider: req.query.provider || TTS_PROVIDER_DEFAULT,
       t: Date.now().toString(), // cache-bust
     };
+
+    // Selección auto y tuning
+    baseParams.provider = pickProvider(baseParams.lang, baseParams.provider);
+    tuneByLang(baseParams);
 
     for (const prov of [baseParams.provider, "google"].filter(Boolean)) {
       const url = new URL("/tts", VOZ_URL);
@@ -343,7 +381,7 @@ app.get("/api/tts", async (req, res) => {
       const up = await fetch(url.toString(), { headers: { "Accept": "audio/wav" } });
       if (!up.ok) continue;
 
-      // Prepara respuesta CHUNKED
+      // Respuesta CHUNKED
       res.status(200);
       res.setHeader("Content-Type", up.headers.get("content-type") || "audio/wav");
       res.removeHeader("Content-Length");
@@ -351,7 +389,6 @@ app.get("/api/tts", async (req, res) => {
 
       if (!up.body) return res.end();
 
-      // 🔎 Medimos tiempo al primer byte para diagnosticar el tapón
       const reader = up.body.getReader();
       let first = true;
       let total = 0;
@@ -390,7 +427,6 @@ app.get("/api/tts", async (req, res) => {
   }
 });
 
-
 // Genera WAV, guarda y devuelve URL proxificada
 app.get("/api/tts_save", async (req,res)=>{
   try{
@@ -399,8 +435,8 @@ app.get("/api/tts_save", async (req,res)=>{
     const baseParams = {
       text: req.query.text || "Hola",
       lang: req.query.lang || "es",
-      rate: req.query.rate || "1.10",
-      temp: req.query.temp || "0.6",
+      rate: req.query.rate,
+      temp: req.query.temp,
       fx: req.query.fx || "0",
       hpf: req.query.hpf, lpf: req.query.lpf, warm_db: req.query.warm_db,
       air_db: req.query.air_db, presence_db: req.query.presence_db,
@@ -408,6 +444,10 @@ app.get("/api/tts_save", async (req,res)=>{
       comp: req.query.comp, width_ms: req.query.width_ms, pitch_st: req.query.pitch_st, gain_db: req.query.gain_db,
       provider: req.query.provider || TTS_PROVIDER_DEFAULT
     };
+
+    // Selección auto y tuning
+    baseParams.provider = pickProvider(baseParams.lang, baseParams.provider);
+    tuneByLang(baseParams);
 
     const resp = await fetchTTSWithFallback("/tts_save", baseParams);
     if (!resp.ok) {
@@ -451,8 +491,8 @@ app.post("/api/tts_from_json", async (req,res)=>{
     const baseParams = {
       text: b.text || "Hola",
       lang: b.lang || "es",
-      rate: b.rate ?? "1.10",
-      temp: b.temp ?? "0.6",
+      rate: b.rate,
+      temp: b.temp,
       fx: b.fx?.fx ? 1 : b.fx?.enable ? 1 : 0,
       hpf: b.fx?.hpf, lpf: b.fx?.lpf, warm_db: b.fx?.warm_db,
       air_db: b.fx?.air_db, presence_db: b.fx?.presence_db,
@@ -460,6 +500,10 @@ app.post("/api/tts_from_json", async (req,res)=>{
       comp: b.fx?.comp, width_ms: b.fx?.width_ms, pitch_st: b.fx?.pitch_st, gain_db: b.fx?.gain_db,
       provider: b.provider || (String(b.source||"").startsWith("xtts") ? "xtts" : TTS_PROVIDER_DEFAULT)
     };
+
+    // Selección auto y tuning
+    baseParams.provider = pickProvider(baseParams.lang, baseParams.provider);
+    tuneByLang(baseParams);
 
     const resp = await fetchTTSWithFallback("/tts_save", baseParams);
     if (!resp.ok) return res.status(500).json({ ok:false, upstream_status:resp.status, detail:resp.detail||"tts_save upstream failed" });
@@ -586,27 +630,31 @@ app.get("/api/_diag/tts_probe", async (req, res) => {
     const baseParams = {
       text: req.query.text || "hola",
       lang: req.query.lang || "es",
-      rate: req.query.rate || "1.1",
-      temp: req.query.temp || "0.6",
+      rate: req.query.rate,
+      temp: req.query.temp,
       provider: req.query.provider || TTS_PROVIDER_DEFAULT,
       t: Date.now().toString(),
     };
+
+    // Selección auto y tuning
+    baseParams.provider = pickProvider(baseParams.lang, baseParams.provider);
+    tuneByLang(baseParams);
+
     const url = new URL("/tts", VOZ_URL); url.search = toQS(baseParams);
     const t0 = Date.now();
     const up = await fetch(url.toString());
     const tConn = Date.now() - t0;
-    if (!up.body) return res.json({ ok:false, status: up.status, note:"no_body", tConn });
+    if (!up.body) return res.json({ ok:false, status: up.status, note:"no_body", connect_ms: tConn });
     const reader = up.body.getReader();
-    const t1 = Date.now();
     let tFirst = null, total = 0;
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
       total += value.byteLength;
       if (tFirst === null) tFirst = Date.now() - t0;
-      if (total > 96*1024) break; // con ~100KB ya medimos
+      if (total > 96*1024) break;
     }
-    res.json({ ok:true, status: up.status, connect_ms: tConn, first_byte_ms: tFirst ?? -1, sampled_bytes: total });
+    res.json({ ok:true, status: up.status, connect_ms: tConn, first_byte_ms: tFirst ?? -1, sampled_bytes: total, provider_used: baseParams.provider });
   } catch (e) {
     res.status(500).json({ ok:false, error:String(e) });
   }
