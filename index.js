@@ -1,7 +1,6 @@
 // index.js — Backend minimal (sin DB) para Jesús Interactivo
-// Versión ESTABLE: sin anti-dup, sin auto-provider, sin afinados.
-// /api/tts = streaming, /api/tts_save = guarda y devuelve URL proxificada.
-// viewer proxy, ingest opcional, /api/ask rápido.
+// Versión estable + anti-eco de texto y anti-doble-disparo opcional.
+// /api/tts = streaming (chunked); /api/tts_save = guarda y devuelve URL proxificada.
 
 require("dotenv").config();
 
@@ -20,7 +19,7 @@ const { Readable } = require("node:stream");
 // ===== TLS agent (self-signed) para JESUS_URL (backend↔backend) =====
 const INSECURE_AGENT =
   process.env.JESUS_INSECURE_TLS === "1"
-    ? new https.Agent({ rejectUnauthorized: false })
+    ? new https.Agent({ rejectUnauthorized: false, keepAlive: true })
     : undefined;
 
 // ===== wrtc (opcional) + ffmpeg =====
@@ -101,7 +100,7 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 // ===== Health =====
 app.get("/", (_req, res) => res.json({ ok: true, service: "backend", ts: Date.now() }));
 
-// ===== Bienvenida mínima (texto + pregunta, para UI) =====
+// ===== Bienvenida mínima =====
 function greetingByHour(lang="es", hour=null) {
   const h = Number.isInteger(hour) ? hour : new Date().getHours();
   const g = (m,a,n)=> (h<12?m:h<19?a:n);
@@ -136,7 +135,7 @@ app.post("/api/welcome", (req,res)=>{
   }
 });
 
-// ===== /api/ask (rápido, sin florituras) =====
+// ===== /api/ask (rápido) =====
 app.post("/api/ask", async (req,res)=>{
   try{
     const { message="", history=[], lang="es" } = req.body||{};
@@ -185,7 +184,7 @@ Responde en ${lang}. Devuelve SOLO JSON: {"message":"...", "question":"...","bib
   }
 });
 
-// ===== VOZ (estado simple) =====
+// ===== VOZ (estado) =====
 app.get("/api/voice/current", (_req,res)=>{
   res.json({ ok:true, provider_default: TTS_PROVIDER_DEFAULT, fixed_ref: CURRENT_REF });
 });
@@ -200,32 +199,32 @@ app.get("/api/health", async (_req,res)=>{
   }catch(e){ res.status(500).json({ ok:false, error:String(e) }); }
 });
 
-app.get("/api/voice/diag", async (req,res)=>{
-  try{
-    if (!VOZ_URL) return res.status(500).json({ ok:false, error:"missing_VOZ_URL" });
-    const text = req.query.text || "ping de prueba";
-    const base = { text, lang:"es", provider: TTS_PROVIDER_DEFAULT||"google", rate:"1.0", temp:"0.6", fx:"0" };
-    const url = new URL("/tts_save", VOZ_URL);
-    url.search = toQS(base);
-    const t0 = Date.now();
-    const up = await fetch(url.toString());
-    const ms = Date.now()-t0;
-    const body = await up.text().catch(()=> "");
-    let j = {}; try{ j = JSON.parse(body); }catch{ j = { raw: body } }
-    const upstream = j.url || j.file || j.path;
-    if (upstream) {
-      try {
-        const name = new URL(upstream).pathname.split("/").pop();
-        j.url = `${publicBase(req)}/api/files/${encodeURIComponent(name)}`;
-      } catch {}
-    }
-    res.json({ ok: up.ok, upstream_status: up.status, ms, data: j, fixed_ref: CURRENT_REF });
-  } catch(e) {
-    res.status(500).json({ ok:false, error:String(e) });
-  }
-});
+// ======= Anti-eco de texto (suave) =======
+function collapseImmediateDupes(s) {
+  if (!s) return s;
+  let txt = String(s).replace(/\s+/g, " ").trim();
 
-// ===== helper: fallback xtts → google, pero SIN auto nada =====
+  // 1) Quitar repeticiones exactas "A. A." o "A A" pegadas
+  txt = txt.replace(/(\b[\p{L}\p{N}’'´-]+(?:[^\S\r\n]+|[,;:]\s*)?){2,}/gu, (m) => {
+    // Heurística: si son 2 tokens idénticos seguidos, reduce
+    const parts = m.trim().split(/\s+/);
+    if (parts.length === 2 && parts[0].toLowerCase() === parts[1].toLowerCase()) return parts[0];
+    return m;
+  });
+
+  // 2) Por oraciones: elimina repetición inmediata exacta (case/espacios ignorados)
+  const sent = txt.split(/(?<=[.!?…])\s+/);
+  const out = [];
+  for (const s of sent) {
+    const norm = s.replace(/\s+/g," ").trim().toLowerCase();
+    const prev = out.length ? out[out.length-1].replace(/\s+/g," ").trim().toLowerCase() : "";
+    if (norm && norm === prev) continue; // drop duplicado inmediato
+    out.push(s);
+  }
+  return out.join(" ").replace(/\s+/g," ").trim();
+}
+
+// ===== helper: fallback xtts → google, sin auto-tuning =====
 async function fetchTTSWithFallback(endpointPath, baseParams) {
   const prefer = String(baseParams.provider || TTS_PROVIDER_DEFAULT || "google");
   const providers = [prefer, (prefer.toLowerCase()==="xtts" ? "google" : "xtts")];
@@ -235,7 +234,7 @@ async function fetchTTSWithFallback(endpointPath, baseParams) {
     const params = { ...baseParams, provider };
     if (provider.toLowerCase() === "xtts" && CURRENT_REF) params.ref = CURRENT_REF; else delete params.ref;
     url.search = toQS(params);
-    const up = await fetch(url.toString());
+    const up = await fetch(url.toString(), { headers: { Connection: "keep-alive", Accept: "audio/wav" } });
     const txt = await up.text().catch(()=> "");
     if (up.ok) return { ok:true, provider, status: up.status, body: txt, response: up };
     last = { status: up.status||0, text: txt };
@@ -243,15 +242,25 @@ async function fetchTTSWithFallback(endpointPath, baseParams) {
   return { ok:false, status:last.status, detail:last.text };
 }
 
-// ===== STREAMING WAV (chunked), rápido =====
+// ===== Anti-doble-disparo: cache 1.2s por (ip+text+lang+prov) =====
+const recentTTS = new Map(); // key -> ts
+function ttsKey(ip, p) {
+  return `${ip}|${(p.lang||"es").toLowerCase()}|${(p.provider||TTS_PROVIDER_DEFAULT).toLowerCase()}|${(p.text||"").trim()}`;
+}
+function isRecent(ip, p, windowMs=1200) {
+  const k = ttsKey(ip,p);
+  const now = Date.now();
+  const last = recentTTS.get(k) || 0;
+  recentTTS.set(k, now);
+  // limpieza simple
+  for (const [kk, vv] of Array.from(recentTTS.entries())) if (now - vv > 4000) recentTTS.delete(kk);
+  return (now - last) < windowMs;
+}
+
+// ===== STREAMING WAV (chunked) =====
 app.get("/api/tts", async (req, res) => {
   try {
     if (!VOZ_URL) return res.status(500).json({ ok: false, error: "missing_VOZ_URL" });
-
-    try { req.socket.setNoDelay(true); } catch {}
-    res.setHeader("Cache-Control", "no-store");
-    res.setHeader("X-Accel-Buffering", "no");
-    res.setHeader("Connection", "keep-alive");
 
     const baseParams = {
       text: req.query.text || "Hola",
@@ -263,6 +272,23 @@ app.get("/api/tts", async (req, res) => {
       t: Date.now().toString(),
     };
 
+    // anti-eco de texto (no toca signos, sólo duplicados inmediatos)
+    baseParams.text = collapseImmediateDupes(baseParams.text);
+
+    // anti doble disparo (se puede desactivar con ?bypass_dedupe=1)
+    const bypass = String(req.query.bypass_dedupe || "0") === "1";
+    const ip = (req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").toString().split(",")[0].trim();
+    if (!bypass && isRecent(ip, baseParams)) {
+      res.status(208).json({ ok:false, note:"duplicate_tts_suppressed" });
+      return;
+    }
+
+    // TCP/HTTP para latencia baja
+    try { req.socket.setNoDelay(true); } catch {}
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.setHeader("Connection", "keep-alive");
+
     // 1) intenta proveedor pedido/default (por defecto: google)
     // 2) cae al otro si falla
     for (const prov of [baseParams.provider, (baseParams.provider.toLowerCase()==="xtts"?"google":"xtts")]) {
@@ -272,7 +298,7 @@ app.get("/api/tts", async (req, res) => {
       url.search = toQS(params);
 
       const t0 = Date.now();
-      const up = await fetch(url.toString(), { headers: { "Accept": "audio/wav" } });
+      const up = await fetch(url.toString(), { headers: { "Accept": "audio/wav", "Connection": "keep-alive" } });
       if (!up.ok) continue;
 
       res.status(200);
@@ -312,7 +338,7 @@ app.get("/api/tts", async (req, res) => {
   }
 });
 
-// ===== Genera WAV y guarda (para reproducir vía <audio src>) =====
+// ===== Genera WAV y guarda (para <audio src>) =====
 app.get("/api/tts_save", async (req,res)=>{
   try{
     if (!VOZ_URL) return res.status(500).json({ ok:false, error:"missing_VOZ_URL" });
@@ -326,6 +352,8 @@ app.get("/api/tts_save", async (req,res)=>{
       provider: req.query.provider || TTS_PROVIDER_DEFAULT,
       t: Date.now().toString()
     };
+
+    baseParams.text = collapseImmediateDupes(baseParams.text);
 
     const resp = await fetchTTSWithFallback("/tts_save", baseParams);
     if (!resp.ok) return res.status(500).json({ ok:false, upstream_status:resp.status, detail:resp.detail||"tts_save upstream failed" });
@@ -463,7 +491,7 @@ app.get("/api/_diag/tts_probe", async (req, res) => {
   try {
     if (!VOZ_URL) return res.status(500).json({ ok:false, error:"missing_VOZ_URL" });
     const baseParams = {
-      text: req.query.text || "hola",
+      text: collapseImmediateDupes(req.query.text || "hola"),
       lang: req.query.lang || "es",
       rate: req.query.rate || "1.10",
       temp: req.query.temp || "0.55",
