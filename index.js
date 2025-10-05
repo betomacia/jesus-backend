@@ -47,13 +47,14 @@ const VOZ_URL   = (process.env.VOZ_URL   || "").trim();
 if (!JESUS_URL) console.warn("[WARN] Falta JESUS_URL");
 if (!VOZ_URL)   console.warn("[WARN] Falta VOZ_URL");
 
-// 🔑 RÁPIDO por defecto
-const TTS_PROVIDER_DEFAULT = (process.env.TTS_PROVIDER || "google").trim();
+// 🔑 Por defecto usamos XTTS (GPU). Cambiá con env TTS_PROVIDER si querés.
+const TTS_PROVIDER_DEFAULT = (process.env.TTS_PROVIDER || "xtts").trim();
 
 // ref fija para xtts (si usás xtts)
 let CURRENT_REF = (process.env.VOICE_REF || "jesus2.mp3").trim();
 
 const app = express();
+app.set("trust proxy", true);
 
 // ----- CORS global -----
 app.use((req, res, next) => {
@@ -204,29 +205,24 @@ function collapseImmediateDupes(s) {
   if (!s) return s;
   let txt = String(s).replace(/\s+/g, " ").trim();
 
-  // 1) Quitar repeticiones exactas "A. A." o "A A" pegadas
-  txt = txt.replace(/(\b[\p{L}\p{N}’'´-]+(?:[^\S\r\n]+|[,;:]\s*)?){2,}/gu, (m) => {
-    // Heurística: si son 2 tokens idénticos seguidos, reduce
-    const parts = m.trim().split(/\s+/);
-    if (parts.length === 2 && parts[0].toLowerCase() === parts[1].toLowerCase()) return parts[0];
-    return m;
-  });
+  // Elimina “A A” o “A. A.” inmediatos
+  txt = txt.replace(/(\b[\p{L}\p{N}’'´-]+)(\s+\1\b)/giu, "$1");
 
-  // 2) Por oraciones: elimina repetición inmediata exacta (case/espacios ignorados)
+  // Por oraciones: elimina repetición inmediata exacta
   const sent = txt.split(/(?<=[.!?…])\s+/);
   const out = [];
-  for (const s of sent) {
-    const norm = s.replace(/\s+/g," ").trim().toLowerCase();
+  for (const s2 of sent) {
+    const norm = s2.replace(/\s+/g," ").trim().toLowerCase();
     const prev = out.length ? out[out.length-1].replace(/\s+/g," ").trim().toLowerCase() : "";
-    if (norm && norm === prev) continue; // drop duplicado inmediato
-    out.push(s);
+    if (norm && norm === prev) continue;
+    out.push(s2);
   }
   return out.join(" ").replace(/\s+/g," ").trim();
 }
 
 // ===== helper: fallback xtts → google, sin auto-tuning =====
 async function fetchTTSWithFallback(endpointPath, baseParams) {
-  const prefer = String(baseParams.provider || TTS_PROVIDER_DEFAULT || "google");
+  const prefer = String(baseParams.provider || TTS_PROVIDER_DEFAULT || "xtts");
   const providers = [prefer, (prefer.toLowerCase()==="xtts" ? "google" : "xtts")];
   let last = { status: 0, text: "" };
   for (const provider of providers) {
@@ -275,7 +271,7 @@ app.get("/api/tts", async (req, res) => {
     // anti-eco de texto (no toca signos, sólo duplicados inmediatos)
     baseParams.text = collapseImmediateDupes(baseParams.text);
 
-    // anti doble disparo (se puede desactivar con ?bypass_dedupe=1)
+    // anti doble disparo (desactivar con ?bypass_dedupe=1)
     const bypass = String(req.query.bypass_dedupe || "0") === "1";
     const ip = (req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").toString().split(",")[0].trim();
     if (!bypass && isRecent(ip, baseParams)) {
@@ -289,7 +285,7 @@ app.get("/api/tts", async (req, res) => {
     res.setHeader("X-Accel-Buffering", "no");
     res.setHeader("Connection", "keep-alive");
 
-    // 1) intenta proveedor pedido/default (por defecto: google)
+    // 1) intenta proveedor pedido/default
     // 2) cae al otro si falla
     for (const prov of [baseParams.provider, (baseParams.provider.toLowerCase()==="xtts"?"google":"xtts")]) {
       const url = new URL("/tts", VOZ_URL);
@@ -486,7 +482,7 @@ app.post("/api/ingest/stop", async (req,res)=>{
   res.json({ ok:true });
 });
 
-// ===== Probe =====
+// ===== Probe (parcheado: ignora TypeError: terminated de undici al cancelar) =====
 app.get("/api/_diag/tts_probe", async (req, res) => {
   try {
     if (!VOZ_URL) return res.status(500).json({ ok:false, error:"missing_VOZ_URL" });
@@ -500,19 +496,33 @@ app.get("/api/_diag/tts_probe", async (req, res) => {
     };
     const url = new URL("/tts", VOZ_URL); url.search = toQS(baseParams);
     const t0 = Date.now();
-    const up = await fetch(url.toString());
+    const up = await fetch(url.toString(), { headers: { Accept: "audio/wav" } });
     const tConn = Date.now() - t0;
+
     if (!up.body) return res.json({ ok:false, status: up.status, note:"no_body", connect_ms: tConn });
+
     const reader = up.body.getReader();
-    let tFirst = null, total = 0;
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (tFirst === null) tFirst = Date.now() - t0;
-      if (total > 96*1024) break;
+    let tFirst = null, total = 0, ok = true;
+
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (tFirst === null) tFirst = Date.now() - t0;
+        if (total > 96 * 1024) { // ~100KB bastan para medir
+          await reader.cancel(); // <- cancelar explicitamente
+          break;
+        }
+      }
+    } catch (e) {
+      // undici lanza "TypeError: terminated" cuando cancelamos; lo tratamos como OK.
+      if (!(e instanceof TypeError && String(e.message || "").includes("terminated"))) {
+        ok = false;
+      }
     }
-    res.json({ ok:true, status: up.status, connect_ms: tConn, first_byte_ms: tFirst ?? -1, sampled_bytes: total });
+
+    res.json({ ok, status: up.status, connect_ms: tConn, first_byte_ms: tFirst ?? -1, sampled_bytes: total, provider_used: baseParams.provider });
   } catch (e) {
     res.status(500).json({ ok:false, error:String(e) });
   }
