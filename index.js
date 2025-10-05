@@ -313,6 +313,12 @@ app.get("/api/tts", async (req, res) => {
   try {
     if (!VOZ_URL) return res.status(500).json({ ok: false, error: "missing_VOZ_URL" });
 
+    // 👉 ayuda contra proxies y arranque lento
+    try { req.socket.setNoDelay(true); } catch {}
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("X-Accel-Buffering", "no");     // Nginx: desactiva buffering
+    res.setHeader("Connection", "keep-alive");    // mantener conexión viva
+
     const baseParams = {
       text: req.query.text || "Hola",
       lang: req.query.lang || "es",
@@ -337,10 +343,9 @@ app.get("/api/tts", async (req, res) => {
 
       // 👉 Streaming sin Content-Length (chunked), sin cache
       res.status(200);
-      res.setHeader("Cache-Control", "no-store");
       res.setHeader("Content-Type", up.headers.get("content-type") || "audio/wav");
       res.removeHeader("Content-Length"); // importante: no forzar tamaño fijo
-      // Nota: Node enviará Transfer-Encoding: chunked automáticamente al no poner Content-Length
+      if (typeof res.flushHeaders === "function") res.flushHeaders(); // ¡manda headers YA!
 
       if (!up.body) return res.end();
       return Readable.fromWeb(up.body).pipe(res);
