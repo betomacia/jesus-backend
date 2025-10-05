@@ -104,22 +104,6 @@ app.use((req, res, next) => {
 app.use(cors({ origin: true }));
 app.use(bodyParser.json());
 
-// JSON por defecto salvo binarios/audio
-app.use((req, res, next) => {
-  const p = req.path || "";
-  if (
-    p.startsWith("/api/viewer/assets") ||
-    p.startsWith("/api/assets/") ||
-    p.startsWith("/api/files/") ||
-    p.startsWith("/api/tts")
-  ) return next();
-  res.set("Content-Type", "application/json; charset=utf-8");
-  next();
-});
-
-// ===== OpenAI =====
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
 // ===== Utils =====
 const NORM = (s="") => String(s).toLowerCase().replace(/\s+/g," ").trim();
 const publicBase = (req) => process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get("host")}`;
@@ -143,6 +127,50 @@ async function pipeUpstream(up, res, fallbackType = "application/octet-stream") 
   const cr = up.headers.get("accept-ranges"); if (cr) res.setHeader("Accept-Ranges", cr);
   if (!up.body) return res.end();
   return Readable.fromWeb(up.body).pipe(res);
+}
+
+// ===== JSON por defecto salvo binarios/audio
+app.use((req, res, next) => {
+  const p = req.path || "";
+  if (
+    p.startsWith("/api/viewer/assets") ||
+    p.startsWith("/api/assets/") ||
+    p.startsWith("/api/files/") ||
+    p.startsWith("/api/tts")
+  ) return next();
+  res.set("Content-Type", "application/json; charset=utf-8");
+  next();
+});
+
+// ===== OpenAI =====
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+// ===== Logger + Anti-duplicados (ventana corta) =====
+app.use((req, _res, next) => {
+  if (req.path === "/api/tts" || req.path === "/api/tts_save") {
+    const q = req.query || {};
+    const txt = String(q.text || "").slice(0, 120).replace(/\s+/g, " ");
+    console.log(`[tts hit] ${req.path} lang=${q.lang || "es"} provider=${q.provider || "-"} text="${txt}"`);
+  }
+  next();
+});
+
+const lastTtsHits = new Map(); // key -> timestamp
+function ttsKey(q) {
+  return [
+    (q.text || "").trim(),
+    q.lang || "es",
+    q.provider || "",
+    q.rate || "",
+    q.temp || "",
+    q.fx || 0
+  ].join("|");
+}
+function isDuplicateHit(key, windowMs = 2500) {
+  const now = Date.now();
+  const last = lastTtsHits.get(key) || 0;
+  lastTtsHits.set(key, now);
+  return (now - last) < windowMs;
 }
 
 // ===== Health mínimos =====
@@ -347,7 +375,14 @@ app.get("/api/tts", async (req, res) => {
   try {
     if (!VOZ_URL) return res.status(500).json({ ok: false, error: "missing_VOZ_URL" });
 
-    // 👉 anti-buffering y menor latencia
+    // Anti-duplicados (evita repeticiones si el front dispara doble)
+    const dupKey = ttsKey(req.query || {});
+    if (isDuplicateHit(dupKey)) {
+      res.status(202).set("Content-Type","audio/wav").end();
+      return;
+    }
+
+    // anti-buffering y menor latencia
     try { req.socket.setNoDelay(true); } catch {}
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("X-Accel-Buffering", "no");
@@ -389,11 +424,19 @@ app.get("/api/tts", async (req, res) => {
 
       if (!up.body) return res.end();
 
+      // Si el cliente se va, cancelamos lectura upstream
       const reader = up.body.getReader();
+      let aborted = false;
+      req.on("aborted", () => {
+        aborted = true;
+        try { reader.cancel(); } catch {}
+      });
+
       let first = true;
       let total = 0;
 
       async function pump() {
+        if (aborted) return;
         const { value, done } = await reader.read();
         if (done) {
           try { res.end(); } catch {}
@@ -412,6 +455,7 @@ app.get("/api/tts", async (req, res) => {
         } catch (e) {
           console.error("[tts stream write err]", e);
           try { res.end(); } catch {}
+          try { reader.cancel(); } catch {}
           return;
         }
         return pump();
@@ -431,6 +475,12 @@ app.get("/api/tts", async (req, res) => {
 app.get("/api/tts_save", async (req,res)=>{
   try{
     if (!VOZ_URL) return res.status(500).json({ ok:false, error:"missing_VOZ_URL" });
+
+    // Anti-duplicados ligeros para tts_save
+    const dupKey = ttsKey(req.query || {});
+    if (isDuplicateHit(dupKey)) {
+      return res.json({ ok:true, duplicate:true });
+    }
 
     const baseParams = {
       text: req.query.text || "Hola",
@@ -541,8 +591,8 @@ app.get("/api/viewer/assets/:file", async (req,res)=>{
     res.status(502).set("Content-Type","application/json; charset=utf-8").json({ error:"asset_proxy_exception", detail:String(e) });
   }
 });
-app.get("/api/assets/idle",(req,res)=>{ req.params.file="idle_loop.mp4"; app._router.handle(req,res,()=>{},"get","/api/viewer/assets/:file"); });
-app.get("/api/assets/talk",(req,res)=>{ req.params.file="talk.mp4"; app._router.handle(req,res,()=>{},"get","/api/viewer/assets/:file"); });
+app.get("/api/assets/idle",(req,res)=> res.redirect(302, "/api/viewer/assets/idle_loop.mp4"));
+app.get("/api/assets/talk",(req,res)=> res.redirect(302, "/api/viewer/assets/talk.mp4"));
 
 // ===== Viewer offer =====
 app.post("/api/viewer/offer", async (req,res)=>{
