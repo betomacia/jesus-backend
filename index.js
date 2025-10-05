@@ -11,8 +11,6 @@ if (process.env.JESUS_INSECURE_TLS === "1") {
 const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
-const path = require("path");
-const fs = require("fs/promises");
 const OpenAI = require("openai");
 const { spawn } = require("child_process");
 const https = require("https");
@@ -50,21 +48,13 @@ if (!JESUS_URL) console.warn("[WARN] Falta JESUS_URL");
 if (!VOZ_URL)   console.warn("[WARN] Falta VOZ_URL");
 
 const TTS_PROVIDER_DEFAULT = (process.env.TTS_PROVIDER || "xtts").trim();
-
-// Voz fija para XTTS (referencia /refs/ del servidor jesus-voz)
 let CURRENT_REF = (process.env.VOICE_REF || "jesus2.mp3").trim(); // ej.: jesus2.mp3
 
 // ===== Selector automático por idioma + tuning =====
 const PROVIDER_BY_LANG = {
-  es: "xtts",  // timbre clonado
-  it: "xtts",
-  fr: "xtts",
-  en: "google", // prosodia muy estable
-  pt: "google",
-  de: "google",
-  ca: "google",
+  es: "xtts", it: "xtts", fr: "xtts",
+  en: "google", pt: "google", de: "google", ca: "google",
 };
-
 const VOICE_TUNING = {
   es: { rate: "1.10", temp: "0.55" },
   it: { rate: "1.08", temp: "0.55" },
@@ -74,7 +64,6 @@ const VOICE_TUNING = {
   de: { rate: "1.00", temp: "0.55" },
   ca: { rate: "1.06", temp: "0.55" },
 };
-
 function pickProvider(lang, fallback) {
   const l = String(lang || "es").toLowerCase();
   return PROVIDER_BY_LANG[l] || fallback || TTS_PROVIDER_DEFAULT || "google";
@@ -92,7 +81,7 @@ function tuneByLang(params) {
 // ===== App =====
 const app = express();
 
-// ----- CORS global (incluye errores/404/500/OPTIONS) -----
+// ----- CORS global -----
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
@@ -105,18 +94,10 @@ app.use(cors({ origin: true }));
 app.use(bodyParser.json());
 
 // ===== Utils =====
-const NORM = (s="") => String(s).toLowerCase().replace(/\s+/g," ").trim();
 const publicBase = (req) => process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get("host")}`;
-
 function toQS(obj) {
   const s = new URLSearchParams();
   for (const [k,v] of Object.entries(obj||{})) if (v !== undefined && v !== null && v !== "") s.append(k, String(v));
-  return s.toString();
-}
-function mergeQS(a = {}, b = {}) {
-  const s = new URLSearchParams();
-  for (const [k, v] of Object.entries(a)) if (v !== undefined) s.append(k, v);
-  for (const [k, v] of Object.entries(b)) if (v !== undefined) s.set(k, String(v));
   return s.toString();
 }
 async function pipeUpstream(up, res, fallbackType = "application/octet-stream") {
@@ -132,12 +113,7 @@ async function pipeUpstream(up, res, fallbackType = "application/octet-stream") 
 // ===== JSON por defecto salvo binarios/audio
 app.use((req, res, next) => {
   const p = req.path || "";
-  if (
-    p.startsWith("/api/viewer/assets") ||
-    p.startsWith("/api/assets/") ||
-    p.startsWith("/api/files/") ||
-    p.startsWith("/api/tts")
-  ) return next();
+  if (p.startsWith("/api/viewer/assets") || p.startsWith("/api/assets/") || p.startsWith("/api/files/") || p.startsWith("/api/tts")) return next();
   res.set("Content-Type", "application/json; charset=utf-8");
   next();
 });
@@ -145,16 +121,15 @@ app.use((req, res, next) => {
 // ===== OpenAI =====
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// ===== Logger + Anti-duplicados (ventana corta) =====
+// ===== Logger + Anti-duplicados =====
 app.use((req, _res, next) => {
-  if (req.path === "/api/tts" || req.path === "/api/tts_save") {
+  if (req.path === "/api/tts" || req.path === "/api/tts_save" || req.path === "/api/tts_fast") {
     const q = req.query || {};
     const txt = String(q.text || "").slice(0, 120).replace(/\s+/g, " ");
     console.log(`[tts hit] ${req.path} lang=${q.lang || "es"} provider=${q.provider || "-"} text="${txt}"`);
   }
   next();
 });
-
 const lastTtsHits = new Map(); // key -> timestamp
 function ttsKey(q) {
   return [
@@ -166,7 +141,7 @@ function ttsKey(q) {
     q.fx || 0
   ].join("|");
 }
-function isDuplicateHit(key, windowMs = 2500) {
+function isDuplicateHit(key, windowMs = 1800) { // ventana un poco más corta
   const now = Date.now();
   const last = lastTtsHits.get(key) || 0;
   lastTtsHits.set(key, now);
@@ -175,18 +150,6 @@ function isDuplicateHit(key, windowMs = 2500) {
 
 // ===== Health mínimos =====
 app.get("/", (_req, res) => res.json({ ok: true, service: "backend", ts: Date.now() }));
-
-app.get("/api/_diag/viewer_check", async (_req, res) => {
-  try {
-    if (!JESUS_URL) return res.status(500).json({ ok:false, error:"missing_JESUS_URL" });
-    const r = await fetch(`${JESUS_URL}/health`, { agent: INSECURE_AGENT });
-    const j = await r.json().catch(()=> ({}));
-    if (!r.ok) return res.status(r.status).json({ ok:false, error:"health_non_200", detail:j, jesus_url:JESUS_URL });
-    res.json({ ok:true, jesus_url:JESUS_URL, health:j });
-  } catch (e) {
-    res.status(500).json({ ok:false, error:"viewer_check_failed", detail:String(e), jesus_url:JESUS_URL });
-  }
-});
 
 // ===== Bienvenida =====
 function greetingByHour(lang="es", hour=null) {
@@ -225,7 +188,7 @@ app.post("/api/welcome", (req,res)=>{
   }
 });
 
-// ===== /api/ask =====
+// ===== /api/ask (más rápido) =====
 app.post("/api/ask", async (req,res)=>{
   try{
     const { message="", history=[], lang="es" } = req.body||{};
@@ -239,9 +202,9 @@ Responde en ${lang}. Devuelve SOLO JSON: {"message":"...", "question":"...","bib
     convo.push({ role: "user", content: String(message||"").trim() });
 
     const r = await openai.chat.completions.create({
-      model: "gpt-4o",
+      model: "gpt-4o-mini",   // ⚡ más veloz
       temperature: 0.6,
-      max_tokens: 360,
+      max_tokens: 240,        // ⚡ menos tokens → menos latencia
       messages: [{ role:"system", content:SYS }, ...convo],
       response_format: {
         type:"json_schema",
@@ -275,13 +238,9 @@ Responde en ${lang}. Devuelve SOLO JSON: {"message":"...", "question":"...","bib
 });
 
 // ====== VOZ (selector XTTS ref + fallback a google) ======
-
-// estado actual
 app.get("/api/voice/current", (_req,res)=>{
   res.json({ ok:true, provider_default: TTS_PROVIDER_DEFAULT, fixed_ref: CURRENT_REF, PROVIDER_BY_LANG, VOICE_TUNING });
 });
-
-// set ref por POST
 app.post("/api/voice/set_ref", async (req,res)=>{
   try{
     const name = String(req.body?.name || "").trim();
@@ -293,8 +252,6 @@ app.post("/api/voice/set_ref", async (req,res)=>{
     res.status(500).json({ ok:false, error:String(e) });
   }
 });
-
-// set ref por query (cómodo para probar rápido)
 app.get("/api/voice/use_ref", (req,res)=>{
   const name = String(req.query?.name || "").trim();
   if (!name) return res.status(400).json({ ok:false, error:"missing_name" });
@@ -302,8 +259,6 @@ app.get("/api/voice/use_ref", (req,res)=>{
   CURRENT_REF = name;
   res.json({ ok:true, fixed_ref: CURRENT_REF });
 });
-
-// health del proxy de voz
 app.get("/api/health", async (_req,res)=>{
   try{
     if (!VOZ_URL) return res.status(500).json({ ok:false, error:"missing_VOZ_URL" });
@@ -312,14 +267,11 @@ app.get("/api/health", async (_req,res)=>{
     res.json({ ok:true, proxy:"railway", voz_url:VOZ_URL, provider_default:TTS_PROVIDER_DEFAULT, fixed_ref: CURRENT_REF, upstream:j });
   }catch(e){ res.status(500).json({ ok:false, error:String(e) }); }
 });
-
-// diagnóstico rápido
 app.get("/api/voice/diag", async (req,res)=>{
   try{
     if (!VOZ_URL) return res.status(500).json({ ok:false, error:"missing_VOZ_URL" });
     const text = req.query.text || "ping de prueba";
     const base = { text, lang:"es", provider: TTS_PROVIDER_DEFAULT||"xtts", rate:"1.0", temp:"0.6", fx:"0" };
-
     const url = new URL("/tts_save", VOZ_URL);
     url.search = toQS(base);
     const t0 = Date.now();
@@ -327,7 +279,6 @@ app.get("/api/voice/diag", async (req,res)=>{
     const ms = Date.now()-t0;
     const body = await up.text().catch(()=> "");
     let j = {}; try{ j = JSON.parse(body); }catch{ j = { raw: body } }
-
     const upstream = j.url || j.file || j.path;
     if (upstream) {
       try {
@@ -349,24 +300,16 @@ async function fetchTTSWithFallback(endpointPath, baseParams) {
   ].filter((v,i,arr)=> arr.indexOf(v)===i); // únicos, xtts primero
 
   let last = { status: 0, text: "" };
-
   for (const provider of providers) {
     const url = new URL(endpointPath, VOZ_URL);
     const params = { ...baseParams, provider };
-    if (provider.toLowerCase() === "xtts" && CURRENT_REF) {
-      params.ref = CURRENT_REF;
-    } else {
-      delete params.ref;
-    }
+    if (provider.toLowerCase() === "xtts" && CURRENT_REF) params.ref = CURRENT_REF; else delete params.ref;
     url.search = toQS(params);
     const up = await fetch(url.toString());
     const txt = await up.text().catch(()=> "");
-    if (up.ok) {
-      return { ok:true, provider, status: up.status, body: txt, response: up };
-    }
+    if (up.ok) return { ok:true, provider, status: up.status, body: txt, response: up };
     last = { status: up.status||0, text: txt };
   }
-
   return { ok:false, status:last.status, detail:last.text };
 }
 
@@ -375,14 +318,14 @@ app.get("/api/tts", async (req, res) => {
   try {
     if (!VOZ_URL) return res.status(500).json({ ok: false, error: "missing_VOZ_URL" });
 
-    // Anti-duplicados (evita repeticiones si el front dispara doble)
+    // Anti-duplicados
     const dupKey = ttsKey(req.query || {});
     if (isDuplicateHit(dupKey)) {
       res.status(202).set("Content-Type","audio/wav").end();
       return;
     }
 
-    // anti-buffering y menor latencia
+    // baja latencia
     try { req.socket.setNoDelay(true); } catch {}
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("X-Accel-Buffering", "no");
@@ -399,10 +342,10 @@ app.get("/api/tts", async (req, res) => {
       reverb_wet: req.query.reverb_wet, reverb_delay: req.query.reverb_delay, reverb_tail: req.query.reverb_tail,
       comp: req.query.comp, width_ms: req.query.width_ms, pitch_st: req.query.pitch_st, gain_db: req.query.gain_db,
       provider: req.query.provider || TTS_PROVIDER_DEFAULT,
-      t: Date.now().toString(), // cache-bust
+      t: Date.now().toString(),
     };
 
-    // Selección auto y tuning
+    // Auto-proveedor y tuning
     baseParams.provider = pickProvider(baseParams.lang, baseParams.provider);
     tuneByLang(baseParams);
 
@@ -424,13 +367,9 @@ app.get("/api/tts", async (req, res) => {
 
       if (!up.body) return res.end();
 
-      // Si el cliente se va, cancelamos lectura upstream
       const reader = up.body.getReader();
       let aborted = false;
-      req.on("aborted", () => {
-        aborted = true;
-        try { reader.cancel(); } catch {}
-      });
+      req.on("aborted", () => { aborted = true; try { reader.cancel(); } catch {} });
 
       let first = true;
       let total = 0;
@@ -471,16 +410,81 @@ app.get("/api/tts", async (req, res) => {
   }
 });
 
-// Genera WAV, guarda y devuelve URL proxificada
+// ===== FAST LANE: fuerza Google, sin FX, para frases cortas =====
+app.get("/api/tts_fast", async (req, res) => {
+  try {
+    if (!VOZ_URL) return res.status(500).json({ ok:false, error:"missing_VOZ_URL" });
+
+    // anti-dup más corto
+    const dupKey = ttsKey({ ...(req.query||{}), provider: "google", fx: 0 });
+    if (isDuplicateHit(dupKey, 1200)) {
+      res.status(202).set("Content-Type","audio/wav").end();
+      return;
+    }
+
+    try { req.socket.setNoDelay(true); } catch {}
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.setHeader("Connection", "keep-alive");
+
+    const baseParams = {
+      text: req.query.text || "Hola",
+      lang: (req.query.lang || "es"),
+      rate: req.query.rate || "1.10",
+      temp: req.query.temp || "0.55",
+      provider: "google", // ⚡ siempre Google
+      fx: "0",
+      t: Date.now().toString(),
+    };
+
+    const url = new URL("/tts", VOZ_URL);
+    url.search = toQS(baseParams);
+
+    const t0 = Date.now();
+    const up = await fetch(url.toString(), { headers: { "Accept": "audio/wav" } });
+    if (!up.ok) return res.status(502).json({ ok:false, status: up.status });
+
+    res.status(200);
+    res.setHeader("Content-Type", up.headers.get("content-type") || "audio/wav");
+    res.removeHeader("Content-Length");
+    if (typeof res.flushHeaders === "function") res.flushHeaders();
+
+    if (!up.body) return res.end();
+
+    const reader = up.body.getReader();
+    let first = true;
+    let total = 0;
+
+    async function pump() {
+      const { value, done } = await reader.read();
+      if (done) {
+        try { res.end(); } catch {}
+        const ms = Date.now() - t0;
+        console.log(`[tts fast] done bytes=${total} ms=${ms}`);
+        return;
+      }
+      total += value.byteLength;
+      if (first) {
+        const ms1 = Date.now() - t0;
+        first = false;
+        console.log(`[tts fast] firstByte at ${ms1}ms`);
+      }
+      res.write(Buffer.from(value));
+      return pump();
+    }
+    return pump();
+  } catch (e) {
+    res.status(500).json({ ok:false, error:String(e) });
+  }
+});
+
+// ===== Genera WAV y guarda (fallback / descargas) =====
 app.get("/api/tts_save", async (req,res)=>{
   try{
     if (!VOZ_URL) return res.status(500).json({ ok:false, error:"missing_VOZ_URL" });
 
-    // Anti-duplicados ligeros para tts_save
     const dupKey = ttsKey(req.query || {});
-    if (isDuplicateHit(dupKey)) {
-      return res.json({ ok:true, duplicate:true });
-    }
+    if (isDuplicateHit(dupKey)) return res.json({ ok:true, duplicate:true });
 
     const baseParams = {
       text: req.query.text || "Hola",
@@ -495,16 +499,16 @@ app.get("/api/tts_save", async (req,res)=>{
       provider: req.query.provider || TTS_PROVIDER_DEFAULT
     };
 
-    // Selección auto y tuning
     baseParams.provider = pickProvider(baseParams.lang, baseParams.provider);
     tuneByLang(baseParams);
 
-    const resp = await fetchTTSWithFallback("/tts_save", baseParams);
-    if (!resp.ok) {
-      return res.status(500).json({ ok:false, upstream_status:resp.status, detail:resp.detail||"tts_save upstream failed" });
-    }
+    // Llama al upstream
+    const url = new URL("/tts_save", VOZ_URL); url.search = toQS(baseParams);
+    const up = await fetch(url.toString());
+    const txt = await up.text().catch(()=> "");
+    if (!up.ok) return res.status(500).json({ ok:false, detail: txt || "tts_save upstream failed" });
 
-    let j = {}; try { j = JSON.parse(resp.body); } catch { j = { raw: resp.body }; }
+    let j = {}; try { j = JSON.parse(txt); } catch { j = { raw: txt }; }
     const upstream = j.url || j.file || j.path;
     if (upstream) {
       try {
@@ -519,7 +523,7 @@ app.get("/api/tts_save", async (req,res)=>{
   }
 });
 
-// Sirve WAV por HTTPS (evita mixed-content)
+// ===== Sirve WAV por HTTPS (evita mixed-content) =====
 app.get("/api/files/:name", async (req,res)=>{
   try{
     if (!VOZ_URL) return res.status(500).json({ ok:false, error:"missing_VOZ_URL" });
@@ -531,146 +535,6 @@ app.get("/api/files/:name", async (req,res)=>{
   }catch(e){
     res.status(500).json({ ok:false, error:String(e) });
   }
-});
-
-// POST JSON → WAV (corto)
-app.post("/api/tts_from_json", async (req,res)=>{
-  try{
-    if (!VOZ_URL) return res.status(500).json({ ok:false, error:"missing_VOZ_URL" });
-    const b = req.body||{};
-    const baseParams = {
-      text: b.text || "Hola",
-      lang: b.lang || "es",
-      rate: b.rate,
-      temp: b.temp,
-      fx: b.fx?.fx ? 1 : b.fx?.enable ? 1 : 0,
-      hpf: b.fx?.hpf, lpf: b.fx?.lpf, warm_db: b.fx?.warm_db,
-      air_db: b.fx?.air_db, presence_db: b.fx?.presence_db,
-      reverb_wet: b.fx?.reverb_wet, reverb_delay: b.fx?.reverb_delay, reverb_tail: b.fx?.reverb_tail,
-      comp: b.fx?.comp, width_ms: b.fx?.width_ms, pitch_st: b.fx?.pitch_st, gain_db: b.fx?.gain_db,
-      provider: b.provider || (String(b.source||"").startsWith("xtts") ? "xtts" : TTS_PROVIDER_DEFAULT)
-    };
-
-    // Selección auto y tuning
-    baseParams.provider = pickProvider(baseParams.lang, baseParams.provider);
-    tuneByLang(baseParams);
-
-    const resp = await fetchTTSWithFallback("/tts_save", baseParams);
-    if (!resp.ok) return res.status(500).json({ ok:false, upstream_status:resp.status, detail:resp.detail||"tts_save upstream failed" });
-
-    let j = {}; try { j = JSON.parse(resp.body); } catch { j = { raw: resp.body }; }
-    const upstream = j.url || j.file || j.path;
-    let pub = upstream;
-    if (upstream) {
-      try {
-        const name = new URL(upstream).pathname.split("/").pop();
-        pub = `${publicBase(req)}/api/files/${encodeURIComponent(name)}`;
-      } catch {}
-    }
-    res.json({ ok:true, url: pub, file: pub, tts: j, fixed_ref: CURRENT_REF });
-  }catch(e){
-    res.status(500).json({ ok:false, error:String(e) });
-  }
-});
-
-// ===== Viewer assets/proxy =====
-app.get("/api/viewer/assets/:file", async (req,res)=>{
-  try{
-    if (!JESUS_URL) return res.status(500).json({ error:"missing_JESUS_URL" });
-    const r = await fetch(`${JESUS_URL}/assets/${encodeURIComponent(req.params.file)}`, { agent: INSECURE_AGENT });
-    if (!r.ok) {
-      const body = await r.text().catch(()=> "");
-      res.status(r.status||502).set("Content-Type","text/plain; charset=utf-8").send(body||"asset fetch failed");
-      return;
-    }
-    res.removeHeader("Content-Type");
-    res.setHeader("Content-Type", r.headers.get("content-type") || "application/octet-stream");
-    res.setHeader("Cache-Control", "no-store");
-    return Readable.fromWeb(r.body).pipe(res);
-  }catch(e){
-    res.status(502).set("Content-Type","application/json; charset=utf-8").json({ error:"asset_proxy_exception", detail:String(e) });
-  }
-});
-app.get("/api/assets/idle",(req,res)=> res.redirect(302, "/api/viewer/assets/idle_loop.mp4"));
-app.get("/api/assets/talk",(req,res)=> res.redirect(302, "/api/viewer/assets/talk.mp4"));
-
-// ===== Viewer offer =====
-app.post("/api/viewer/offer", async (req,res)=>{
-  try{
-    if (!JESUS_URL) return res.status(500).json({ error:"missing_JESUS_URL" });
-    const payload = { sdp: req.body?.sdp, type: req.body?.type };
-    if (!payload.sdp || !payload.type) return res.status(400).json({ error:"bad_offer_payload" });
-    const r = await fetch(`${JESUS_URL}/viewer/offer`, {
-      method:"POST", headers:{ "Content-Type":"application/json; charset=utf-8" },
-      body: JSON.stringify(payload), agent: INSECURE_AGENT
-    });
-    if (r.ok) return res.json(await r.json().catch(()=> ({})));
-    if (r.status===501) return res.json({ stub:true, webrtc:false, idleUrl:"/api/viewer/assets/idle_loop.mp4", talkUrl:"/api/viewer/assets/talk.mp4" });
-    const detail = await r.text().catch(()=> "");
-    res.status(r.status||502).json({ error:"viewer_proxy_failed", status:r.status||502, detail, jesus_url:JESUS_URL });
-  }catch(e){
-    res.status(200).json({ stub:true, webrtc:false, idleUrl:"/api/viewer/assets/idle_loop.mp4", talkUrl:"/api/viewer/assets/talk.mp4" });
-  }
-});
-app.get("/api/viewer/offer", (_req,res)=> res.status(405).json({ ok:false, error:"use_POST_here" }));
-
-// ===== Ingest (opcional) =====
-const sessions = new Map();
-function chunkPCM(buf, chunkBytes=1920){ const out=[]; for(let i=0;i+chunkBytes<=buf.length;i+=chunkBytes) out.push(buf.slice(i,i+chunkBytes)); return out; }
-
-app.post("/api/ingest/start", async (req,res)=>{
-  if (!RTCPeerConnection || !RTCAudioSource) return res.status(501).json({ error:"wrtc_not_available" });
-  try{
-    const { ttsUrl } = req.body||{};
-    if (!ttsUrl) return res.status(400).json({ error:"missing_ttsUrl" });
-    if (!JESUS_URL) return res.status(500).json({ error:"missing_JESUS_URL" });
-
-    const pc = new RTCPeerConnection();
-    const source = new RTCAudioSource();
-    const track = source.createTrack();
-    pc.addTrack(track);
-
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-
-    const r = await fetch(`${JESUS_URL}/ingest/offer`, {
-      method:"POST", headers:{ "Content-Type":"application/json; charset=utf-8" },
-      body: JSON.stringify({ sdp: offer.sdp, type: offer.type }), agent: INSECURE_AGENT
-    });
-    if (!r.ok) return res.status(r.status||500).json({ error:"jesus_ingest_failed", detail: await r.text().catch(()=> "") });
-    const answer = await r.json();
-    await pc.setRemoteDescription(answer);
-
-    const ff = spawn(ffmpegPath, ["-re","-i",ttsUrl,"-f","s16le","-acodec","pcm_s16le","-ac","1","-ar","48000","pipe:1"], { stdio:["ignore","pipe","inherit"] });
-
-    let leftover = Buffer.alloc(0);
-    ff.stdout.on("data",(buf)=>{
-      const data = Buffer.concat([leftover, buf]);
-      const CHUNK = 1920;
-      const chunks = chunkPCM(data, CHUNK);
-      leftover = data.slice(chunks.length*CHUNK);
-      for (const c of chunks) {
-        const samples = new Int16Array(c.buffer, c.byteOffset, c.byteLength/2);
-        source.onData({ samples, sampleRate:48000, bitsPerSample:16, channelCount:1, numberOfFrames:960 });
-      }
-    });
-
-    const id = Math.random().toString(36).slice(2,10);
-    sessions.set(id, { pc, source, ff, track });
-    res.json({ ok:true, id });
-  }catch(e){
-    res.status(500).json({ error:String(e) });
-  }
-});
-app.post("/api/ingest/stop", async (req,res)=>{
-  const { id } = req.body||{};
-  const s = id? sessions.get(id) : null;
-  if (!s) return res.json({ ok:true, note:"no_session" });
-  try{ s.ff.kill("SIGKILL"); }catch{}
-  try{ s.track.stop(); }catch{}
-  try{ await s.pc.close(); }catch{}
-  sessions.delete(id);
-  res.json({ ok:true });
 });
 
 // ===== Diag: medir TTFB directo al upstream =====
@@ -685,8 +549,6 @@ app.get("/api/_diag/tts_probe", async (req, res) => {
       provider: req.query.provider || TTS_PROVIDER_DEFAULT,
       t: Date.now().toString(),
     };
-
-    // Selección auto y tuning
     baseParams.provider = pickProvider(baseParams.lang, baseParams.provider);
     tuneByLang(baseParams);
 
