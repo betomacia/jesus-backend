@@ -307,10 +307,12 @@ async function fetchTTSWithFallback(endpointPath, baseParams) {
   return { ok:false, status:last.status, detail:last.text };
 }
 
-// WAV streaming
-app.get("/api/tts", async (req,res)=>{
-  try{
-    if (!VOZ_URL) return res.status(500).json({ ok:false, error:"missing_VOZ_URL" });
+// ===== STREAMING WAV (chunked) =====
+// 👉 Forzamos transferencia en chunks (sin Content-Length) para que el audio empiece inmediatamente.
+app.get("/api/tts", async (req, res) => {
+  try {
+    if (!VOZ_URL) return res.status(500).json({ ok: false, error: "missing_VOZ_URL" });
+
     const baseParams = {
       text: req.query.text || "Hola",
       lang: req.query.lang || "es",
@@ -327,19 +329,27 @@ app.get("/api/tts", async (req,res)=>{
     for (const prov of [baseParams.provider, "google"].filter(Boolean)) {
       const url = new URL("/tts", VOZ_URL);
       const params = { ...baseParams, provider: prov };
-      if (prov.toLowerCase()==="xtts" && CURRENT_REF) params.ref = CURRENT_REF; else delete params.ref;
+      if (prov.toLowerCase() === "xtts" && CURRENT_REF) params.ref = CURRENT_REF; else delete params.ref;
       url.search = toQS(params);
+
       const up = await fetch(url.toString());
-      if (up.ok) {
-        res.removeHeader("Content-Type");
-        return pipeUpstream(up, res, "audio/wav");
-      }
+      if (!up.ok) continue;
+
+      // 👉 Streaming sin Content-Length (chunked), sin cache
+      res.status(200);
+      res.setHeader("Cache-Control", "no-store");
+      res.setHeader("Content-Type", up.headers.get("content-type") || "audio/wav");
+      res.removeHeader("Content-Length"); // importante: no forzar tamaño fijo
+      // Nota: Node enviará Transfer-Encoding: chunked automáticamente al no poner Content-Length
+
+      if (!up.body) return res.end();
+      return Readable.fromWeb(up.body).pipe(res);
     }
 
     const fb = await fetchTTSWithFallback("/tts", baseParams);
-    return res.status(500).json({ ok:false, upstream_status:fb.status, detail:fb.detail||"tts upstream failed" });
-  }catch(e){
-    res.status(500).json({ ok:false, error:String(e) });
+    return res.status(500).json({ ok: false, upstream_status: fb.status, detail: fb.detail || "tts upstream failed" });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
   }
 });
 
