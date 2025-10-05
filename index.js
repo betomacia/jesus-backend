@@ -313,11 +313,11 @@ app.get("/api/tts", async (req, res) => {
   try {
     if (!VOZ_URL) return res.status(500).json({ ok: false, error: "missing_VOZ_URL" });
 
-    // 👉 ayuda contra proxies y arranque lento
+    // 👉 anti-buffering y menor latencia en la conexión
     try { req.socket.setNoDelay(true); } catch {}
     res.setHeader("Cache-Control", "no-store");
-    res.setHeader("X-Accel-Buffering", "no");     // Nginx: desactiva buffering
-    res.setHeader("Connection", "keep-alive");    // mantener conexión viva
+    res.setHeader("X-Accel-Buffering", "no"); // Nginx: desactiva buffering
+    res.setHeader("Connection", "keep-alive");
 
     const baseParams = {
       text: req.query.text || "Hola",
@@ -329,7 +329,8 @@ app.get("/api/tts", async (req, res) => {
       air_db: req.query.air_db, presence_db: req.query.presence_db,
       reverb_wet: req.query.reverb_wet, reverb_delay: req.query.reverb_delay, reverb_tail: req.query.reverb_tail,
       comp: req.query.comp, width_ms: req.query.width_ms, pitch_st: req.query.pitch_st, gain_db: req.query.gain_db,
-      provider: req.query.provider || TTS_PROVIDER_DEFAULT
+      provider: req.query.provider || TTS_PROVIDER_DEFAULT,
+      t: Date.now().toString(), // cache-bust
     };
 
     for (const prov of [baseParams.provider, "google"].filter(Boolean)) {
@@ -338,17 +339,48 @@ app.get("/api/tts", async (req, res) => {
       if (prov.toLowerCase() === "xtts" && CURRENT_REF) params.ref = CURRENT_REF; else delete params.ref;
       url.search = toQS(params);
 
-      const up = await fetch(url.toString());
+      const t0 = Date.now();
+      const up = await fetch(url.toString(), { headers: { "Accept": "audio/wav" } });
       if (!up.ok) continue;
 
-      // 👉 Streaming sin Content-Length (chunked), sin cache
+      // Prepara respuesta CHUNKED
       res.status(200);
       res.setHeader("Content-Type", up.headers.get("content-type") || "audio/wav");
-      res.removeHeader("Content-Length"); // importante: no forzar tamaño fijo
-      if (typeof res.flushHeaders === "function") res.flushHeaders(); // ¡manda headers YA!
+      res.removeHeader("Content-Length");
+      if (typeof res.flushHeaders === "function") res.flushHeaders();
 
       if (!up.body) return res.end();
-      return Readable.fromWeb(up.body).pipe(res);
+
+      // 🔎 Medimos tiempo al primer byte para diagnosticar el tapón
+      const reader = up.body.getReader();
+      let first = true;
+      let total = 0;
+
+      async function pump() {
+        const { value, done } = await reader.read();
+        if (done) {
+          try { res.end(); } catch {}
+          const ms = Date.now() - t0;
+          console.log(`[tts stream] done bytes=${total} ms=${ms}`);
+          return;
+        }
+        try {
+          total += value.byteLength;
+          if (first) {
+            const ms1 = Date.now() - t0;
+            first = false;
+            console.log(`[tts stream] firstByte at ${ms1}ms, provider=${prov}`);
+          }
+          res.write(Buffer.from(value));
+        } catch (e) {
+          console.error("[tts stream write err]", e);
+          try { res.end(); } catch {}
+          return;
+        }
+        return pump();
+      }
+
+      return pump();
     }
 
     const fb = await fetchTTSWithFallback("/tts", baseParams);
@@ -357,6 +389,7 @@ app.get("/api/tts", async (req, res) => {
     res.status(500).json({ ok: false, error: String(e) });
   }
 });
+
 
 // Genera WAV, guarda y devuelve URL proxificada
 app.get("/api/tts_save", async (req,res)=>{
@@ -544,6 +577,39 @@ app.post("/api/ingest/stop", async (req,res)=>{
   try{ await s.pc.close(); }catch{}
   sessions.delete(id);
   res.json({ ok:true });
+});
+
+// ===== Diag: medir TTFB directo al upstream =====
+app.get("/api/_diag/tts_probe", async (req, res) => {
+  try {
+    if (!VOZ_URL) return res.status(500).json({ ok:false, error:"missing_VOZ_URL" });
+    const baseParams = {
+      text: req.query.text || "hola",
+      lang: req.query.lang || "es",
+      rate: req.query.rate || "1.1",
+      temp: req.query.temp || "0.6",
+      provider: req.query.provider || TTS_PROVIDER_DEFAULT,
+      t: Date.now().toString(),
+    };
+    const url = new URL("/tts", VOZ_URL); url.search = toQS(baseParams);
+    const t0 = Date.now();
+    const up = await fetch(url.toString());
+    const tConn = Date.now() - t0;
+    if (!up.body) return res.json({ ok:false, status: up.status, note:"no_body", tConn });
+    const reader = up.body.getReader();
+    const t1 = Date.now();
+    let tFirst = null, total = 0;
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (tFirst === null) tFirst = Date.now() - t0;
+      if (total > 96*1024) break; // con ~100KB ya medimos
+    }
+    res.json({ ok:true, status: up.status, connect_ms: tConn, first_byte_ms: tFirst ?? -1, sampled_bytes: total });
+  } catch (e) {
+    res.status(500).json({ ok:false, error:String(e) });
+  }
 });
 
 // ===== Memory sync no-op =====
