@@ -200,6 +200,46 @@ app.get("/api/health", async (_req,res)=>{
   }catch(e){ res.status(500).json({ ok:false, error:String(e) }); }
 });
 
+// ===== Voice diag (simple) =====
+app.get("/api/voice/diag", async (req, res) => {
+  try {
+    if (!VOZ_URL) return res.status(500).json({ ok:false, error:"missing_VOZ_URL" });
+
+    const baseParams = {
+      text: String(req.query.text || "ping de voz"),
+      lang: String(req.query.lang || "es"),
+      rate: "1.10",
+      temp: "0.55",
+      provider: "xtts",
+      ref: CURRENT_REF || "",
+      t: Date.now().toString(),
+    };
+
+    const u = new URL("/tts", VOZ_URL);
+    u.search = toQS(baseParams);
+
+    const t0 = Date.now();
+    const up = await fetch(u.toString(), { headers: { Accept: "audio/wav", Connection: "keep-alive" } });
+    const connect_ms = Date.now() - t0;
+
+    if (!up.body) return res.json({ ok:false, status: up.status, note:"no_body", connect_ms });
+
+    const reader = up.body.getReader();
+    let first_byte_ms = -1, total = 0;
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (first_byte_ms === -1) first_byte_ms = Date.now() - t0;
+      if (total > 64 * 1024) { try { await reader.cancel(); } catch {} break; }
+    }
+
+    res.json({ ok: up.ok, status: up.status, connect_ms, first_byte_ms, sampled_bytes: total, provider_used: "xtts" });
+  } catch (e) {
+    res.status(500).json({ ok:false, error:String(e) });
+  }
+});
+
 // ======= Anti-eco de texto (suave) =======
 function collapseImmediateDupes(s) {
   if (!s) return s;
