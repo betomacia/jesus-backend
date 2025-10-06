@@ -200,41 +200,18 @@ app.get("/api/health", async (_req,res)=>{
   }catch(e){ res.status(500).json({ ok:false, error:String(e) }); }
 });
 
-// ===== Voice diag (simple) =====
+// ===== Voice diag (Parche C) =====
 app.get("/api/voice/diag", async (req, res) => {
   try {
     if (!VOZ_URL) return res.status(500).json({ ok:false, error:"missing_VOZ_URL" });
-
-    const baseParams = {
-      text: String(req.query.text || "ping de voz"),
-      lang: String(req.query.lang || "es"),
-      rate: "1.10",
-      temp: "0.55",
-      provider: "xtts",
-      ref: CURRENT_REF || "",
-      t: Date.now().toString(),
-    };
-
-    const u = new URL("/tts", VOZ_URL);
-    u.search = toQS(baseParams);
-
-    const t0 = Date.now();
-    const up = await fetch(u.toString(), { headers: { Accept: "audio/wav", Connection: "keep-alive" } });
-    const connect_ms = Date.now() - t0;
-
-    if (!up.body) return res.json({ ok:false, status: up.status, note:"no_body", connect_ms });
-
-    const reader = up.body.getReader();
-    let first_byte_ms = -1, total = 0;
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (first_byte_ms === -1) first_byte_ms = Date.now() - t0;
-      if (total > 64 * 1024) { try { await reader.cancel(); } catch {} break; }
-    }
-
-    res.json({ ok: up.ok, status: up.status, connect_ms, first_byte_ms, sampled_bytes: total, provider_used: "xtts" });
+    const text = req.query.text || "ping de diag";
+    const lang = req.query.lang || "es";
+    const mk = (prov) => `${req.protocol}://${req.get("host")}/api/_diag/tts_probe?text=${encodeURIComponent(text)}&lang=${encodeURIComponent(lang)}&provider=${prov}`;
+    const [xttsR, googR] = await Promise.all([
+      fetch(mk("xtts")).then(r=>r.json()).catch(()=>({ ok:false })),
+      fetch(mk("google")).then(r=>r.json()).catch(()=>({ ok:false })),
+    ]);
+    res.json({ ok:true, xtts: xttsR, google: googR, voz_url: VOZ_URL });
   } catch (e) {
     res.status(500).json({ ok:false, error:String(e) });
   }
@@ -244,11 +221,7 @@ app.get("/api/voice/diag", async (req, res) => {
 function collapseImmediateDupes(s) {
   if (!s) return s;
   let txt = String(s).replace(/\s+/g, " ").trim();
-
-  // Elimina “A A” o “A. A.” inmediatos
   txt = txt.replace(/(\b[\p{L}\p{N}’'´-]+)(\s+\1\b)/giu, "$1");
-
-  // Por oraciones: elimina repetición inmediata exacta
   const sent = txt.split(/(?<=[.!?…])\s+/);
   const out = [];
   for (const s2 of sent) {
@@ -288,12 +261,11 @@ function isRecent(ip, p, windowMs=1200) {
   const now = Date.now();
   const last = recentTTS.get(k) || 0;
   recentTTS.set(k, now);
-  // limpieza simple
   for (const [kk, vv] of Array.from(recentTTS.entries())) if (now - vv > 4000) recentTTS.delete(kk);
   return (now - last) < windowMs;
 }
 
-// ===== STREAMING WAV (chunked) =====
+// ===== STREAMING WAV (chunked) — Parche A =====
 app.get("/api/tts", async (req, res) => {
   try {
     if (!VOZ_URL) return res.status(500).json({ ok: false, error: "missing_VOZ_URL" });
@@ -308,7 +280,6 @@ app.get("/api/tts", async (req, res) => {
       t: Date.now().toString(),
     };
 
-    // anti-eco de texto (no toca signos, sólo duplicados inmediatos)
     baseParams.text = collapseImmediateDupes(baseParams.text);
 
     // anti doble disparo (desactivar con ?bypass_dedupe=1)
@@ -319,14 +290,12 @@ app.get("/api/tts", async (req, res) => {
       return;
     }
 
-    // TCP/HTTP para latencia baja
     try { req.socket.setNoDelay(true); } catch {}
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("X-Accel-Buffering", "no");
     res.setHeader("Connection", "keep-alive");
 
-    // 1) intenta proveedor pedido/default
-    // 2) cae al otro si falla
+    // 1) intenta proveedor pedido/default; 2) cae al otro si falla
     for (const prov of [baseParams.provider, (baseParams.provider.toLowerCase()==="xtts"?"google":"xtts")]) {
       const url = new URL("/tts", VOZ_URL);
       const params = { ...baseParams, provider: prov };
@@ -335,7 +304,12 @@ app.get("/api/tts", async (req, res) => {
 
       const t0 = Date.now();
       const up = await fetch(url.toString(), { headers: { "Accept": "audio/wav", "Connection": "keep-alive" } });
-      if (!up.ok) continue;
+
+      if (!up.ok) {
+        const bodyErr = await up.text().catch(()=> "");
+        console.warn(`[tts stream] upstream FAIL provider=${prov} status=${up.status} body=${(bodyErr||"").slice(0,200)}`);
+        continue;
+      }
 
       res.status(200);
       res.setHeader("Content-Type", up.headers.get("content-type") || "audio/wav");
@@ -368,13 +342,13 @@ app.get("/api/tts", async (req, res) => {
       return pump();
     }
 
-    return res.status(502).json({ ok:false, error:"tts upstream failed" });
+    return res.status(502).json({ ok:false, error:"tts upstream failed (both providers)", note:`preferred=${baseParams.provider}` });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e) });
   }
 });
 
-// ===== Genera WAV y guarda (para <audio src>) =====
+// ===== Genera WAV y guarda (para <audio src>) — Parche B =====
 app.get("/api/tts_save", async (req,res)=>{
   try{
     if (!VOZ_URL) return res.status(500).json({ ok:false, error:"missing_VOZ_URL" });
@@ -392,7 +366,10 @@ app.get("/api/tts_save", async (req,res)=>{
     baseParams.text = collapseImmediateDupes(baseParams.text);
 
     const resp = await fetchTTSWithFallback("/tts_save", baseParams);
-    if (!resp.ok) return res.status(500).json({ ok:false, upstream_status:resp.status, detail:resp.detail||"tts_save upstream failed" });
+    if (!resp.ok) {
+      console.warn(`[tts_save] upstream FAIL status=${resp.status} detail=${(resp.detail||"").slice(0,200)}`);
+      return res.status(500).json({ ok:false, upstream_status:resp.status, detail:resp.detail||"tts_save upstream failed" });
+    }
 
     let j = {}; try { j = JSON.parse(resp.body); } catch { j = { raw: resp.body }; }
     const upstream = j.url || j.file || j.path;
@@ -550,13 +527,12 @@ app.get("/api/_diag/tts_probe", async (req, res) => {
         if (done) break;
         total += value.byteLength;
         if (tFirst === null) tFirst = Date.now() - t0;
-        if (total > 96 * 1024) { // ~100KB bastan para medir
-          await reader.cancel(); // <- cancelar explicitamente
+        if (total > 96 * 1024) {
+          await reader.cancel();
           break;
         }
       }
     } catch (e) {
-      // undici lanza "TypeError: terminated" cuando cancelamos; lo tratamos como OK.
       if (!(e instanceof TypeError && String(e.message || "").includes("terminated"))) {
         ok = false;
       }
