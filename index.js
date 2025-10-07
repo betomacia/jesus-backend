@@ -13,10 +13,21 @@ const OpenAI = require("openai");
 const path = require("path");
 const fs = require("fs/promises");
 const { Readable } = require("stream"); // <-- CommonJS, evita error ESM
+const http = require("http");
+const https = require("https");
 
 // ====== fetch: Node 18+ ya lo trae global. Polyfill solo si faltara. ======
 if (typeof fetch === "undefined") {
   global.fetch = require("node-fetch");
+}
+
+// ====== Keep-Alive Agents para reducir latencias con el servidor de voz ======
+const HTTP_AGENT  = new http.Agent({ keepAlive: true, keepAliveMsecs: 10000, maxSockets: 100 });
+const HTTPS_AGENT = new https.Agent({ keepAlive: true, keepAliveMsecs: 10000, maxSockets: 100 });
+function agentFor(url) {
+  return String(url).startsWith("https:")
+    ? { agent: HTTPS_AGENT }
+    : { agent: HTTP_AGENT };
 }
 
 // ====== App ======
@@ -328,7 +339,7 @@ app.post("/api/ask", async (req, res) => {
       const q =
         lang === "en" ? "What would help you most right now—your emotions, a relationship, or your prayer life?" :
         lang === "pt" ? "O que mais ajudaria agora — suas emoções, uma relação, ou a sua vida de oração?" :
-        lang === "it" ? "Cosa ti aiuterebbe ora — le emozioni, una relazione o la tua vita di preghiera?" :
+        lang === "it" ? "Cosa ti aiuterebbe ora — le emozioni, una relazione o la tua vida di preghiera?" :
         lang === "de" ? "Was würde dir jetzt am meisten helfen – deine Gefühle, eine Beziehung oder dein Gebetsleben?" :
         lang === "ca" ? "Què t’ajudaria ara — les teves emocions, una relació o la teva vida de pregària?" :
         lang === "fr" ? "Qu’est-ce qui t’aiderait le plus — tes émotions, une relation ou ta vie de prière ?" :
@@ -485,7 +496,7 @@ app.get("/api/health", async (req, res) => {
   try {
     let upstream = null;
     try {
-      const r = await fetch(`${VOZ_URL}/health`, { method: "GET" });
+      const r = await fetch(`${VOZ_URL}/health`, { method: "GET", ...agentFor(VOZ_URL) });
       upstream = await r.json().catch(() => null);
     } catch (_) {}
     res.json({ ok: true, proxy: "railway", voz_url: VOZ_URL, upstream });
@@ -506,7 +517,7 @@ app.get("/api/tts", async (req, res) => {
     if (req.query.t)    q.set("t",    String(req.query.t));
 
     const url = `${VOZ_URL}/tts?${q.toString()}`;
-    const up  = await fetch(url, { headers: { Accept: "audio/wav" } });
+    const up  = await fetch(url, { headers: { Accept: "audio/wav" }, ...agentFor(VOZ_URL) });
 
     const ct = up.headers.get("content-type") || "audio/wav";
     const ab = await up.arrayBuffer(); // ← bufferizamos
@@ -531,7 +542,7 @@ app.get("/api/tts_save", async (req, res) => {
     if (req.query.fx)   q.set("fx",   String(req.query.fx));
     if (req.query.t)    q.set("t",    String(req.query.t));
 
-    const r = await fetch(`${VOZ_URL}/tts_save?${q.toString()}`, { headers: { Accept: "application/json" } });
+    const r = await fetch(`${VOZ_URL}/tts_save?${q.toString()}`, { headers: { Accept: "application/json" }, ...agentFor(VOZ_URL) });
     const j = await r.json();
     if (!j || !j.ok || !(j.url || j.file || j.path)) {
       return res.status(502).json({ ok:false, error:"upstream_invalid" });
@@ -556,7 +567,7 @@ app.get("/api/tts_save_segmented", async (req, res) => {
     if (req.query.rate)    q.set("rate",    String(req.query.rate));
     if (req.query.seg_max) q.set("seg_max", String(req.query.seg_max));
 
-    const r = await fetch(`${VOZ_URL}/tts_save_segmented?${q.toString()}`, { headers: { Accept: "application/json" } });
+    const r = await fetch(`${VOZ_URL}/tts_save_segmented?${q.toString()}`, { headers: { Accept: "application/json" }, ...agentFor(VOZ_URL) });
     const j = await r.json();
     if (!j || !j.ok || !Array.isArray(j.parts)) {
       return res.status(502).json({ ok:false, error:"upstream_invalid" });
@@ -585,6 +596,7 @@ app.get("/api/files/:name", async (req, res) => {
     const upstream = await fetch(`${VOZ_URL}/files/${encodeURIComponent(name)}`, {
       method: "GET",
       headers: { Accept: "audio/wav" },
+      ...agentFor(VOZ_URL),
     });
 
     // Encabezados clave para streaming
@@ -633,7 +645,7 @@ app.get("/api/voice/segment", async (req, res) => {
     const url = `${VOZ_URL}/tts_save_segmented?` +
       `text=${encodeURIComponent(text)}&lang=${encodeURIComponent(lang)}&rate=${encodeURIComponent(rate)}&seg_max=${encodeURIComponent(segMax)}`;
 
-    const r = await fetch(url, { method: "GET", headers: { Accept: "application/json" } });
+    const r = await fetch(url, { method: "GET", headers: { Accept: "application/json" }, ...agentFor(VOZ_URL) });
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j?.ok || !Array.isArray(j?.parts)) {
       return res.status(r.ok ? 502 : r.status).json({ ok: false, error: "segment_failed", detail: j || {} });
@@ -685,15 +697,21 @@ app.post("/api/memory/sync", async (req, res) => {
 // Reenvía el SSE del servidor de voz y reescribe cada "url" a /api/files/:name
 app.get("/api/tts_stream_segmented", async (req, res) => {
   try {
+    // Minimizar latencia TCP
+    req.socket?.setNoDelay?.(true);
+    res.socket?.setNoDelay?.(true);
+
     // Cabeceras para streaming y evitar buffering en proxies
-    res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
     res.setHeader("Connection", "keep-alive");
     res.setHeader("X-Accel-Buffering", "no");
+    res.setHeader("Transfer-Encoding", "chunked");
+    res.flushHeaders?.();
+
     // --- PRELUDIO anti-buffering: padding + ping para liberar el primer paquete YA
     res.write(":" + " ".repeat(2048) + "\n");
     res.write(`event: ping\ndata: {"ts":${Date.now()}}\n\n`);
-    res.flushHeaders?.();
     res.flush?.();
 
     // Armar URL upstream con los mismos query params
@@ -704,11 +722,12 @@ app.get("/api/tts_stream_segmented", async (req, res) => {
     const controller = new AbortController();
     req.on("close", () => controller.abort());
 
-    // Llamada al upstream (FastAPI) aceptando SSE
+    // Llamada al upstream (FastAPI) aceptando SSE + keep-alive
     const upstream = await fetch(url.toString(), {
       method: "GET",
       headers: { Accept: "text/event-stream" },
       signal: controller.signal,
+      ...agentFor(VOZ_URL),
     });
 
     if (!upstream.ok || !upstream.body) {
