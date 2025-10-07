@@ -673,6 +673,21 @@ app.get("/api/files/:name", async (req, res) => {
   }
 });
 
+// ---- Stubs mínimos para el viewer (mientras tanto) ----
+app.post("/api/viewer/offer", (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  return res.json({ ok: true });
+});
+app.post("/api/viewer/candidate", (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  return res.json({ ok: true });
+});
+app.post("/api/viewer/ice", (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  return res.json({ ok: true });
+});
+
+
 // --- Passthrough: segmentado XTTS vía backend ---
 const fetch = require("node-fetch"); // ya está en package.json, v2.x
 
@@ -738,6 +753,7 @@ app.get("/api/voice/diag", async (req, res) => {
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
+
 
 
 
