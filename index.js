@@ -74,16 +74,37 @@ function toQS(obj) {
   const s = new URLSearchParams();
   for (const [k,v] of Object.entries(obj||{})) if (v !== undefined && v !== null && v !== "") s.append(k, String(v));
   return s.toString();
-}
 async function pipeUpstream(up, res, fallbackType = "application/octet-stream") {
-  res.status(up.status);
+  // Si falló, intentamos pasar el texto de error tal cual.
+  if (!up.ok) {
+    const txt = await up.text().catch(() => "");
+    res.status(up.status || 502);
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    return res.end(txt || `upstream_failed_${up.status || 502}`);
+  }
+
+  // Cabeceras seguras
   const ct = up.headers.get("content-type");
-  if (ct) res.setHeader("Content-Type", ct); else res.setHeader("Content-Type", fallbackType);
-  const cl = up.headers.get("content-length"); if (cl) res.setHeader("Content-Length", cl);
-  const cr = up.headers.get("accept-ranges"); if (cr) res.setHeader("Accept-Ranges", cr);
+  res.status(200);
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Accept-Ranges", up.headers.get("accept-ranges") || "bytes");
+  res.setHeader("Content-Type", ct || fallbackType);
+  // ⚠️ Nunca fijamos Content-Length para permitir chunked en Railway
+  res.removeHeader("Content-Length");
+
+  // Importante en Railway: soltar cabeceras antes del pipe
+  if (typeof res.flushHeaders === "function") res.flushHeaders();
+
   if (!up.body) return res.end();
-  return Readable.fromWeb(up.body).pipe(res);
+
+  // Pipe robusto + logs mínimos
+  const readable = Readable.fromWeb(up.body);
+  readable.on("error", (e) => {
+    try { res.destroy(e); } catch {}
+  });
+  readable.pipe(res);
 }
+
 
 // ===== JSON por defecto salvo binarios/audio/viewer
 app.use((req, res, next) => {
@@ -573,5 +594,6 @@ app.post("/api/memory/sync", (_req,res)=> res.json({ ok:true }));
 // ===== Arranque =====
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT} | VOICE_REF=${CURRENT_REF} | TTS_PROVIDER=${TTS_PROVIDER_DEFAULT}`));
+
 
 
