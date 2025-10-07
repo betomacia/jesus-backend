@@ -386,30 +386,37 @@ app.get("/api/tts_save", async (req,res)=>{
   }
 });
 
-// ===== Sirve WAV por HTTPS (evita mixed-content) — versión con buffer seguro =====
+// ===== Sirve WAV por HTTPS (evita mixed-content) — Parche: forzar buffer =====
 app.get("/api/files/:name", async (req, res) => {
   try {
     if (!VOZ_URL) return res.status(500).json({ ok: false, error: "missing_VOZ_URL" });
+
     const name = String(req.params.name || "").trim();
-    if (!/^[a-zA-Z0-9_.-]+$/.test(name)) return res.status(400).json({ ok: false, error: "bad_name" });
-
-    const up = await fetch(`${VOZ_URL}/files/${encodeURIComponent(name)}`, {
-      headers: { Accept: "audio/wav" },
-    });
-
-    if (!up.ok) {
-      const txt = await up.text().catch(() => "");
-      return res.status(up.status || 502).type("text/plain; charset=utf-8").send(txt || "upstream error");
+    if (!/^[a-zA-Z0-9_.-]+$/.test(name)) {
+      return res.status(400).json({ ok: false, error: "bad_name" });
     }
 
+    const upstreamUrl = `${VOZ_URL}/files/${encodeURIComponent(name)}`;
+    const up = await fetch(upstreamUrl, { headers: { Accept: "audio/wav" } });
+
+    if (!up.ok) {
+      const text = await up.text().catch(() => "");
+      return res
+        .status(up.status || 502)
+        .set("Content-Type", "text/plain; charset=utf-8")
+        .send(text || "upstream error");
+    }
+
+    // 🔧 En vez de pipe (que en Railway nos estaba quedando en 0 bytes),
+    // leemos todo el cuerpo a buffer y seteamos Content-Length explícito.
     const ab = await up.arrayBuffer();
     const buf = Buffer.from(ab);
 
     res.status(200);
-    res.setHeader("Content-Type", "audio/wav");
+    res.setHeader("Content-Type", up.headers.get("content-type") || "audio/wav");
     res.setHeader("Content-Length", String(buf.length));
     res.setHeader("Cache-Control", "no-store");
-    res.send(buf);
+    res.end(buf);
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e) });
   }
@@ -566,4 +573,5 @@ app.post("/api/memory/sync", (_req,res)=> res.json({ ok:true }));
 // ===== Arranque =====
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT} | VOICE_REF=${CURRENT_REF} | TTS_PROVIDER=${TTS_PROVIDER_DEFAULT}`));
+
 
