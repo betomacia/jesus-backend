@@ -482,7 +482,8 @@ app.post("/api/ingest/start", async (req,res)=>{
     const answer = await r.json();
     await pc.setRemoteDescription(answer);
 
-    const ff = spawn(ffmpegPath, ["-re","-i",ttsUrl","-f","s16le","-acodec","pcm_s16le","-ac","1","-ar","48000","pipe:1"], { stdio:["ignore","pipe","inherit"] });
+    const ff = spawn(ffmpegPath, ["-re", "-i", ttsUrl, "-f", "s16le", "-acodec", "pcm_s16le", "-ac", "1", "-ar", "48000", "pipe:1"], { stdio: ["ignore", "pipe", "inherit"] });
+
 
     let leftover = Buffer.alloc(0);
     ff.stdout.on("data",(buf)=>{
@@ -565,3 +566,4 @@ app.post("/api/memory/sync", (_req,res)=> res.json({ ok:true }));
 // ===== Arranque =====
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT} | VOICE_REF=${CURRENT_REF} | TTS_PROVIDER=${TTS_PROVIDER_DEFAULT}`));
+
