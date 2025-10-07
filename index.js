@@ -676,7 +676,12 @@ app.get("/api/tts_stream_segmented", async (req, res) => {
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
     res.setHeader("X-Accel-Buffering", "no");
+    // --- PRELUDIO anti-buffering: padding + ping para liberar el primer paquete YA
+    // Muchos proxies liberan cuando superás ~1–2 KB. Este bloque asegura flush.
+    res.write(":" + " ".repeat(2048) + "\n");
+    res.write(`event: ping\ndata: {"ts":${Date.now()}}\n\n`);
     res.flushHeaders?.();
+    res.flush?.();
 
     // Armar URL upstream con los mismos query params
     const url = new URL("/tts_stream_segmented", VOZ_URL);
@@ -695,7 +700,8 @@ app.get("/api/tts_stream_segmented", async (req, res) => {
 
     if (!upstream.ok || !upstream.body) {
       res.status(upstream.status || 502);
-      return res.end(`data: ${JSON.stringify({ event: "error", status: upstream.status })}\n\n`);
+      res.write(`data: ${JSON.stringify({ event: "error", status: upstream.status })}\n\n`);
+      return res.end();
     }
 
     // Decodificador y buffer por líneas para poder reescribir "data: {...}"
@@ -715,13 +721,12 @@ app.get("/api/tts_stream_segmented", async (req, res) => {
         const line = carry.slice(0, idx);
         carry = carry.slice(idx + 1);
 
-        // Solo líneas "data: ..."; el resto pasa tal cual
         if (line.startsWith("data:")) {
-          const raw = line.slice(5).trimStart(); // tras "data:"
+          const raw = line.slice(5).trimStart();
           try {
             const obj = JSON.parse(raw);
 
-            // Si el payload tiene "url", la reescribimos a /api/files/:name
+            // Reescribir la URL del WAV a /api/files/:name
             if (obj && typeof obj === "object" && typeof obj.url === "string") {
               const name = obj.url.split("/").pop();
               if (name && /^[A-Za-z0-9._-]+$/.test(name)) {
@@ -729,24 +734,22 @@ app.get("/api/tts_stream_segmented", async (req, res) => {
               }
             }
 
-            // Emitimos la línea modificada
             res.write(`data: ${JSON.stringify(obj)}\n\n`);
           } catch {
-            // Si no es JSON, la pasamos tal cual
+            // Si no es JSON, pasa tal cual
             res.write(line + "\n");
           }
         } else {
-          // Comentarios SSE u otras líneas
-          res.write(line + "\n");
+          res.write(line + "\n"); // comentarios SSE u otras líneas
         }
       }
+      // fuerza envío inmediato del chunk
+      res.flush?.();
     }
 
-    // Si queda algo en el buffer, lo emitimos
     if (carry) res.write(carry);
     res.end();
   } catch (e) {
-    // En error, cerramos el SSE con un evento "error"
     try {
       res.write(`data: ${JSON.stringify({ event: "error", detail: String(e.message || e) })}\n\n`);
     } finally {
@@ -757,10 +760,10 @@ app.get("/api/tts_stream_segmented", async (req, res) => {
 
 
 
-
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
+
 
 
 
