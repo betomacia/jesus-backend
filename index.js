@@ -12,6 +12,7 @@ const bodyParser = require("body-parser");
 const OpenAI = require("openai");
 const path = require("path");
 const fs = require("fs/promises");
+const { Readable } = require("stream"); // <-- CommonJS, evita error ESM
 
 // ====== fetch: Node 18+ ya lo trae global. Polyfill solo si faltara. ======
 if (typeof fetch === "undefined") {
@@ -574,8 +575,6 @@ app.get("/api/tts_save_segmented", async (req, res) => {
 });
 
 // Descarga del WAV: /api/files/:name —> STREAMING (sin buffer)
-import { Readable } from "stream";
-
 app.get("/api/files/:name", async (req, res) => {
   try {
     const name = String(req.params.name || "");
@@ -598,8 +597,8 @@ app.get("/api/files/:name", async (req, res) => {
 
     // Stream passthrough sin cargar en memoria
     if (upstream.body) {
-      // Node 18+: convertir ReadableStream web a Node stream
-      Readable.fromWeb(upstream.body).pipe(res);
+      const nodeStream = Readable.fromWeb ? Readable.fromWeb(upstream.body) : Readable.from(upstream.body);
+      nodeStream.pipe(res);
     } else {
       res.end();
     }
@@ -692,7 +691,6 @@ app.get("/api/tts_stream_segmented", async (req, res) => {
     res.setHeader("Connection", "keep-alive");
     res.setHeader("X-Accel-Buffering", "no");
     // --- PRELUDIO anti-buffering: padding + ping para liberar el primer paquete YA
-    // Muchos proxies liberan cuando superás ~1–2 KB. Este bloque asegura flush.
     res.write(":" + " ".repeat(2048) + "\n");
     res.write(`event: ping\ndata: {"ts":${Date.now()}}\n\n`);
     res.flushHeaders?.();
@@ -774,14 +772,6 @@ app.get("/api/tts_stream_segmented", async (req, res) => {
 });
 
 
-
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
-
-
-
-
-
-
-
