@@ -573,7 +573,9 @@ app.get("/api/tts_save_segmented", async (req, res) => {
   }
 });
 
-// Descarga del WAV: /api/files/:name (bufferizado; sin .pipe())
+// Descarga del WAV: /api/files/:name —> STREAMING (sin buffer)
+import { Readable } from "stream";
+
 app.get("/api/files/:name", async (req, res) => {
   try {
     const name = String(req.params.name || "");
@@ -581,15 +583,28 @@ app.get("/api/files/:name", async (req, res) => {
       return res.status(400).send("bad_name");
     }
 
-    const r = await fetch(`${VOZ_URL}/files/${encodeURIComponent(name)}`);
-    const ct = r.headers.get("content-type") || "audio/wav";
-    const ab = await r.arrayBuffer(); // ← bufferizamos
-    const buf = Buffer.from(ab);
+    const upstream = await fetch(`${VOZ_URL}/files/${encodeURIComponent(name)}`, {
+      method: "GET",
+      headers: { Accept: "audio/wav" },
+    });
 
-    res.status(r.status).set("Content-Type", ct);
-    res.send(buf);
+    // Encabezados clave para streaming
+    res.status(upstream.status);
+    res.setHeader("Content-Type", upstream.headers.get("content-type") || "audio/wav");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("Transfer-Encoding", "chunked");
+    res.flushHeaders?.();
+
+    // Stream passthrough sin cargar en memoria
+    if (upstream.body) {
+      // Node 18+: convertir ReadableStream web a Node stream
+      Readable.fromWeb(upstream.body).pipe(res);
+    } else {
+      res.end();
+    }
   } catch (e) {
-    res.status(500).send("files_proxy_error: " + String(e.message || e));
+    res.status(500).send("files_proxy_error: " + String(e?.message || e));
   }
 });
 
@@ -763,6 +778,7 @@ app.get("/api/tts_stream_segmented", async (req, res) => {
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
+
 
 
 
