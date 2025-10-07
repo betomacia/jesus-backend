@@ -627,6 +627,36 @@ app.get("/api/files/:name", async (req, res) => {
   }
 });
 
+// --- Passthrough: segmentado XTTS vía backend ---
+const fetch = require("node-fetch"); // ya está en package.json, v2.x
+
+app.get("/api/voice/segment", async (req, res) => {
+  try {
+    const VOZ = (process.env.VOZ_URL || "").replace(/\/+$/, "");
+    if (!VOZ) return res.status(500).json({ ok: false, error: "missing_VOZ_URL" });
+
+    const text   = (req.query.text || "").toString();
+    const lang   = (req.query.lang || "es").toString();
+    const rate   = (req.query.rate || "1.0").toString();
+    const segMax = (req.query.seg_max || "60").toString();
+
+    const url = `${VOZ}/tts_save_segmented?` +
+      `text=${encodeURIComponent(text)}&lang=${encodeURIComponent(lang)}&rate=${encodeURIComponent(rate)}&seg_max=${encodeURIComponent(segMax)}`;
+
+    const r = await fetch(url, { timeout: 60000 }); // 60s
+    const json = await r.json().catch(() => ({}));
+    if (!r.ok) return res.status(r.status).json({ ok: false, error: "segment_failed", detail: json });
+
+    // Devuelvo tal cual para el front:
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.json(json);
+  } catch (e) {
+    console.error("segment_passthrough_error:", e);
+    res.status(500).json({ ok: false, error: "segment_error", detail: String(e) });
+  }
+});
+
+
 // Diagnóstico rápido: /api/voice/diag
 app.get("/api/voice/diag", async (req, res) => {
   const text = String(req.query.text || "hola");
@@ -662,3 +692,4 @@ app.get("/api/voice/diag", async (req, res) => {
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
+
