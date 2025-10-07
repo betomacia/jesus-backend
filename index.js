@@ -386,17 +386,32 @@ app.get("/api/tts_save", async (req,res)=>{
   }
 });
 
-// ===== Sirve WAV por HTTPS (evita mixed-content) =====
-app.get("/api/files/:name", async (req,res)=>{
-  try{
-    if (!VOZ_URL) return res.status(500).json({ ok:false, error:"missing_VOZ_URL" });
-    const name = String(req.params.name||"").trim();
-    if (!/^[a-zA-Z0-9_.-]+$/.test(name)) return res.status(400).json({ ok:false, error:"bad_name" });
-    const up = await fetch(`${VOZ_URL}/files/${encodeURIComponent(name)}`);
-    res.removeHeader("Content-Type");
-    await pipeUpstream(up, res, "audio/wav");
-  }catch(e){
-    res.status(500).json({ ok:false, error:String(e) });
+// ===== Sirve WAV por HTTPS (evita mixed-content) — versión con buffer seguro =====
+app.get("/api/files/:name", async (req, res) => {
+  try {
+    if (!VOZ_URL) return res.status(500).json({ ok: false, error: "missing_VOZ_URL" });
+    const name = String(req.params.name || "").trim();
+    if (!/^[a-zA-Z0-9_.-]+$/.test(name)) return res.status(400).json({ ok: false, error: "bad_name" });
+
+    const up = await fetch(`${VOZ_URL}/files/${encodeURIComponent(name)}`, {
+      headers: { Accept: "audio/wav" },
+    });
+
+    if (!up.ok) {
+      const txt = await up.text().catch(() => "");
+      return res.status(up.status || 502).type("text/plain; charset=utf-8").send(txt || "upstream error");
+    }
+
+    const ab = await up.arrayBuffer();
+    const buf = Buffer.from(ab);
+
+    res.status(200);
+    res.setHeader("Content-Type", "audio/wav");
+    res.setHeader("Content-Length", String(buf.length));
+    res.setHeader("Cache-Control", "no-store");
+    res.send(buf);
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
   }
 });
 
@@ -467,7 +482,7 @@ app.post("/api/ingest/start", async (req,res)=>{
     const answer = await r.json();
     await pc.setRemoteDescription(answer);
 
-    const ff = spawn(ffmpegPath, ["-re","-i",ttsUrl,"-f","s16le","-acodec","pcm_s16le","-ac","1","-ar","48000","pipe:1"], { stdio:["ignore","pipe","inherit"] });
+    const ff = spawn(ffmpegPath, ["-re","-i",ttsUrl","-f","s16le","-acodec","pcm_s16le","-ac","1","-ar","48000","pipe:1"], { stdio:["ignore","pipe","inherit"] });
 
     let leftover = Buffer.alloc(0);
     ff.stdout.on("data",(buf)=>{
