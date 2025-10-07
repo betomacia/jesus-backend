@@ -603,30 +603,40 @@ app.post("/api/viewer/ice", (_req, res) => {
   return res.json({ ok: true });
 });
 
-// --- Passthrough: segmentado XTTS vía backend ---
+// --- Passthrough: segmentado XTTS vía backend (con reescritura a HTTPS) ---
 app.get("/api/voice/segment", async (req, res) => {
   try {
-    const VOZ = VOZ_URL;
     const text   = (req.query.text || "").toString();
     const lang   = (req.query.lang || "es").toString();
     const rate   = (req.query.rate || "1.0").toString();
     const segMax = (req.query.seg_max || "60").toString();
 
-    const url = `${VOZ}/tts_save_segmented?` +
+    const url = `${VOZ_URL}/tts_save_segmented?` +
       `text=${encodeURIComponent(text)}&lang=${encodeURIComponent(lang)}&rate=${encodeURIComponent(rate)}&seg_max=${encodeURIComponent(segMax)}`;
 
-    const r = await fetch(url, { method: "GET" });
-    const json = await r.json().catch(() => ({}));
-    if (!r.ok) return res.status(r.status).json({ ok: false, error: "segment_failed", detail: json });
+    const r = await fetch(url, { method: "GET", headers: { Accept: "application/json" } });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j?.ok || !Array.isArray(j?.parts)) {
+      return res.status(r.ok ? 502 : r.status).json({ ok: false, error: "segment_failed", detail: j || {} });
+    }
+
+    // Reescritura de cada parte a HTTPS en tu dominio
+    const base = _base(req);
+    const parts = j.parts.map((u) => {
+      const name = String(u || "").split("/").pop();
+      return name ? `${base}/api/files/${name}` : u;
+    });
 
     res.setHeader("Access-Control-Allow-Origin", "*");
-    res.json(json);
+    res.json({ ok: true, chunks: parts.length, ttfb_ms: j.ttfb_ms || 0, parts });
   } catch (e) {
     console.error("segment_passthrough_error:", e);
     res.status(500).json({ ok: false, error: "segment_error", detail: String(e) });
   }
 });
 
+
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
+
