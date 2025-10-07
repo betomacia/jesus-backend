@@ -18,6 +18,28 @@ const { query, ping } = require("./db/pg");
 // Node 18+ tiene fetch global, pero usamos node-fetch v2 por compatibilidad estricta
 const fetch = require("node-fetch");
 
+// --- CORS global + manejo de preflight ---
+const cors = require("cors");
+
+// Permite cualquier origen (tu front usa dominios “webcontainer-api.io” que cambian)
+// No uses credentials en el front (ya los tenés como 'omit')
+app.use(cors({
+  origin: "*",
+  methods: ["GET","HEAD","PUT","PATCH","POST","DELETE","OPTIONS"],
+  allowedHeaders: ["Content-Type","Authorization"]
+}));
+
+// Asegurar respuesta al preflight
+app.options("*", cors());
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Methods", "GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type,Authorization");
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
+
+
 // ---------------- VOZ (FastAPI) ----------------
 const VOZ_URL = process.env.VOZ_URL || "http://136.114.108.182:8000";
 
@@ -692,4 +714,5 @@ app.get("/api/voice/diag", async (req, res) => {
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
+
 
