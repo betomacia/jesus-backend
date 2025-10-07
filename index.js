@@ -12,7 +12,7 @@ const bodyParser = require("body-parser");
 const OpenAI = require("openai");
 const path = require("path");
 const fs = require("fs/promises");
-const { Readable } = require("stream"); // <-- CommonJS, evita error ESM
+const { Readable } = require("stream"); // CommonJS, evita error ESM
 const http = require("http");
 const https = require("https");
 
@@ -32,6 +32,7 @@ function agentFor(url) {
 
 // ====== App ======
 const app = express();
+app.disable("x-powered-by");
 
 // Parsers
 app.use(bodyParser.json());
@@ -339,7 +340,7 @@ app.post("/api/ask", async (req, res) => {
       const q =
         lang === "en" ? "What would help you most right now—your emotions, a relationship, or your prayer life?" :
         lang === "pt" ? "O que mais ajudaria agora — suas emoções, uma relação, ou a sua vida de oração?" :
-        lang === "it" ? "Cosa ti aiuterebbe ora — le emozioni, una relazione o la tua vida di preghiera?" :
+        lang === "it" ? "Cosa ti aiuterebbe ora — le emozioni, una relazione o la tua vita di preghiera?" :
         lang === "de" ? "Was würde dir jetzt am meisten helfen – deine Gefühle, eine Beziehung oder dein Gebetsleben?" :
         lang === "ca" ? "Què t’ajudaria ara — les teves emocions, una relació o la teva vida de pregària?" :
         lang === "fr" ? "Qu’est-ce qui t’aiderait le plus — tes émotions, une relation ou ta vie de prière ?" :
@@ -530,7 +531,6 @@ app.get("/api/tts", async (req, res) => {
   }
 });
 
-
 // /api/tts_save -> JSON con url reescrita a /api/files/:name
 app.get("/api/tts_save", async (req, res) => {
   try {
@@ -605,6 +605,7 @@ app.get("/api/files/:name", async (req, res) => {
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
     res.setHeader("Transfer-Encoding", "chunked");
+    res.setHeader("Content-Encoding", "identity");
     res.flushHeaders?.();
 
     // Stream passthrough sin cargar en memoria
@@ -618,7 +619,6 @@ app.get("/api/files/:name", async (req, res) => {
     res.status(500).send("files_proxy_error: " + String(e?.message || e));
   }
 });
-
 
 // ---- Stubs mínimos para el viewer (mientras tanto) ----
 app.post("/api/viewer/offer", (_req, res) => {
@@ -669,12 +669,10 @@ app.get("/api/voice/segment", async (req, res) => {
 // ====== /api/memory/sync  (noop persistente para el front) ======
 app.post("/api/memory/sync", async (req, res) => {
   try {
-    // Lo que mande el front: { userId?, memory? ... }
     const body = req.body || {};
     const userId = String(body.userId || "anon");
     const payload = body.memory ?? body;
 
-    // Guardamos “tal cual” para debug (no interfiere con tu mem de chat)
     const safe = userId.replace(/[^a-z0-9_-]/gi, "_");
     const file = path.join(DATA_DIR, `frontend_mem_${safe}.json`);
     await ensureDataDir();
@@ -684,7 +682,6 @@ app.post("/api/memory/sync", async (req, res) => {
       "utf8"
     );
 
-    // CORS explícito (aunque ya lo cubre el middleware global)
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.json({ ok: true, saved: true });
   } catch (e) {
@@ -696,32 +693,38 @@ app.post("/api/memory/sync", async (req, res) => {
 // === PROXY SSE: /api/tts_stream_segmented  ===============================
 // Reenvía el SSE del servidor de voz y reescribe cada "url" a /api/files/:name
 app.get("/api/tts_stream_segmented", async (req, res) => {
+  // Minimizar latencia TCP
+  req.socket?.setNoDelay?.(true);
+  res.socket?.setNoDelay?.(true);
+
+  // Cabeceras para streaming y evitar buffering en proxies/CDN
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Content-Encoding", "identity");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.setHeader("Transfer-Encoding", "chunked");
+  res.flushHeaders?.();
+
+  // PRELUDIO anti-buffering: padding + ping inmediato
+  res.write(":" + " ".repeat(2048) + "\n");
+  res.write(`event: ping\ndata: {"ts":${Date.now()}}\n\n`);
+  res.flush?.();
+
+  // Heartbeat periódico (mantiene vivo el stream)
+  const hb = setInterval(() => {
+    try { res.write(`event: ping\ndata: {"ts":${Date.now()}}\n\n`); res.flush?.(); } catch {}
+  }, 2000);
+
+  // Armar URL upstream con mismos query params
+  const url = new URL("/tts_stream_segmented", VOZ_URL);
+  for (const [k, v] of Object.entries(req.query)) url.searchParams.set(k, String(v));
+
+  // Abortar si el cliente cierra
+  const controller = new AbortController();
+  req.on("close", () => controller.abort());
+
   try {
-    // Minimizar latencia TCP
-    req.socket?.setNoDelay?.(true);
-    res.socket?.setNoDelay?.(true);
-
-    // Cabeceras para streaming y evitar buffering en proxies
-    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-    res.setHeader("Cache-Control", "no-cache, no-transform");
-    res.setHeader("Connection", "keep-alive");
-    res.setHeader("X-Accel-Buffering", "no");
-    res.setHeader("Transfer-Encoding", "chunked");
-    res.flushHeaders?.();
-
-    // --- PRELUDIO anti-buffering: padding + ping para liberar el primer paquete YA
-    res.write(":" + " ".repeat(2048) + "\n");
-    res.write(`event: ping\ndata: {"ts":${Date.now()}}\n\n`);
-    res.flush?.();
-
-    // Armar URL upstream con los mismos query params
-    const url = new URL("/tts_stream_segmented", VOZ_URL);
-    for (const [k, v] of Object.entries(req.query)) url.searchParams.set(k, String(v));
-
-    // Abortar si el cliente cierra
-    const controller = new AbortController();
-    req.on("close", () => controller.abort());
-
     // Llamada al upstream (FastAPI) aceptando SSE + keep-alive
     const upstream = await fetch(url.toString(), {
       method: "GET",
@@ -732,17 +735,15 @@ app.get("/api/tts_stream_segmented", async (req, res) => {
 
     if (!upstream.ok || !upstream.body) {
       res.status(upstream.status || 502);
-      res.write(`data: ${JSON.stringify({ event: "error", status: upstream.status })}\n\n`);
+      res.write(`data: ${JSON.stringify({ event: "error", status: upstream.status || 502 })}\n\n`);
       return res.end();
     }
 
-    // Decodificador y buffer por líneas para poder reescribir "data: {...}"
     const decoder = new TextDecoder();
     let carry = "";
-
-    const base = _base(req); // p.ej. https://jesus-backend-production-...railway.app
-
+    const base = _base(req); // p.ej. https://jesus-backend-...railway.app
     const reader = upstream.body.getReader();
+
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -772,11 +773,11 @@ app.get("/api/tts_stream_segmented", async (req, res) => {
             res.write(line + "\n");
           }
         } else {
-          res.write(line + "\n"); // comentarios SSE u otras líneas
+          // comentarios SSE / event: lines
+          res.write(line + "\n");
         }
       }
-      // fuerza envío inmediato del chunk
-      res.flush?.();
+      res.flush?.(); // fuerza envío inmediato del chunk
     }
 
     if (carry) res.write(carry);
@@ -787,9 +788,10 @@ app.get("/api/tts_stream_segmented", async (req, res) => {
     } finally {
       res.end();
     }
+  } finally {
+    clearInterval(hb);
   }
 });
-
 
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
