@@ -1,8 +1,7 @@
 // index.js — Backend monolítico, dominios acotados y respuestas naturales (multi-idioma)
-// Esta versión es AUTOCONTENIDA (sin require de ./service/welcometext)
 // - /api/welcome: Saludo por hora + nombre + (opcional hijo/hija 25%) + 1 frase IA + 1 pregunta IA (variada, íntima)
 // - /api/ask: TODA la Biblia viene de OpenAI. Si es inválida/repetida/prohibida, se pide una alternativa a OpenAI.
-// - VOZ (XTTS FastAPI): /api/tts, /api/tts_save, /api/tts_save_segmented, /api/files/:name, /api/voice/diag
+// - VOZ (XTTS FastAPI): /api/tts, /api/tts_save, /api/tts_save_segmented, /api/files/:name, /api/voice/diag, /api/voice/segment
 // - Se eliminaron rutas de HeyGen/ElevenLabs.
 
 require("dotenv").config();
@@ -13,55 +12,24 @@ const bodyParser = require("body-parser");
 const OpenAI = require("openai");
 const path = require("path");
 const fs = require("fs/promises");
-const { query, ping } = require("./db/pg");
 
-// Node 18+ tiene fetch global, pero usamos node-fetch v2 por compatibilidad estricta
-// Node 18+ ya trae fetch global. Solo cargamos node-fetch si faltara (por compat).
+// ====== fetch: Node 18+ ya lo trae global. Polyfill solo si faltara. ======
 if (typeof fetch === "undefined") {
   global.fetch = require("node-fetch");
 }
 
-
-// --- CORS global + manejo de preflight ---
-const cors = require("cors");
-
-// Permite cualquier origen (tu front usa dominios “webcontainer-api.io” que cambian)
-// No uses credentials en el front (ya los tenés como 'omit')
-app.use(cors({
-  origin: "*",
-  methods: ["GET","HEAD","PUT","PATCH","POST","DELETE","OPTIONS"],
-  allowedHeaders: ["Content-Type","Authorization"]
-}));
-
-// Asegurar respuesta al preflight
-app.options("*", cors());
-app.use((req, res, next) => {
-  res.header("Access-Control-Allow-Origin", "*");
-  res.header("Access-Control-Allow-Methods", "GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS");
-  res.header("Access-Control-Allow-Headers", "Content-Type,Authorization");
-  if (req.method === "OPTIONS") return res.sendStatus(204);
-  next();
-});
-
-
-// ---------------- VOZ (FastAPI) ----------------
-const VOZ_URL = process.env.VOZ_URL || "http://136.114.108.182:8000";
-
-// ---------------- App ----------------
+// ====== App ======
 const app = express();
-app.use(cors({ origin: true }));
+
+// Parsers
 app.use(bodyParser.json());
 
-// CORS robusto + OPTIONS (preflight)
-const cors = require("cors");
-
+// CORS robusto + preflight (una sola vez)
 app.use(cors({
   origin: "*",
-  methods: ["GET","HEAD","PUT","PATCH","POST","DELETE","OPTIONS"],
-  allowedHeaders: ["Content-Type","Authorization"],
+  methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
 }));
-
-// Respuesta inmediata al preflight
 app.options("*", cors());
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
@@ -71,11 +39,22 @@ app.use((req, res, next) => {
   next();
 });
 
+// ====== Config VOZ (FastAPI XTTS) ======
+const VOZ_URL = (process.env.VOZ_URL || "http://136.114.108.182:8000").replace(/\/+$/, "");
 
-// ---------- OpenAI ----------
+// ====== OpenAI ======
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// ---------- Utils ----------
+// ====== DB opcional (no crashea si falta) ======
+let query = null;
+let ping = null;
+try {
+  ({ query, ping } = require("./db/pg"));
+} catch (e) {
+  console.warn("[DB] Módulo ./db/pg ausente o 'pg' no instalado. /db/* responderán 503.");
+}
+
+// ====== Utils ======
 const NORM = (s = "") => String(s).toLowerCase().replace(/\s+/g, " ").trim();
 
 function langLabel(l = "es") {
@@ -91,7 +70,7 @@ function langLabel(l = "es") {
   return m[l] || "Español";
 }
 
-// Hora local: si el móvil manda `hour` (0-23) o tzOffsetMinutes (min respecto a UTC).
+// Hora local
 function resolveLocalHour({ hour = null, tzOffsetMinutes = null } = {}) {
   if (Number.isInteger(hour) && hour >= 0 && hour <= 23) return hour;
   if (Number.isInteger(tzOffsetMinutes)) {
@@ -117,7 +96,7 @@ function greetingByHour(lang = "es", hour = null) {
   }
 }
 
-// Fallbacks mínimos (solo por si OpenAI falla por completo)
+// Fallbacks mínimos (si OpenAI falla)
 const DAILY_FALLBACKS = {
   es: [
     "La paz también crece en lo pequeño.",
@@ -128,31 +107,20 @@ const DAILY_FALLBACKS = {
     "Small honest steps open the way.",
     "You’re not alone; let’s start small.",
   ],
-  pt: [
-    "Um passo sincero hoje abre caminhos.",
-  ],
-  it: [
-    "Un passo sincero oggi apre la strada.",
-  ],
-  de: [
-    "Ein ehrlicher Schritt heute öffnet Wege.",
-  ],
-  ca: [
-    "Un pas sincer avui obre camins.",
-  ],
-  fr: [
-    "Un pas sincère aujourd’hui ouvre la voie.",
-  ],
+  pt: [ "Um passo sincero hoje abre caminhos." ],
+  it: [ "Un passo sincero oggi apre la strada." ],
+  de: [ "Ein ehrlicher Schritt heute öffnet Wege." ],
+  ca: [ "Un pas sincer avui obre camins." ],
+  fr: [ "Un pas sincère aujourd’hui ouvre la voie." ],
 };
-
 function dayFallback(lang = "es") {
   const arr = DAILY_FALLBACKS[lang] || DAILY_FALLBACKS["es"];
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
-// ---------- Memoria en FS (simple) ----------
+// Memoria en FS (simple)
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
-async function ensureDataDir() { try { await fs.mkdir(DATA_DIR, { recursive: true }); } catch (e) {} }
+async function ensureDataDir() { try { await fs.mkdir(DATA_DIR, { recursive: true }); } catch (_) {} }
 function memPath(uid) {
   const safe = String(uid || "anon").replace(/[^a-z0-9_-]/gi, "_");
   return path.join(DATA_DIR, `mem_${safe}.json`);
@@ -170,15 +138,8 @@ async function readMem(userId) {
       last_bot: m.last_bot || null,
       last_refs: Array.isArray(m.last_refs) ? m.last_refs : [],
     };
-  } catch (e) {
-    return {
-      name: "",
-      sex: "",
-      last_user_text: "",
-      last_user_ts: 0,
-      last_bot: null,
-      last_refs: [],
-    };
+  } catch {
+    return { name: "", sex: "", last_user_text: "", last_user_ts: 0, last_bot: null, last_refs: [] };
   }
 }
 async function writeMem(userId, mem) {
@@ -186,50 +147,36 @@ async function writeMem(userId, mem) {
   await fs.writeFile(memPath(userId), JSON.stringify(mem, null, 2), "utf8");
 }
 
-// ---------- Filtros de alcance ----------
+// Filtros de alcance
 const OFFTOPIC = [
   // entretenimiento/deporte/celebridades
   /\b(f[úu]tbol|futbol|deporte|champions|nba|tenis|selecci[oó]n|mundial|goles?)\b/i,
   /\b(pel[ií]cula|serie|netflix|hbo|max|disney|spotify|cantante|concierto|celebridad|famos[oa]s?)\b/i,
-
-  // técnica/ciencia/educación (ampliado)
+  // técnica/ciencia/educación
   /\b(program(a|ar|aci[oó]n)|c[oó]digo|javascript|react|inform[aá]tica|computaci[oó]n|pc|ordenador|linux|windows|macos|driver|api|prompt)\b/i,
   /\b(ingenier[ií]a|software|hardware|servidor|cloud|nube|red(es)?|wifi|routing|docker|kubernetes)\b/i,
   /\b(matem[aá]ticas?|algebra|c[aá]lculo|geometr[ií]a|trigonometr[ií]a)\b/i,
   /\b(f[ií]sica|qu[ií]mica|biolog[ií]a|geolog[ií]a|astronom[ií]a|laboratorio)\b/i,
-
   // mecánica/electrónica/juegos
   /\b(mec[aá]nica|alternador|bater[ií]a del auto|motor|embrague|inyector|buj[ií]a|correa|nafta|diesel)\b/i,
   /\b(circuito|voltaje|ohmios|arduino|raspberry|microcontrolador|placa)\b/i,
   /\b(videojuego|fortnite|minecraft|playstation|xbox|nintendo|steam)\b/i,
-
   // geografía/turismo no religioso
   /\b(pa[ií]s|capital|mapa|d[oó]nde queda|ubicaci[oó]n|distancia|kil[oó]metros|frontera|r[íi]o|monta[ñn]a|cordillera)\b/i,
   /\b(viaje|hotel|playa|turismo|destino|vuelo|itinerario|tour|gu[ií]a tur[ií]stica)\b/i,
-
   // gastronomía / comidas / bebidas
   /\b(gastronom[ií]a|gastronomia|cocina|recet(a|ario)s?|platos?|ingredientes?|men[uú]|men[uú]s|postres?|dulces?|salado?s?)\b/i,
   /\b(comida|comidas|almuerzo|cena|desayuno|merienda|vianda|raci[oó]n|calor[ií]as|nutrici[oó]n|dieta)\b/i,
   /\b(bebidas?|vino|cerveza|licor|coctel|c[oó]ctel|trago|fermentado|maridaje|bar|caf[eé]|cafeter[ií]a|restaurante|restaurantes?)\b/i,
-
   // política/negocios/finanzas
   /\b(pol[ií]tica|elecci[oó]n|partido|diputado|senador|presidente|gobierno)\b/i,
   /\b(criptomonedas?|bitcoin|acciones|bolsa|nasdaq|d[oó]lar|euro)\b/i,
 ];
-
 const RELIGIOUS_ALLOW = [
   /\b(iglesia|templo|catedral|parroquia|misa|sacramento|oraci[oó]n|santuario|santo|santos|biblia|evangelio|rosario|confesi[oó]n|eucarist[ií]a|liturgia|vaticano|lourdes|f[aá]tima|peregrinaci[oó]n|camino de santiago)\b/i,
 ];
-
-function isReligiousException(s) {
-  const x = NORM(s);
-  return RELIGIOUS_ALLOW.some((r) => r.test(x));
-}
-function isOffTopic(s) {
-  const x = NORM(s);
-  return OFFTOPIC.some((r) => r.test(x));
-}
-
+function isReligiousException(s) { return RELIGIOUS_ALLOW.some((r) => r.test(NORM(s))); }
+function isOffTopic(s) { return OFFTOPIC.some((r) => r.test(NORM(s))); }
 function isGibberish(s) {
   const x = (s || "").trim();
   if (!x) return true;
@@ -243,6 +190,7 @@ app.get("/", (_req, res) => res.json({ ok: true, service: "backend", ts: Date.no
 
 // ---------- DB Health ----------
 app.get("/db/health", async (_req, res) => {
+  if (!ping) return res.status(503).json({ ok: false, error: "db_unavailable" });
   try {
     const now = await ping();
     res.json({ ok: true, now });
@@ -251,9 +199,8 @@ app.get("/db/health", async (_req, res) => {
     res.status(500).json({ ok: false, error: String(e) });
   }
 });
-
-// (Opcional) Conteo rápido de usuarios
 app.get("/db/test", async (_req, res) => {
+  if (!query) return res.status(503).json({ ok: false, error: "db_unavailable" });
   try {
     const r = await query("SELECT COUNT(*)::int AS users FROM users");
     res.json({ users: r.rows?.[0]?.users ?? 0 });
@@ -272,33 +219,26 @@ app.post("/api/welcome", async (req, res) => {
       sex = "",
       userId = "anon",
       history = [],
-      localHour = null, // opcional directo
-      hour = null,      // compat
-      tzOffsetMinutes = null, // compat
+      localHour = null, hour = null, tzOffsetMinutes = null,
     } = req.body || {};
 
     const resolvedHour = Number.isInteger(localHour)
       ? localHour
       : resolveLocalHour({ hour, tzOffsetMinutes });
 
-    // persistir nombre/sexo
     const mem = await readMem(userId);
     const nm = String(name || mem.name || "").trim();
-    const sx = String(sex || mem.sex || "").trim().toLowerCase(); // male|female|""
+    const sx = String(sex || mem.sex || "").trim().toLowerCase();
     if (nm) mem.name = nm;
     if (sx === "male" || sx === "female") mem.sex = sx;
     await writeMem(userId, mem);
 
-    // saludo + nombre
     let sal = nm ? `${greetingByHour(lang, resolvedHour)}, ${nm}.` : `${greetingByHour(lang, resolvedHour)}.`;
-
-    // 25% "Hijo/Hija mío/a" si hay sex
     if (Math.random() < 0.25) {
       if (mem.sex === "female") sal += " Hija mía,";
       else if (mem.sex === "male") sal += " Hijo mío,";
     }
 
-    // Pedimos a OpenAI: 1 frase breve + 1 pregunta variada (ambas en JSON)
     const W_SYS = `
 Devuélveme SOLO un JSON en ${langLabel(lang)} con este esquema:
 {"phrase":"<frase alentadora breve, suave, de autoestima, sin clichés ni tono duro>",
@@ -311,7 +251,6 @@ Condiciones:
 
     let phrase = "";
     let question = "";
-
     try {
       const r = await openai.chat.completions.create({
         model: "gpt-4o-mini",
@@ -328,8 +267,7 @@ Condiciones:
       const data = JSON.parse(content);
       phrase = String(data?.phrase || "").trim();
       question = String(data?.question || "").trim();
-    } catch (e) {
-      // fallbacks mínimos si OpenAI falla
+    } catch {
       phrase = dayFallback(lang);
       question =
         lang === "en" ? "What would help you right now?" :
@@ -345,10 +283,7 @@ Condiciones:
     res.json({ message, question });
   } catch (e) {
     console.error("WELCOME ERROR:", e);
-    res.json({
-      message: "La paz sea contigo.",
-      question: "¿En qué te puedo acompañar ahora?",
-    });
+    res.json({ message: "La paz sea contigo.", question: "¿En qué te puedo acompañar ahora?" });
   }
 });
 
@@ -361,12 +296,10 @@ app.post("/api/ask", async (req, res) => {
     const mem = await readMem(userId);
     const now = Date.now();
 
-    // Duplicados rápidos (mismo texto en <7s)
     if (userTxt && mem.last_user_text && userTxt === mem.last_user_text && now - mem.last_user_ts < 7000) {
       if (mem.last_bot) return res.json(mem.last_bot);
     }
 
-    // Ruido
     if (isGibberish(userTxt)) {
       const msg =
         lang === "en" ? "I didn’t quite get that. Could you say it again in a few words?" :
@@ -382,7 +315,6 @@ app.post("/api/ask", async (req, res) => {
       return res.json(out);
     }
 
-    // Alcance
     if (isOffTopic(userTxt) && !isReligiousException(userTxt)) {
       const msg =
         lang === "en" ? "I’m here for your inner life: faith, personal struggles and healing. I don’t give facts or opinions on sports, entertainment, technical, food or general topics." :
@@ -406,7 +338,6 @@ app.post("/api/ask", async (req, res) => {
       return res.json(out);
     }
 
-    // -------- OpenAI principal (message + question + bible) --------
     const SYS = `
 Eres cercano, claro y compasivo, desde una voz cristiana (católica).
 Alcance: espiritualidad/fe católica, psicología/autoayuda personal, relaciones y emociones. Evita lo demás.
@@ -453,7 +384,7 @@ No incluyas nada fuera del JSON.
 
     const content = r?.choices?.[0]?.message?.content || "{}";
     let data = {};
-    try { data = JSON.parse(content); } catch (e) { data = {}; }
+    try { data = JSON.parse(content); } catch { data = {}; }
 
     let out = {
       message: String(data?.message || "").trim() || (lang === "en" ? "I’m with you." : "Estoy contigo."),
@@ -464,17 +395,11 @@ No incluyas nada fuera del JSON.
       }
     };
 
-    // Validación de la cita (prohibida + repetida)
     const banned = /mateo\s*11\s*:\s*28|matt(hew)?\s*11\s*:\s*28|matteo\s*11\s*:\s*28|matthäus\s*11\s*:\s*28|matthieu\s*11\s*:\s*28|mateu\s*11\s*:\s*28|mateus\s*11\s*:\s*28/i;
     const used = new Set((mem.last_refs || []).map((x) => NORM(x)));
-    const invalid =
-      !out.bible.text ||
-      !out.bible.ref ||
-      banned.test(out.bible.ref) ||
-      used.has(NORM(out.bible.ref));
+    const invalid = !out.bible.text || !out.bible.ref || banned.test(out.bible.ref) || used.has(NORM(out.bible.ref));
 
     if (invalid) {
-      // Pedimos SOLO una alternativa de Biblia a OpenAI (sin listas fijas)
       const altSys = `
 Devuélveme SOLO un JSON {"bible":{"text":"...","ref":"Libro 0:0"}} en ${langLabel(lang)}.
 Cita bíblica pertinente al siguiente mensaje del usuario, evita Mateo/Matthew 11:28 y evita estas referencias ya usadas: ${Array.from(used).join(", ") || "ninguna"}.
@@ -512,7 +437,7 @@ No incluyas nada fuera del JSON. Texto exacto de la Biblia y su referencia legib
 
         const altContent = alt?.choices?.[0]?.message?.content || "{}";
         let altData = {};
-        try { altData = JSON.parse(altContent); } catch (e) { altData = {}; }
+        try { altData = JSON.parse(altContent); } catch { altData = {}; }
         const t = String(altData?.bible?.text || "").trim();
         const r2 = String(altData?.bible?.ref || "").trim();
         if (t && r2 && !banned.test(r2) && !used.has(NORM(r2))) {
@@ -520,12 +445,11 @@ No incluyas nada fuera del JSON. Texto exacto de la Biblia y su referencia legib
         } else {
           out.bible = { text: "", ref: "" };
         }
-      } catch (e) {
+      } catch {
         out.bible = { text: "", ref: "" };
       }
     }
 
-    // Persistimos refs válidas (solo si hay ref)
     const finalRef = String(out?.bible?.ref || "").trim();
     if (finalRef) mem.last_refs = [...(mem.last_refs || []), finalRef].slice(-8);
     mem.last_user_text = userTxt;
@@ -548,8 +472,6 @@ No incluyas nada fuera del JSON. Texto exacto de la Biblia y su referencia legib
 // ===============  RUTAS DE VOZ (XTTS)  ==============
 // ====================================================
 
-const { URLSearchParams } = require("url");
-
 // base URL del request (para reescribir URLs del upstream)
 function _base(req) {
   const proto = req.headers["x-forwarded-proto"] || req.protocol || "https";
@@ -562,25 +484,25 @@ app.get("/api/health", async (req, res) => {
   try {
     let upstream = null;
     try {
-      const r = await fetch(`${VOZ_URL}/health`, { timeout: 8000 });
+      const r = await fetch(`${VOZ_URL}/health`, { method: "GET" });
       upstream = await r.json().catch(() => null);
-    } catch(_) {}
+    } catch (_) {}
     res.json({ ok: true, proxy: "railway", voz_url: VOZ_URL, upstream });
   } catch (e) {
     res.status(500).json({ ok:false, error: String(e.message || e) });
   }
 });
 
-// /api/tts -> proxy streaming WAV (no fija Content-Length para chunked)
+// /api/tts -> proxy streaming WAV (chunked)
 app.get("/api/tts", async (req, res) => {
   try {
     const q = new URLSearchParams();
     if (req.query.text) q.set("text", String(req.query.text));
     if (req.query.lang) q.set("lang", String(req.query.lang));
     if (req.query.rate) q.set("rate", String(req.query.rate));
-    if (req.query.temp) q.set("temp", String(req.query.temp));   // opcional
-    if (req.query.fx)   q.set("fx",   String(req.query.fx));     // opcional
-    if (req.query.t)    q.set("t",    String(req.query.t));      // opcional
+    if (req.query.temp) q.set("temp", String(req.query.temp));
+    if (req.query.fx)   q.set("fx",   String(req.query.fx));
+    if (req.query.t)    q.set("t",    String(req.query.t));
 
     const url = `${VOZ_URL}/tts?${q.toString()}`;
     const up  = await fetch(url, { headers: { Accept: "audio/wav" } });
@@ -604,9 +526,7 @@ app.get("/api/tts_save", async (req, res) => {
     if (req.query.fx)   q.set("fx",   String(req.query.fx));
     if (req.query.t)    q.set("t",    String(req.query.t));
 
-    const r = await fetch(`${VOZ_URL}/tts_save?${q.toString()}`, {
-      headers: { Accept: "application/json" }
-    });
+    const r = await fetch(`${VOZ_URL}/tts_save?${q.toString()}`, { headers: { Accept: "application/json" } });
     const j = await r.json();
     if (!j || !j.ok || !(j.url || j.file || j.path)) {
       return res.status(502).json({ ok:false, error:"upstream_invalid" });
@@ -623,7 +543,6 @@ app.get("/api/tts_save", async (req, res) => {
 });
 
 // /api/tts_save_segmented -> JSON con múltiples partes
-// Ej: /api/tts_save_segmented?text=...&lang=es&rate=1.00&seg_max=120
 app.get("/api/tts_save_segmented", async (req, res) => {
   try {
     const q = new URLSearchParams();
@@ -632,15 +551,12 @@ app.get("/api/tts_save_segmented", async (req, res) => {
     if (req.query.rate)    q.set("rate",    String(req.query.rate));
     if (req.query.seg_max) q.set("seg_max", String(req.query.seg_max));
 
-    const r = await fetch(`${VOZ_URL}/tts_save_segmented?${q.toString()}`, {
-      headers: { Accept: "application/json" }
-    });
+    const r = await fetch(`${VOZ_URL}/tts_save_segmented?${q.toString()}`, { headers: { Accept: "application/json" } });
     const j = await r.json();
     if (!j || !j.ok || !Array.isArray(j.parts)) {
       return res.status(502).json({ ok:false, error:"upstream_invalid" });
     }
 
-    // reescribimos cada URL a nuestro dominio /api/files/:name
     const base = _base(req);
     const parts = j.parts.map((u) => {
       const name = String(u || "").split("/").pop();
@@ -653,7 +569,7 @@ app.get("/api/tts_save_segmented", async (req, res) => {
   }
 });
 
-// Descarga del WAV: /api/files/:name (proxy a FastAPI)
+// Descarga del WAV: /api/files/:name (proxy)
 app.get("/api/files/:name", async (req, res) => {
   try {
     const name = String(req.params.name || "");
@@ -674,28 +590,23 @@ app.get("/api/files/:name", async (req, res) => {
 });
 
 // ---- Stubs mínimos para el viewer (mientras tanto) ----
-app.post("/api/viewer/offer", (req, res) => {
+app.post("/api/viewer/offer", (_req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   return res.json({ ok: true });
 });
-app.post("/api/viewer/candidate", (req, res) => {
+app.post("/api/viewer/candidate", (_req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   return res.json({ ok: true });
 });
-app.post("/api/viewer/ice", (req, res) => {
+app.post("/api/viewer/ice", (_req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   return res.json({ ok: true });
 });
-
 
 // --- Passthrough: segmentado XTTS vía backend ---
-const fetch = require("node-fetch"); // ya está en package.json, v2.x
-
 app.get("/api/voice/segment", async (req, res) => {
   try {
-    const VOZ = (process.env.VOZ_URL || "").replace(/\/+$/, "");
-    if (!VOZ) return res.status(500).json({ ok: false, error: "missing_VOZ_URL" });
-
+    const VOZ = VOZ_URL;
     const text   = (req.query.text || "").toString();
     const lang   = (req.query.lang || "es").toString();
     const rate   = (req.query.rate || "1.0").toString();
@@ -704,11 +615,10 @@ app.get("/api/voice/segment", async (req, res) => {
     const url = `${VOZ}/tts_save_segmented?` +
       `text=${encodeURIComponent(text)}&lang=${encodeURIComponent(lang)}&rate=${encodeURIComponent(rate)}&seg_max=${encodeURIComponent(segMax)}`;
 
-    const r = await fetch(url, { timeout: 60000 }); // 60s
+    const r = await fetch(url, { method: "GET" });
     const json = await r.json().catch(() => ({}));
     if (!r.ok) return res.status(r.status).json({ ok: false, error: "segment_failed", detail: json });
 
-    // Devuelvo tal cual para el front:
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.json(json);
   } catch (e) {
@@ -717,44 +627,6 @@ app.get("/api/voice/segment", async (req, res) => {
   }
 });
 
-
-// Diagnóstico rápido: /api/voice/diag
-app.get("/api/voice/diag", async (req, res) => {
-  const text = String(req.query.text || "hola");
-  const lang = String(req.query.lang || "es");
-  async function probe() {
-    const u = `${VOZ_URL}/tts?` + new URLSearchParams({ text, lang }).toString();
-    const t0 = Date.now();
-    try {
-      const r = await fetch(u, { headers: { Accept: "audio/wav" } });
-      const t1 = Date.now();
-      let sampled = 0;
-      if (r.ok && r.body) {
-        await new Promise((resolve) => {
-          let done = false;
-          r.body.on("data", (chunk) => {
-            if (done) return;
-            sampled += chunk.length || 0;
-            done = true; resolve();
-          });
-          r.body.on("end", resolve);
-          r.body.on("error", resolve);
-        });
-      }
-      return { ok: r.ok, status: r.status, first_byte_ms: t1 - t0, sampled_bytes: sampled, provider_used: "xtts" };
-    } catch (e) {
-      return { ok:false, status:0, first_byte_ms:-1, sampled_bytes:0, error:String(e.message || e) };
-    }
-  }
-  const xtts = await probe();
-  res.json({ ok: true, xtts, voz_url: VOZ_URL });
-});
-
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
-
-
-
-
-
