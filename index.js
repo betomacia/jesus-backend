@@ -16,7 +16,11 @@ const fs = require("fs/promises");
 const { query, ping } = require("./db/pg");
 
 // Node 18+ tiene fetch global, pero usamos node-fetch v2 por compatibilidad estricta
-const fetch = require("node-fetch");
+// Node 18+ ya trae fetch global. Solo cargamos node-fetch si faltara (por compat).
+if (typeof fetch === "undefined") {
+  global.fetch = require("node-fetch");
+}
+
 
 // --- CORS global + manejo de preflight ---
 const cors = require("cors");
@@ -714,5 +718,6 @@ app.get("/api/voice/diag", async (req, res) => {
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
+
 
 
