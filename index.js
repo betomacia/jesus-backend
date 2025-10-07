@@ -573,25 +573,26 @@ app.get("/api/tts_save_segmented", async (req, res) => {
   }
 });
 
-// Descarga del WAV: /api/files/:name (proxy)
+// Descarga del WAV: /api/files/:name (bufferizado; sin .pipe())
 app.get("/api/files/:name", async (req, res) => {
   try {
     const name = String(req.params.name || "");
     if (!/^[A-Za-z0-9._-]+$/.test(name)) {
       return res.status(400).send("bad_name");
     }
-    const r = await fetch(`${VOZ_URL}/files/${encodeURIComponent(name)}`);
-    if (!r.ok) return res.status(r.status).send("upstream_error");
 
-    res.status(r.status);
-    res.set("Content-Type", r.headers.get("content-type") || "audio/wav");
-    const len = r.headers.get("content-length");
-    if (len) res.set("Content-Length", len);
-    r.body.pipe(res);
+    const r = await fetch(`${VOZ_URL}/files/${encodeURIComponent(name)}`);
+    const ct = r.headers.get("content-type") || "audio/wav";
+    const ab = await r.arrayBuffer(); // ← bufferizamos
+    const buf = Buffer.from(ab);
+
+    res.status(r.status).set("Content-Type", ct);
+    res.send(buf);
   } catch (e) {
     res.status(500).send("files_proxy_error: " + String(e.message || e));
   }
 });
+
 
 // ---- Stubs mínimos para el viewer (mientras tanto) ----
 app.post("/api/viewer/offer", (_req, res) => {
@@ -643,5 +644,6 @@ app.get("/api/voice/segment", async (req, res) => {
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
+
 
 
