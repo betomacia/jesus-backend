@@ -667,11 +667,101 @@ app.post("/api/memory/sync", async (req, res) => {
   }
 });
 
+// === PROXY SSE: /api/tts_stream_segmented  ===============================
+// Reenvía el SSE del servidor de voz y reescribe cada "url" a /api/files/:name
+app.get("/api/tts_stream_segmented", async (req, res) => {
+  try {
+    // Cabeceras para streaming y evitar buffering en proxies
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders?.();
+
+    // Armar URL upstream con los mismos query params
+    const url = new URL("/tts_stream_segmented", VOZ_URL);
+    for (const [k, v] of Object.entries(req.query)) url.searchParams.set(k, String(v));
+
+    // Abortar si el cliente cierra
+    const controller = new AbortController();
+    req.on("close", () => controller.abort());
+
+    // Llamada al upstream (FastAPI) aceptando SSE
+    const upstream = await fetch(url.toString(), {
+      method: "GET",
+      headers: { Accept: "text/event-stream" },
+      signal: controller.signal,
+    });
+
+    if (!upstream.ok || !upstream.body) {
+      res.status(upstream.status || 502);
+      return res.end(`data: ${JSON.stringify({ event: "error", status: upstream.status })}\n\n`);
+    }
+
+    // Decodificador y buffer por líneas para poder reescribir "data: {...}"
+    const decoder = new TextDecoder();
+    let carry = "";
+
+    const base = _base(req); // p.ej. https://jesus-backend-production-...railway.app
+
+    const reader = upstream.body.getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      carry += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = carry.indexOf("\n")) >= 0) {
+        const line = carry.slice(0, idx);
+        carry = carry.slice(idx + 1);
+
+        // Solo líneas "data: ..."; el resto pasa tal cual
+        if (line.startsWith("data:")) {
+          const raw = line.slice(5).trimStart(); // tras "data:"
+          try {
+            const obj = JSON.parse(raw);
+
+            // Si el payload tiene "url", la reescribimos a /api/files/:name
+            if (obj && typeof obj === "object" && typeof obj.url === "string") {
+              const name = obj.url.split("/").pop();
+              if (name && /^[A-Za-z0-9._-]+$/.test(name)) {
+                obj.url = `${base}/api/files/${name}`;
+              }
+            }
+
+            // Emitimos la línea modificada
+            res.write(`data: ${JSON.stringify(obj)}\n\n`);
+          } catch {
+            // Si no es JSON, la pasamos tal cual
+            res.write(line + "\n");
+          }
+        } else {
+          // Comentarios SSE u otras líneas
+          res.write(line + "\n");
+        }
+      }
+    }
+
+    // Si queda algo en el buffer, lo emitimos
+    if (carry) res.write(carry);
+    res.end();
+  } catch (e) {
+    // En error, cerramos el SSE con un evento "error"
+    try {
+      res.write(`data: ${JSON.stringify({ event: "error", detail: String(e.message || e) })}\n\n`);
+    } finally {
+      res.end();
+    }
+  }
+});
+
+
 
 
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
+
 
 
 
