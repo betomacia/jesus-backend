@@ -493,7 +493,7 @@ app.get("/api/health", async (req, res) => {
   }
 });
 
-// /api/tts -> proxy streaming WAV (chunked)
+// /api/tts -> proxy WAV (bufferizado; sin .pipe())
 app.get("/api/tts", async (req, res) => {
   try {
     const q = new URLSearchParams();
@@ -507,13 +507,17 @@ app.get("/api/tts", async (req, res) => {
     const url = `${VOZ_URL}/tts?${q.toString()}`;
     const up  = await fetch(url, { headers: { Accept: "audio/wav" } });
 
-    res.status(up.status);
-    res.set("Content-Type", up.headers.get("content-type") || "audio/wav");
-    up.body.pipe(res);
+    const ct = up.headers.get("content-type") || "audio/wav";
+    const ab = await up.arrayBuffer(); // ← bufferizamos
+    const buf = Buffer.from(ab);
+
+    res.status(up.status).set("Content-Type", ct);
+    res.send(buf);
   } catch (e) {
     res.status(500).send("proxy_tts_error: " + String(e.message || e));
   }
 });
+
 
 // /api/tts_save -> JSON con url reescrita a /api/files/:name
 app.get("/api/tts_save", async (req, res) => {
@@ -639,4 +643,5 @@ app.get("/api/voice/segment", async (req, res) => {
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
+
 
