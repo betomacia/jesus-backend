@@ -640,10 +640,39 @@ app.get("/api/voice/segment", async (req, res) => {
   }
 });
 
+// ====== /api/memory/sync  (noop persistente para el front) ======
+app.post("/api/memory/sync", async (req, res) => {
+  try {
+    // Lo que mande el front: { userId?, memory? ... }
+    const body = req.body || {};
+    const userId = String(body.userId || "anon");
+    const payload = body.memory ?? body;
+
+    // Guardamos “tal cual” para debug (no interfiere con tu mem de chat)
+    const safe = userId.replace(/[^a-z0-9_-]/gi, "_");
+    const file = path.join(DATA_DIR, `frontend_mem_${safe}.json`);
+    await ensureDataDir();
+    await fs.writeFile(
+      file,
+      JSON.stringify({ ts: Date.now(), payload }, null, 2),
+      "utf8"
+    );
+
+    // CORS explícito (aunque ya lo cubre el middleware global)
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.json({ ok: true, saved: true });
+  } catch (e) {
+    console.error("MEMORY_SYNC_ERROR:", e);
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+
 
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
+
 
 
 
