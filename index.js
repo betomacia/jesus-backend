@@ -331,8 +331,8 @@ app.post("/api/ask", async (req, res) => {
     if (isOffTopic(userTxt) && !isReligiousException(userTxt)) {
       const msg =
         lang === "en" ? "I’m here for your inner life: faith, personal struggles and healing. I don’t give facts or opinions on sports, entertainment, technical, food or general topics." :
-        lang === "pt" ? "Estou aqui para a sua vida interior: fé, questões pessoais e cura. Não trato esportes, entretenimento, técnica, gastronomia ou temas gerais." :
-        lang === "it" ? "Sono qui per la tua vita interiore: fede, difficoltà personali e guarigione. Non tratto sport, spettacolo, tecnica, gastronomia o temi generali." :
+        lang === "pt" ? "Estou aqui para a sua vida interior: fé, questões pessoais e cura. Não trato esportes, entretenimento, técnica, gastronomia o temas gerais." :
+        lang === "it" ? "Sono qui per la tua vida interiore: fede, difficoltà personali e guarigione. Non tratto sport, spettacolo, tecnica, gastronomia o temi generali." :
         lang === "de" ? "Ich bin für dein inneres Leben da: Glaube, persönliche Themen und Heilung. Keine Fakten/Meinungen zu Sport, Unterhaltung, Technik, Gastronomie oder Allgemeinwissen." :
         lang === "ca" ? "Sóc aquí per a la teva vida interior: fe, dificultats personals i sanació. No tracto esports, entreteniment, tècnica, gastronomia o temes generals." :
         lang === "fr" ? "Je suis là pour ta vie intérieure : foi, difficultés personnelles et guérison. Je ne traite pas le sport, le divertissement, la technique, la gastronomie ni les sujets généraux." :
@@ -525,6 +525,7 @@ app.get("/api/tts", async (req, res) => {
     const buf = Buffer.from(ab);
 
     res.status(up.status).set("Content-Type", ct);
+    res.set("Access-Control-Allow-Origin", "*"); // CORS explícito
     res.send(buf);
   } catch (e) {
     res.status(500).send("proxy_tts_error: " + String(e.message || e));
@@ -552,6 +553,7 @@ app.get("/api/tts_save", async (req, res) => {
     if (!name) return res.status(502).json({ ok:false, error:"filename_missing" });
 
     const mine = `${_base(req)}/api/files/${name}`;
+    res.setHeader("Access-Control-Allow-Origin", "*"); // CORS explícito
     res.json({ ok: true, url: mine, file: mine, path: mine });
   } catch (e) {
     res.status(500).json({ ok:false, error: String(e.message || e) });
@@ -579,6 +581,7 @@ app.get("/api/tts_save_segmented", async (req, res) => {
       return name ? `${base}/api/files/${name}` : u;
     });
 
+    res.setHeader("Access-Control-Allow-Origin", "*"); // CORS explícito
     res.json({ ok: true, chunks: parts.length, ttfb_ms: j.ttfb_ms || 0, parts });
   } catch (e) {
     res.status(500).json({ ok:false, error: String(e.message || e) });
@@ -601,6 +604,7 @@ app.get("/api/files/:name", async (req, res) => {
 
     // Encabezados clave para streaming
     res.status(upstream.status);
+    res.setHeader("Access-Control-Allow-Origin", "*"); // CORS explícito para fetch desde el front
     res.setHeader("Content-Type", upstream.headers.get("content-type") || "audio/wav");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
@@ -666,30 +670,6 @@ app.get("/api/voice/segment", async (req, res) => {
   }
 });
 
-// ====== /api/memory/sync  (noop persistente para el front) ======
-app.post("/api/memory/sync", async (req, res) => {
-  try {
-    const body = req.body || {};
-    const userId = String(body.userId || "anon");
-    const payload = body.memory ?? body;
-
-    const safe = userId.replace(/[^a-z0-9_-]/gi, "_");
-    const file = path.join(DATA_DIR, `frontend_mem_${safe}.json`);
-    await ensureDataDir();
-    await fs.writeFile(
-      file,
-      JSON.stringify({ ts: Date.now(), payload }, null, 2),
-      "utf8"
-    );
-
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.json({ ok: true, saved: true });
-  } catch (e) {
-    console.error("MEMORY_SYNC_ERROR:", e);
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
-  }
-});
-
 // === PROXY SSE: /api/tts_stream_segmented  ===============================
 // Reenvía el SSE del servidor de voz y reescribe cada "url" a /api/files/:name
 app.get("/api/tts_stream_segmented", async (req, res) => {
@@ -699,6 +679,7 @@ app.get("/api/tts_stream_segmented", async (req, res) => {
 
   // Cabeceras para streaming y evitar buffering en proxies/CDN
   res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Access-Control-Allow-Origin", "*"); // CORS explícito
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Content-Encoding", "identity");
   res.setHeader("Connection", "keep-alive");
@@ -790,6 +771,30 @@ app.get("/api/tts_stream_segmented", async (req, res) => {
     }
   } finally {
     clearInterval(hb);
+  }
+});
+
+// ====== /api/memory/sync  (noop persistente para el front) ======
+app.post("/api/memory/sync", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const userId = String(body.userId || "anon");
+    const payload = body.memory ?? body;
+
+    const safe = userId.replace(/[^a-z0-9_-]/gi, "_");
+    const file = path.join(DATA_DIR, `frontend_mem_${safe}.json`);
+    await ensureDataDir();
+    await fs.writeFile(
+      file,
+      JSON.stringify({ ts: Date.now(), payload }, null, 2),
+      "utf8"
+    );
+
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.json({ ok: true, saved: true });
+  } catch (e) {
+    console.error("MEMORY_SYNC_ERROR:", e);
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
 
