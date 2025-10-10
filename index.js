@@ -7,7 +7,7 @@ const app = express();
 
 /* ================== CORS (robusto) ================== */
 const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "*", // FE usa credentials: 'omit'
+  "Access-Control-Allow-Origin": "*", // FE usa credentials: "omit"
   "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization, Accept",
   "Access-Control-Max-Age": "86400",
@@ -18,10 +18,10 @@ function setCors(res) {
   for (const [k, v] of Object.entries(CORS_HEADERS)) res.setHeader(k, v);
 }
 
-// Pre-CORS para TODAS las requests (incluye rutas inexistentes)
+// Debe ir ANTES de cualquier otra cosa
 app.use((req, res, next) => {
   setCors(res);
-  if (req.method === "OPTIONS") return res.status(204).end(); // responde preflight SIEMPRE
+  if (req.method === "OPTIONS") return res.status(204).end(); // preflight OK SIEMPRE
   next();
 });
 
@@ -37,7 +37,7 @@ app.get("/", (_req, res) => {
 /* ================== OpenAI ================== */
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// Ayuda idiomas para el prompt
+// Helper idioma para prompts
 const LANG_NAME = (l = "es") =>
   ({ es: "español", en: "English", pt: "português", it: "italiano", de: "Deutsch", ca: "català", fr: "français" }[l] || "español");
 
@@ -69,7 +69,10 @@ Genera bienvenida en ${lang} con:
       temperature: 0.7,
       max_tokens: 220,
       messages: [
-        { role: "system", content: SYSTEM.replace(/{{hour}}/g, String(h)).replace(/{{name}}/g, String(name || "")).replace(/{{gender}}/g, String(gender || "")) },
+        { role: "system", content: SYSTEM
+            .replace(/{{hour}}/g, String(h))
+            .replace(/{{name}}/g, String(name || ""))
+            .replace(/{{gender}}/g, String(gender || "")) },
         { role: "user", content: USER },
       ],
       response_format: {
@@ -166,6 +169,9 @@ Salida EXCLUSIVA en JSON EXACTO:
   }
 });
 
+/* ================== Diagnóstico opcional ================== */
+// app.get("/__cors", (req, res) => { setCors(res); res.status(200).json({ ok: true, headers: CORS_HEADERS }); });
+
 /* ================== 404 con CORS ================== */
 app.use((req, res) => {
   setCors(res);
@@ -176,8 +182,7 @@ app.use((req, res) => {
 app.use((err, req, res, _next) => {
   console.error("SERVER ERROR:", err);
   setCors(res);
-  const code = Number.isInteger(err?.status) ? err.status : 502;
-  res.status(code).json({ error: "server_error", detail: String(err?.message || "unknown") });
+  res.status(502).json({ error: "server_error", detail: String(err?.message || "unknown") });
 });
 
 /* ================== Start ================== */
