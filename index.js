@@ -180,49 +180,31 @@ Salida EXCLUSIVA en JSON EXACTO:
 
 
 /* ================== /api/tts-stream ================== */
-const WebSocket = require("ws");
+app.post("/api/tts-stream", async (req, res, next) => {
+  try {
+    const { text = "", lang = "es" } = req.body || {};
+    if (!text.trim()) return res.status(400).json({ error: "missing_text" });
 
-app.post("/api/tts-stream", async (req, res) => {
-  const { text = "", lang = "es" } = req.body || {};
-  if (!text.trim()) return res.status(400).json({ error: "missing_text" });
-
-  const ws = new WebSocket("ws://34.58.141.246:8000/ws/tts");
-
-  let chunks = [];
-
-  ws.on("open", () => {
-    ws.send(JSON.stringify({ text, lang }));
-  });
-
-  ws.on("message", (data) => {
-    try {
-      const msg = JSON.parse(data.toString());
-      if (msg.event === "chunk" && msg.audio) {
-        chunks.push(msg.audio);
-      }
-      if (msg.event === "done") {
-        const joined = chunks.map(c => Buffer.from(c, 'base64'));
-        const fullAudio = Buffer.concat(joined);
-        res.setHeader("Content-Type", "audio/wav");
-        res.setHeader("Access-Control-Allow-Origin", "*");
-        res.send(fullAudio);
-      }
-    } catch (e) {
-      console.error("[TTS-stream] Error parsing chunk:", e);
-      res.status(500).json({ error: "bad_chunk", detail: e.message });
+    // Llamar al servidor TTS con HTTPS
+    const ttsUrl = `https://voz.movilive.es/tts?text=${encodeURIComponent(text)}&lang=${lang}`;
+    
+    const response = await fetch(ttsUrl);
+    
+    if (!response.ok) {
+      return res.status(response.status).json({ error: "tts_server_error" });
     }
-  });
 
-  ws.on("error", (err) => {
-    console.error("[TTS-stream] WS error:", err);
-    res.status(502).json({ error: "tts_ws_error", detail: err.message });
-  });
-
-  ws.on("close", () => {
-    if (!res.headersSent) {
-      res.status(500).json({ error: "connection_closed_unexpectedly" });
-    }
-  });
+    // Obtener el audio como buffer
+    const audioBuffer = await response.arrayBuffer();
+    
+    // Enviar al frontend
+    setCors(res);
+    res.setHeader("Content-Type", "audio/wav");
+    res.send(Buffer.from(audioBuffer));
+  } catch (e) {
+    console.error("[TTS] Error:", e);
+    next(e);
+  }
 });
 
 
@@ -242,3 +224,4 @@ app.use((err, req, res, _next) => {
 /* ================== Start ================== */
 const PORT = process.env.PORT || 3000; // Asegurate que Railway use 3000 si así lo configuraste
 app.listen(PORT, () => console.log(`✅ Backend listo en puerto ${PORT}`));
+
