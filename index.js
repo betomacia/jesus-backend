@@ -1,50 +1,59 @@
+// index.js — CORS blindado + 100% OpenAI en /api/welcome y /api/ask
 const express = require("express");
 const OpenAI = require("openai");
 require("dotenv").config();
 
 const app = express();
 
-/* ===== CORS básico ===== */
+/* ================== CORS (robusto) ================== */
 const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Origin": "*", // FE usa credentials: 'omit'
   "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization, Accept",
-  "Access-Control-Max-Age": "600",
+  "Access-Control-Max-Age": "86400",
+  "Vary": "Origin",
   "Content-Type": "application/json; charset=utf-8",
 };
-function setCors(res) { for (const [k, v] of Object.entries(CORS_HEADERS)) res.setHeader(k, v); }
-app.use((req, res, next) => { setCors(res); if (req.method === "OPTIONS") return res.status(204).end(); next(); });
+function setCors(res) {
+  for (const [k, v] of Object.entries(CORS_HEADERS)) res.setHeader(k, v);
+}
 
-/* ===== JSON parser ===== */
+// Pre-CORS para TODAS las requests (incluye rutas inexistentes)
+app.use((req, res, next) => {
+  setCors(res);
+  if (req.method === "OPTIONS") return res.status(204).end(); // responde preflight SIEMPRE
+  next();
+});
+
+// Body parser
 app.use(express.json());
 
-/* ===== Health ===== */
-app.get("/", (_req, res) => { setCors(res); res.json({ ok: true, service: "backend", ts: Date.now() }); });
+/* ================== Health ================== */
+app.get("/", (_req, res) => {
+  setCors(res);
+  res.json({ ok: true, service: "backend", ts: Date.now() });
+});
 
-/* ===== OpenAI client ===== */
+/* ================== OpenAI ================== */
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-/* ===== Helpers mínimos ===== */
-const LANG_NAME = (l = "es") => ({
-  es: "español", en: "English", pt: "português", it: "italiano",
-  de: "Deutsch", ca: "català", fr: "français",
-}[l] || "español");
+// Ayuda idiomas para el prompt
+const LANG_NAME = (l = "es") =>
+  ({ es: "español", en: "English", pt: "português", it: "italiano", de: "Deutsch", ca: "català", fr: "français" }[l] || "español");
 
-/* =========================================================================
-   /api/welcome — SIEMPRE OpenAI (JSON Schema), sin fallback local
-   ========================================================================= */
-app.post("/api/welcome", async (req, res) => {
+/* ================== /api/welcome ================== */
+app.post("/api/welcome", async (req, res, next) => {
   try {
     const { lang = "es", name = "", gender = "", hour = null } = req.body || {};
     const h = Number.isInteger(hour) ? hour : new Date().getHours();
 
     const SYSTEM = `
-Eres un asistente espiritual cálido y cercano. Siempre responde SOLO en ${LANG_NAME(lang)} (${lang}).
-Genera una BIENVENIDA con:
-1) Saludo por hora ({{hour}}) y usa el nombre ({{name}}) si viene; matiza con {{gender}} ("male"/"female") solo si suena natural.
-2) UNA sola frase motivadora/espiritual breve y original (sin clichés ni repeticiones).
-3) UNA pregunta breve y abierta para iniciar conversación.
-No incluyas nada fuera de JSON. Salida EXACTA:
+Eres un asistente espiritual cálido y cercano. Responde SIEMPRE y SOLO en ${LANG_NAME(lang)} (${lang}).
+Genera una bienvenida que tenga:
+1) Saludo contextual según la hora ({{hour}}) e incluye el nombre ({{name}}) si está; usa {{gender}} ("male"/"female") solo si suena natural.
+2) UNA sola frase motivadora/espiritual breve y original (evita clichés).
+3) UNA pregunta breve y abierta para iniciar la conversación.
+Salida EXCLUSIVA en JSON EXACTO:
 {"message":"saludo + frase","question":"pregunta"}
 `.trim();
 
@@ -89,32 +98,27 @@ Genera bienvenida en ${lang} con:
     setCors(res);
     res.json({ message, question });
   } catch (e) {
-    console.error("WELCOME ERROR:", e);
-    setCors(res);
-    res.status(502).json({ error: "openai_failed" });
+    next(e);
   }
 });
 
-/* =========================================================================
-   /api/ask — SIEMPRE OpenAI (JSON Schema), sin fallbacks, sin texto fijo
-   ========================================================================= */
-app.post("/api/ask", async (req, res) => {
+/* ================== /api/ask ================== */
+app.post("/api/ask", async (req, res, next) => {
   try {
-    const { message = "", history = [], lang = "es", userId = "anon" } = req.body || {};
+    const { message = "", history = [], lang = "es" } = req.body || {};
     const userTxt = String(message || "").trim();
 
-    // Construcción de conversación (solo pasamos strings previos tal cual)
     const convo = [];
     const recent = Array.isArray(history) ? history.slice(-8) : [];
     for (const h of recent) if (typeof h === "string") convo.push({ role: "user", content: h });
     convo.push({ role: "user", content: userTxt });
 
     const SYS = `
-Eres cercano, claro y compasivo; voz cristiana (católica). Responde SIEMPRE y SOLO en ${LANG_NAME(lang)} (${lang}).
-Alcance: espiritualidad/fe, sanación personal, relaciones y emociones. Si el usuario se va a temas ajenos (deportes, entretenimiento, técnica, política, gastronomía, trivia), redirígelo con suavidad al plano interior y a lo que le pasa por dentro, SIN dar datos externos.
-Varía el lenguaje; evita muletillas. Da pasos concretos cuando proceda. Cierra con **UNA** pregunta breve y útil.
-Incluye SIEMPRE una cita bíblica pertinente distinta de Mateo/Matthew 11:28 (evítala en cualquier idioma). Si el usuario rechaza Biblia, respeta y omite, pero igual devuelve el objeto con texto vacío.
-SALIDA EXCLUSIVA en JSON, EXACTAMENTE así:
+Eres cercano, claro y compasivo (voz cristiana/católica). Responde SOLO en ${LANG_NAME(lang)} (${lang}).
+Alcance: espiritualidad/fe, sanación personal, relaciones, emociones. Si se desvían a temas ajenos, redirígelo con suavidad al plano interior (sin datos externos).
+Varía el lenguaje y evita muletillas. Da pasos concretos si corresponde. Cierra con **UNA** pregunta breve y útil.
+Incluye SIEMPRE una cita bíblica pertinente distinta de Mateo/Matthew 11:28 (evítala en cualquier idioma). Si el usuario rechaza Biblia, respeta y devuelve bible con strings vacíos.
+Salida EXCLUSIVA en JSON EXACTO:
 {"message":"...", "question":"...?", "bible":{"text":"...","ref":"Libro 0:0"}}
 `.trim();
 
@@ -134,10 +138,7 @@ SALIDA EXCLUSIVA en JSON, EXACTAMENTE así:
               question: { type: "string" },
               bible: {
                 type: "object",
-                properties: {
-                  text: { type: "string" },
-                  ref:  { type: "string" }
-                },
+                properties: { text: { type: "string" }, ref: { type: "string" } },
                 required: ["text", "ref"],
               },
             },
@@ -151,26 +152,34 @@ SALIDA EXCLUSIVA en JSON, EXACTAMENTE así:
     let data = {};
     try { data = JSON.parse(r?.choices?.[0]?.message?.content || "{}"); } catch {}
 
-    // No generamos nada local: si falta algo, devolvemos error (para mantener 100% OpenAI)
     const msg = String(data?.message || "").trim();
     const q   = String(data?.question || "").trim();
     const btx = String(data?.bible?.text || "").trim();
     const bref= String(data?.bible?.ref  || "").trim();
 
-    if (!msg || !q || !btx || !bref) {
-      setCors(res);
-      return res.status(502).json({ error: "bad_openai_output" });
-    }
+    if (!msg || !q || !btx || !bref) return res.status(502).json({ error: "bad_openai_output" });
 
     setCors(res);
     res.json({ message: msg, question: q, bible: { text: btx, ref: bref } });
   } catch (e) {
-    console.error("ASK ERROR:", e);
-    setCors(res);
-    res.status(502).json({ error: "openai_failed" });
+    next(e);
   }
 });
 
-/* ===== Start ===== */
+/* ================== 404 con CORS ================== */
+app.use((req, res) => {
+  setCors(res);
+  res.status(404).json({ error: "not_found" });
+});
+
+/* ================== Error handler con CORS ================== */
+app.use((err, req, res, _next) => {
+  console.error("SERVER ERROR:", err);
+  setCors(res);
+  const code = Number.isInteger(err?.status) ? err.status : 502;
+  res.status(code).json({ error: "server_error", detail: String(err?.message || "unknown") });
+});
+
+/* ================== Start ================== */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`✅ Backend listo en puerto ${PORT}`));
