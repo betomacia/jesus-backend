@@ -1,3 +1,4 @@
+
 // index.js — CORS blindado + 100% OpenAI + bienvenida con frase alentadora (tres estilos)
 const express = require("express");
 const OpenAI = require("openai");
@@ -46,7 +47,6 @@ app.post("/api/welcome", async (req, res, next) => {
     const { lang = "es", name = "", gender = "", hour = null } = req.body || {};
     const h = Number.isInteger(hour) ? hour : new Date().getHours();
 
-    // Prompt actualizado con líneas editoriales para la frase alentadora
     const SYSTEM = `
 Eres un asistente espiritual cálido y cercano. Responde SIEMPRE y SOLO en ${LANG_NAME(lang)} (${lang}).
 
@@ -177,6 +177,54 @@ Salida EXCLUSIVA en JSON EXACTO:
     next(e);
   }
 });
+
+
+/* ================== /api/tts-stream ================== */
+const WebSocket = require("ws");
+
+app.post("/api/tts-stream", async (req, res) => {
+  const { text = "", lang = "es" } = req.body || {};
+  if (!text.trim()) return res.status(400).json({ error: "missing_text" });
+
+  const ws = new WebSocket("ws://34.58.141.246:8000/ws/tts");
+
+  let chunks = [];
+
+  ws.on("open", () => {
+    ws.send(JSON.stringify({ text, lang }));
+  });
+
+  ws.on("message", (data) => {
+    try {
+      const msg = JSON.parse(data.toString());
+      if (msg.event === "chunk" && msg.audio) {
+        chunks.push(msg.audio);
+      }
+      if (msg.event === "done") {
+        const joined = chunks.map(c => Buffer.from(c, 'base64'));
+        const fullAudio = Buffer.concat(joined);
+        res.setHeader("Content-Type", "audio/wav");
+        res.setHeader("Access-Control-Allow-Origin", "*");
+        res.send(fullAudio);
+      }
+    } catch (e) {
+      console.error("[TTS-stream] Error parsing chunk:", e);
+      res.status(500).json({ error: "bad_chunk", detail: e.message });
+    }
+  });
+
+  ws.on("error", (err) => {
+    console.error("[TTS-stream] WS error:", err);
+    res.status(502).json({ error: "tts_ws_error", detail: err.message });
+  });
+
+  ws.on("close", () => {
+    if (!res.headersSent) {
+      res.status(500).json({ error: "connection_closed_unexpectedly" });
+    }
+  });
+});
+
 
 /* ================== 404 con CORS ================== */
 app.use((req, res) => {
