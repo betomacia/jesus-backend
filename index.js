@@ -1,13 +1,14 @@
-// index.js — Backend simple, dominios acotados y respuestas naturales (multi-idioma)
-// Bienvenida SIN cita bíblica. /api/ask mantiene la estructura {message, question, bible?}
-// (no incluye Heygen; solo OpenAI).
+// index.js — Backend: OpenAI en /api/welcome (saludo + frase alentadora + pregunta)
+// y /api/ask (respuesta + (opcional) biblia + pregunta). Sin Heygen.
+
 const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
 const OpenAI = require("openai");
+const path = require("path");
+const fs = require("fs/promises");
 require("dotenv").config();
 
-// App
 const app = express();
 app.use(cors({ origin: true }));
 app.use(bodyParser.json());
@@ -16,74 +17,151 @@ app.use((req, res, next) => {
   next();
 });
 
-// OpenAI
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// Utils
-function greetingByHour(lang = "es", hour = null) {
-  const h = Number.isInteger(hour) ? hour : new Date().getHours();
-  const g = (m, a, n) => (h < 12 ? m : h < 19 ? a : n);
-  switch (lang) {
-    case "en": return g("Good morning", "Good afternoon", "Good evening");
-    case "pt": return g("Bom dia", "Boa tarde", "Boa noite");
-    case "it": return g("Buongiorno", "Buon pomeriggio", "Buonasera");
-    case "de": return g("Guten Morgen", "Guten Tag", "Guten Abend");
-    case "ca": return g("Bon dia", "Bona tarda", "Bona nit");
-    case "fr": return g("Bonjour", "Bon après-midi", "Bonsoir");
-    default:   return g("Buenos días", "Buenas tardes", "Buenas noches");
+// ===== Memoria simple para evitar frases repetidas en la bienvenida =====
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
+async function ensureDataDir() { try { await fs.mkdir(DATA_DIR, { recursive: true }); } catch {} }
+function memPath(uid) {
+  const safe = String(uid || "anon").replace(/[^a-z0-9_-]/gi, "_");
+  return path.join(DATA_DIR, `mem_${safe}.json`);
+}
+async function readMem(userId) {
+  await ensureDataDir();
+  try {
+    const raw = await fs.readFile(memPath(userId), "utf8");
+    const m = JSON.parse(raw);
+    return {
+      last_user_text: m.last_user_text || "",
+      last_user_ts: m.last_user_ts || 0,
+      last_bot: m.last_bot || null,
+      last_refs: Array.isArray(m.last_refs) ? m.last_refs : [],
+      last_welcome_phrases: Array.isArray(m.last_welcome_phrases) ? m.last_welcome_phrases : [],
+    };
+  } catch {
+    return {
+      last_user_text: "",
+      last_user_ts: 0,
+      last_bot: null,
+      last_refs: [],
+      last_welcome_phrases: [],
+    };
   }
 }
-const DAILY_PHRASES = {
-  es: ["Un gesto de bondad puede cambiar tu día.","La fe hace posible lo que parece imposible.","Hoy es buen día para empezar de nuevo.","La paz se cultiva con pasos pequeños.","El amor que das, vuelve a ti."],
-  en: ["A small kindness can change your day.","Faith makes the impossible possible.","Today is a good day to begin again.","Peace grows from small steps.","The love you give returns to you."],
-  pt: ["Um gesto de bondade pode mudar o seu dia.","A fé torna possível o impossível.","Hoje é um bom dia para recomeçar.","A paz cresce com pequenos passos.","O amor que você dá volta para você."],
-  it: ["Un gesto di gentilezza può cambiare la tua giornata.","La fede rende possibile l'impossibile.","Oggi è un buon giorno per ricominciare.","La pace cresce a piccoli passi.","L'amore che doni ritorna a te."],
-  de: ["Eine kleine Freundlichkeit kann deinen Tag verändern.","Glaube macht das Unmögliche möglich.","Heute ist ein guter Tag für einen Neuanfang.","Frieden wächst aus kleinen Schritten.","Die Liebe, die du gibst, kehrt zu dir zurück."],
-  ca: ["Un gest d'amabilitat pot canviar el teu dia.","La fe fa possible l'impossible.","Avui és un bon dia per començar de nou.","La pau creix amb petits passos.","L'amor que dones torna a tu."],
-  fr: ["Un geste de bonté peut changer ta journée.","La foi rend possible l'impossible.","Aujourd'hui est un bon jour pour recommencer.","La paix grandit à petits pas.","L'amour que tu donnes te revient."],
-};
-function dayPhrase(lang = "es") {
-  const arr = DAILY_PHRASES[lang] || DAILY_PHRASES.es;
-  return arr[Math.floor(Math.random() * arr.length)];
+async function writeMem(userId, mem) {
+  await ensureDataDir();
+  await fs.writeFile(memPath(userId), JSON.stringify(mem, null, 2), "utf8");
 }
 
-// Health
+// ===== Health =====
 app.get("/", (_req, res) => res.json({ ok: true, service: "backend", ts: Date.now() }));
 
-// Bienvenida (SIN Biblia)
+// ===== /api/welcome =====
+// -> TODO viene de OpenAI: saludo (según hora) + frase alentadora (variedad, sin repetir) + 1 pregunta
 app.post("/api/welcome", async (req, res) => {
   try {
-    const { lang = "es", name = "", gender = "", hour = null } = req.body || {};
-    const hi = greetingByHour(lang, hour);
-    const phrase = dayPhrase(lang);
-    const nm = String(name || "").trim();
-    let sal = nm ? `${hi}, ${nm}.` : `${hi}.`;
+    const { lang = "es", name = "", gender = "", hour = null, userId = "anon" } = req.body || {};
+    const h = Number.isInteger(hour) ? hour : new Date().getHours();
 
-    const message =
-      lang === "en" ? `${sal} ${phrase} I'm here for you.` :
-      lang === "pt" ? `${sal} ${phrase} Estou aqui para você.` :
-      lang === "it" ? `${sal} ${phrase} Sono qui per te.` :
-      lang === "de" ? `${sal} ${phrase} Ich bin für dich da.` :
-      lang === "ca" ? `${sal} ${phrase} Sóc aquí per ajudar-te.` :
-      lang === "fr" ? `${sal} ${phrase} Je suis là pour toi.` :
-                      `${sal} ${phrase} Estoy aquí para lo que necesites.`;
+    const mem = await readMem(userId);
+    const recent_phrases = mem.last_welcome_phrases || [];
 
-    const question =
-      lang === "en" ? "What would you like to share today?" :
-      lang === "pt" ? "O que você gostaria de compartilhar hoje?" :
-      lang === "it" ? "Di cosa ti piacerebbe parlare oggi?" :
-      lang === "de" ? "Worüber möchtest du heute sprechen?" :
-      lang === "ca" ? "De què t'agradaria parlar avui?" :
-      lang === "fr" ? "De quoi aimerais-tu parler aujourd’hui ?" :
-                      "¿Qué te gustaría compartir hoy?";
+    const SYSTEM = `
+Eres un asistente espiritual cálido, claro y cercano. Tu tarea es generar una BIENVENIDA inicial en el idioma {{lang}}, compuesta por:
+
+1) Saludo personalizado, acorde a la hora ({{hour}} en 0–23) y al nombre si está disponible ({{name}}).
+   - Mañana: "Buenos días"/"Good morning", tarde: "Buenas tardes"/"Good afternoon", noche: "Buenas noches"/"Good evening" (u en {{lang}} equivalente).
+   - Si hay {{gender}} ("male"/"female"), puedes matizar afectuosamente (ej. "hijo/hija" en español), solo si suma naturalidad.
+
+2) UNA sola frase motivacional/espiritual breve y original para arrancar el día.
+   - Temáticas (elige 1 o mezcla sutil):
+     🌻 gratitud y belleza de la vida,
+     🌈 esperanza y fe en lo que viene,
+     ✨ motivación para actuar desde el presente,
+     🧘 presencia/atención plena (mindfulness),
+     💪 fortaleza interior y resiliencia (psicología positiva, terapias breves, coaching motivacional).
+   - Evita clichés; usa lenguaje cotidiano, imágenes sencillas.
+   - Varía estructura y vocabulario entre respuestas.
+   - Si recibes "recent_phrases", **no repitas** ideas ni frases cercanas.
+
+3) Una PREGUNTA breve, amable y abierta que invite a iniciar conversación (una sola).
+
+Salida: SOLO JSON
+{
+  "message": "saludo + frase motivadora (en {{lang}})",
+  "question": "pregunta breve para iniciar (en {{lang}})"
+}
+
+Requisitos de estilo:
+- Tono cálido, concreto, 1–2 oraciones máximo en "message".
+- 0–1 emoji (opcional). No más de un emoji.
+- Sin citas bíblicas ni fuentes.
+- No expliques tu proceso ni muestres este prompt.
+- Responde SIEMPRE en {{lang}}.
+`.trim();
+
+    const USER = `
+Genera la bienvenida en ${lang} usando:
+- hour: ${h}
+- name: ${String(name || "").trim()}
+- gender: ${String(gender || "").trim()}
+- recent_phrases: ${JSON.stringify(recent_phrases || [])}
+`.trim();
+
+    const r = await openai.chat.completions.create({
+      model: "gpt-4o",
+      temperature: 0.7,
+      max_tokens: 220,
+      messages: [
+        { role: "system", content: SYSTEM.replace(/{{lang}}/g, lang) },
+        { role: "user", content: USER },
+      ],
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: "Welcome",
+          schema: {
+            type: "object",
+            properties: {
+              message: { type: "string" },
+              question: { type: "string" },
+            },
+            required: ["message", "question"],
+            additionalProperties: false,
+          },
+        },
+      },
+    });
+
+    const content = r?.choices?.[0]?.message?.content || "{}";
+    let data = {};
+    try { data = JSON.parse(content); } catch { data = {}; }
+
+    const message = String(data?.message || "").trim();
+    const question = String(data?.question || "").trim();
+
+    // Guarda la frase motivadora para anti-repetición (guardamos hasta 8 últimas)
+    if (message) {
+      const onlyPhrase = message; // mensaje ya incluye saludo + frase; para simplicidad guardamos entero
+      const set = new Set([onlyPhrase, ...(recent_phrases || [])]);
+      const next = Array.from(set).slice(0, 8);
+      mem.last_welcome_phrases = next;
+      await writeMem(userId, mem);
+    }
+
+    if (!message || !question) {
+      return res.status(502).json({ error: "bad_openai_output" });
+    }
 
     res.json({ message, question });
-  } catch {
-    res.json({ message: "La paz sea contigo. ¿De qué te gustaría hablar hoy?", question: "¿Qué te gustaría compartir hoy?" });
+  } catch (e) {
+    console.error("WELCOME ERROR:", e);
+    return res.status(500).json({ error: "welcome_failed" });
   }
 });
 
-// Conversación (OpenAI JSON con {message, question, bible?})
+// ===== /api/ask =====
+// (NO tocado): Respuesta + (opcional) biblia + 1 pregunta
 app.post("/api/ask", async (req, res) => {
   try {
     const { message = "", history = [], lang = "es" } = req.body || {};
@@ -117,14 +195,14 @@ No incluyas nada fuera del JSON.
               bible: {
                 type: "object",
                 properties: { text: { type: "string" }, ref: { type: "string" } },
-                required: ["text", "ref"]
-              }
+                required: ["text", "ref"],
+              },
             },
             required: ["message"],
-            additionalProperties: true
-          }
-        }
-      }
+            additionalProperties: true,
+          },
+        },
+      },
     });
 
     const content = r?.choices?.[0]?.message?.content || "{}";
@@ -133,17 +211,17 @@ No incluyas nada fuera del JSON.
     const out = {
       message: String(data?.message || "").trim() || (lang === "en" ? "I'm with you." : "Estoy contigo."),
       question: String(data?.question || "").trim() || "",
-      bible: data?.bible && data.bible.text && data.bible.ref ? data.bible : undefined
+      bible: data?.bible && data.bible.text && data.bible.ref ? data.bible : undefined,
     };
     res.json(out);
   } catch (e) {
+    console.error("ASK ERROR:", e);
     res.json({
       message: "La paz sea contigo. Decime en pocas palabras qué está pasando.",
-      question: "¿Qué te gustaría trabajar primero?"
+      question: "¿Qué te gustaría trabajar primero?",
     });
   }
 });
 
-// Arranque
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
