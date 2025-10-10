@@ -2,7 +2,8 @@
 // - /api/welcome: Saludo por hora + nombre + (opcional hijo/hija 25%) + 1 frase IA + 1 pregunta IA (variada, íntima)
 // - /api/ask: TODA la Biblia viene de OpenAI. Si es inválida/repetida/prohibida, se pide una alternativa a OpenAI.
 // - VOZ (XTTS FastAPI): /api/tts, /api/tts_save, /api/tts_save_segmented, /api/files/:name, /api/voice/diag, /api/voice/segment
-// - Se eliminaron rutas de HeyGen/ElevenLabs.
+// - PROXY SSE optimizado: /api/tts_stream_segmented
+// - Warmup/diagnóstico: /api/voice/prime, /api/_diag/tts_probe
 
 require("dotenv").config();
 
@@ -12,11 +13,11 @@ const bodyParser = require("body-parser");
 const OpenAI = require("openai");
 const path = require("path");
 const fs = require("fs/promises");
-const { Readable } = require("stream"); // CommonJS, evita error ESM
+const { Readable } = require("stream"); // CommonJS
 const http = require("http");
 const https = require("https");
 
-// ====== fetch: Node 18+ ya lo trae global. Polyfill solo si faltara. ======
+// ====== fetch: Node 18+ lo trae global. Polyfill solo si faltara. ======
 if (typeof fetch === "undefined") {
   global.fetch = require("node-fetch");
 }
@@ -492,7 +493,7 @@ function _base(req) {
   return `${proto}://${host}`;
 }
 
-// Health del proxy + upstream FastAPI
+// ---- Health proxy + upstream FastAPI
 app.get("/api/health", async (req, res) => {
   try {
     let upstream = null;
@@ -506,7 +507,18 @@ app.get("/api/health", async (req, res) => {
   }
 });
 
-// /api/tts -> proxy WAV (bufferizado; sin .pipe())
+// Nueva: health “directa” del XTTS
+app.get("/api/voice/diag", async (_req, res) => {
+  try {
+    const r = await fetch(`${VOZ_URL}/health`, { method: "GET", ...agentFor(VOZ_URL) });
+    const j = await r.json().catch(() => null);
+    res.json({ ok: true, upstream: j });
+  } catch (e) {
+    res.status(500).json({ ok:false, error: String(e?.message || e) });
+  }
+});
+
+// ===== WAV directo (bufferizado) =====
 app.get("/api/tts", async (req, res) => {
   try {
     const q = new URLSearchParams();
@@ -521,18 +533,18 @@ app.get("/api/tts", async (req, res) => {
     const up  = await fetch(url, { headers: { Accept: "audio/wav" }, ...agentFor(VOZ_URL) });
 
     const ct = up.headers.get("content-type") || "audio/wav";
-    const ab = await up.arrayBuffer(); // ← bufferizamos
+    const ab = await up.arrayBuffer(); // bufferizamos
     const buf = Buffer.from(ab);
 
     res.status(up.status).set("Content-Type", ct);
-    res.set("Access-Control-Allow-Origin", "*"); // CORS explícito
+    res.set("Access-Control-Allow-Origin", "*");
     res.send(buf);
   } catch (e) {
     res.status(500).send("proxy_tts_error: " + String(e.message || e));
   }
 });
 
-// /api/tts_save -> JSON con url reescrita a /api/files/:name
+// ===== Guardar y reescribir a /api/files/:name =====
 app.get("/api/tts_save", async (req, res) => {
   try {
     const q = new URLSearchParams();
@@ -553,20 +565,20 @@ app.get("/api/tts_save", async (req, res) => {
     if (!name) return res.status(502).json({ ok:false, error:"filename_missing" });
 
     const mine = `${_base(req)}/api/files/${name}`;
-    res.setHeader("Access-Control-Allow-Origin", "*"); // CORS explícito
+    res.setHeader("Access-Control-Allow-Origin", "*");
     res.json({ ok: true, url: mine, file: mine, path: mine });
   } catch (e) {
     res.status(500).json({ ok:false, error: String(e.message || e) });
   }
 });
 
-// /api/tts_save_segmented -> JSON con múltiples partes
+// ===== Segmentado (pull) =====
 app.get("/api/tts_save_segmented", async (req, res) => {
   try {
     const q = new URLSearchParams();
     q.set("text", String(req.query.text || "Hola"));
     q.set("lang", String(req.query.lang || "es"));
-    if (req.query.rate)    q.set("rate", String(req.query.rate));
+    if (req.query.rate)    q.set("rate",    String(req.query.rate));
     if (req.query.seg_max) q.set("seg_max", String(req.query.seg_max));
 
     const r = await fetch(`${VOZ_URL}/tts_save_segmented?${q.toString()}`, { headers: { Accept: "application/json" }, ...agentFor(VOZ_URL) });
@@ -581,14 +593,14 @@ app.get("/api/tts_save_segmented", async (req, res) => {
       return name ? `${base}/api/files/${name}` : u;
     });
 
-    res.setHeader("Access-Control-Allow-Origin", "*"); // CORS explícito
+    res.setHeader("Access-Control-Allow-Origin", "*");
     res.json({ ok: true, chunks: parts.length, ttfb_ms: j.ttfb_ms || 0, parts });
   } catch (e) {
     res.status(500).json({ ok:false, error: String(e.message || e) });
   }
 });
 
-// Descarga del WAV: /api/files/:name —> STREAMING (sin buffer)
+// ===== Descarga de WAV (streaming passthrough) =====
 app.get("/api/files/:name", async (req, res) => {
   try {
     const name = String(req.params.name || "");
@@ -602,9 +614,8 @@ app.get("/api/files/:name", async (req, res) => {
       ...agentFor(VOZ_URL),
     });
 
-    // Encabezados clave para streaming
     res.status(upstream.status);
-    res.setHeader("Access-Control-Allow-Origin", "*"); // CORS explícito para fetch desde el front
+    res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Content-Type", upstream.headers.get("content-type") || "audio/wav");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
@@ -612,7 +623,6 @@ app.get("/api/files/:name", async (req, res) => {
     res.setHeader("Content-Encoding", "identity");
     res.flushHeaders?.();
 
-    // Stream passthrough sin cargar en memoria
     if (upstream.body) {
       const nodeStream = Readable.fromWeb ? Readable.fromWeb(upstream.body) : Readable.from(upstream.body);
       nodeStream.pipe(res);
@@ -638,7 +648,7 @@ app.post("/api/viewer/ice", (_req, res) => {
   return res.json({ ok: true });
 });
 
-// --- Passthrough: segmentado XTTS vía backend (con reescritura a HTTPS) ---
+// ===== Segmentado XTTS via backend (reescritura a HTTPS) =====
 app.get("/api/voice/segment", async (req, res) => {
   try {
     const text   = (req.query.text || "").toString();
@@ -655,7 +665,6 @@ app.get("/api/voice/segment", async (req, res) => {
       return res.status(r.ok ? 502 : r.status).json({ ok: false, error: "segment_failed", detail: j || {} });
     }
 
-    // Reescritura de cada parte a HTTPS en tu dominio
     const base = _base(req);
     const parts = j.parts.map((u) => {
       const name = String(u || "").split("/").pop();
@@ -679,7 +688,7 @@ app.get("/api/tts_stream_segmented", async (req, res) => {
 
   // Cabeceras para streaming y evitar buffering en proxies/CDN
   res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-  res.setHeader("Access-Control-Allow-Origin", "*"); // CORS explícito
+  res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Content-Encoding", "identity");
   res.setHeader("Connection", "keep-alive");
@@ -687,15 +696,17 @@ app.get("/api/tts_stream_segmented", async (req, res) => {
   res.setHeader("Transfer-Encoding", "chunked");
   res.flushHeaders?.();
 
-  // PRELUDIO anti-buffering: padding + ping inmediato
+  // PRELUDIO anti-buffering: padding + retry + ready inmediato
+  res.write("retry: 1000\n");
   res.write(":" + " ".repeat(2048) + "\n");
+  res.write(`event: ready\ndata: {"ts":${Date.now()}}\n\n`);
   res.write(`event: ping\ndata: {"ts":${Date.now()}}\n\n`);
   res.flush?.();
 
   // Heartbeat periódico (mantiene vivo el stream)
   const hb = setInterval(() => {
     try { res.write(`event: ping\ndata: {"ts":${Date.now()}}\n\n`); res.flush?.(); } catch {}
-  }, 2000);
+  }, 1000);
 
   // Armar URL upstream con mismos query params
   const url = new URL("/tts_stream_segmented", VOZ_URL);
@@ -706,7 +717,6 @@ app.get("/api/tts_stream_segmented", async (req, res) => {
   req.on("close", () => controller.abort());
 
   try {
-    // Llamada al upstream (FastAPI) aceptando SSE + keep-alive
     const upstream = await fetch(url.toString(), {
       method: "GET",
       headers: { Accept: "text/event-stream" },
@@ -722,7 +732,7 @@ app.get("/api/tts_stream_segmented", async (req, res) => {
 
     const decoder = new TextDecoder();
     let carry = "";
-    const base = _base(req); // p.ej. https://jesus-backend-...railway.app
+    const base = _base(req);
     const reader = upstream.body.getReader();
 
     while (true) {
@@ -739,26 +749,22 @@ app.get("/api/tts_stream_segmented", async (req, res) => {
           const raw = line.slice(5).trimStart();
           try {
             const obj = JSON.parse(raw);
-
-            // Reescribir la URL del WAV a /api/files/:name
             if (obj && typeof obj === "object" && typeof obj.url === "string") {
               const name = obj.url.split("/").pop();
               if (name && /^[A-Za-z0-9._-]+$/.test(name)) {
                 obj.url = `${base}/api/files/${name}`;
               }
             }
-
             res.write(`data: ${JSON.stringify(obj)}\n\n`);
           } catch {
-            // Si no es JSON, pasa tal cual
             res.write(line + "\n");
           }
         } else {
-          // comentarios SSE / event: lines
+          // Pasar comentarios y event: tal cual
           res.write(line + "\n");
         }
       }
-      res.flush?.(); // fuerza envío inmediato del chunk
+      res.flush?.();
     }
 
     if (carry) res.write(carry);
@@ -795,6 +801,45 @@ app.post("/api/memory/sync", async (req, res) => {
   } catch (e) {
     console.error("MEMORY_SYNC_ERROR:", e);
     res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+// ===== Warm-up / prime para bajar TTFB en el primer audio =====
+async function _warmOnce(lang = "es") {
+  const u = `${VOZ_URL}/tts?text=${encodeURIComponent("ok")}&lang=${encodeURIComponent(lang)}`;
+  try {
+    const r = await fetch(u, { method: "GET", headers: { Accept: "audio/wav" }, ...agentFor(VOZ_URL) });
+    // No hace falta leer todo; con leer un poco alcanza para “despertar”
+    await r.arrayBuffer().catch(()=>null);
+  } catch {}
+}
+
+app.get("/api/voice/prime", async (_req, res) => {
+  try {
+    // dos pequeños warmups en paralelo
+    await Promise.race([
+      Promise.all([_warmOnce("es"), _warmOnce("en")]),
+      new Promise((r) => setTimeout(r, 1800)),
+    ]);
+    res.json({ ok: true, primed: true, ts: Date.now() });
+  } catch {
+    res.json({ ok: false, primed: false, ts: Date.now() });
+  }
+});
+
+// Diag TTFB simple para el front (lo puedes llamar al habilitar audio)
+app.get("/api/_diag/tts_probe", async (req, res) => {
+  const lang = String(req.query.lang || "es");
+  const t0 = Date.now();
+  try {
+    const u = `${VOZ_URL}/tts?text=${encodeURIComponent("ok")}&lang=${encodeURIComponent(lang)}&t=${Date.now()}`;
+    const r = await fetch(u, { method: "GET", headers: { Accept: "audio/wav" }, ...agentFor(VOZ_URL) });
+    const ttfb = Date.now() - t0;
+    // leer un poco
+    await r.arrayBuffer().catch(()=>null);
+    res.json({ ok: true, ttfb_ms: ttfb, status: r.status });
+  } catch (e) {
+    res.json({ ok: false, error: String(e?.message || e), ttfb_ms: Date.now() - t0 });
   }
 });
 
