@@ -298,7 +298,7 @@ app.post("/api/ask", async (req, res) => {
       const msg =
         lang === "en" ? "I'm here for your inner life: faith, personal struggles and healing." :
         lang === "pt" ? "Estou aqui para a sua vida interior: fé, questões pessoais e cura." :
-        lang === "it" ? "Sono qui per la tua vida interiore: fede, difficoltà personali e guarigione." :
+        lang === "it" ? "Sono qui per la tua vita interiore: fede, difficoltà personali e guarigione." :
         lang === "de" ? "Ich bin für dein inneres Leben da: Glaube, persönliche Themen und Heilung." :
         lang === "ca" ? "Sóc aquí per a la teva vida interior: fe, dificultats personals i sanació." :
         lang === "fr" ? "Je suis là pour ta vie intérieure : foi, difficultés personnelles et guérison." :
@@ -308,7 +308,7 @@ app.post("/api/ask", async (req, res) => {
         lang === "pt" ? "O que mais ajudaria agora — suas emoções, uma relação, ou a sua vida de oração?" :
         lang === "it" ? "Cosa ti aiuterebbe ora — le emozioni, una relazione o la tua vida di preghiera?" :
         lang === "de" ? "Was würde dir jetzt am meisten helfen – deine Gefühle, eine Beziehung oder dein Gebetsleben?" :
-        lang === "ca" ? "Què t'ajudaria ara — les teves emocions, una relació o la tua vida de pregària?" :
+        lang === "ca" ? "Què t'ajudaria ara — les teves emocions, una relació o la teva vida de pregària?" :
         lang === "fr" ? "Qu'est-ce qui t'aiderait le plus — tes émotions, une relation ou ta vie de prière ?" :
         "¿Qué te ayudaría ahora — tus emociones, una relación o tu vida de oración?";
       const out = { message: msg, question: q, bible: { text: "", ref: "" } };
