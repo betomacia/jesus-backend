@@ -135,21 +135,19 @@ app.get("/", (_req, res) => res.json({ ok: true, service: "backend", ts: Date.no
 app.get("/healthz", (_req, res) => res.send("ok"));
 app.get("/readyz", (_req, res) => res.send("ready"));
 
-// --- Welcome (ligera validación) ---
+// Welcome (restaurado: sin OpenAI, misma lógica original)
 app.post("/api/welcome", async (req, res) => {
   try {
-    const lang = ALLOWED_LANGS.has(req.body?.lang) ? req.body.lang : "es";
-    const name = String(req.body?.name || "").trim().slice(0, 80);
-    const gender = ALLOWED_GENDERS.has(req.body?.gender) ? req.body.gender : "";
-    const hourRaw = req.body?.hour;
-    const hour = Number.isInteger(hourRaw) && hourRaw >= 0 && hourRaw <= 23 ? hourRaw : null;
-
+    const { lang = "es", name = "", gender = "", hour = null } = req.body || {};
     const h = Number.isInteger(hour) ? hour : new Date().getHours();
     const greeting = greetingByHour(lang, h);
     const phrase = dayPhrase(lang);
+    const nm = String(name || "").trim();
 
-    let sal = name ? `${greeting}, ${name}.` : `${greeting}.`;
-    if (gender === "male")   sal += " Hijo mío,";
+    let sal = nm ? `${greeting}, ${nm}.` : `${greeting}.`;
+
+    // “Hijo/Hija mía” según género (igual que antes)
+    if (gender === "male")      sal += " Hijo mío,";
     else if (gender === "female") sal += " Hija mía,";
 
     const message =
@@ -171,14 +169,15 @@ app.post("/api/welcome", async (req, res) => {
       "¿Qué te gustaría compartir hoy?";
 
     res.json({ message, question });
-  } catch (e) {
-    console.error("WELCOME ERROR:", e);
+  } catch {
+    // Fallback por si algo raro pasa
     res.json({
       message: "La paz sea contigo. ¿De qué te gustaría hablar hoy?",
       question: "¿Qué te gustaría compartir hoy?",
     });
   }
 });
+
 
 // --- Ask (con timeouts, reintentos y validación) ---
 app.post("/api/ask", async (req, res) => {
@@ -332,3 +331,4 @@ No incluyas nada fuera del JSON.
 // --- Arranque ---
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`✅ Backend listo en puerto ${PORT}`));
+
