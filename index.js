@@ -7,14 +7,16 @@ const app = express();
 
 /* ========= CORS (robusto) ========= */
 const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "*",               // FE usa credentials: "omit"
+  "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization, Accept",
   "Access-Control-Max-Age": "86400",
   "Vary": "Origin",
   "Content-Type": "application/json; charset=utf-8",
 };
-function setCors(res) { for (const [k, v] of Object.entries(CORS_HEADERS)) res.setHeader(k, v); }
+function setCors(res) { 
+  for (const [k, v] of Object.entries(CORS_HEADERS)) res.setHeader(k, v); 
+}
 
 // 1) SIEMPRE antes de todo
 app.use((req, res, next) => { setCors(res); next(); });
@@ -32,11 +34,17 @@ app.get("/__cors", (req, res) => {
 });
 
 /* ========= Health ========= */
-app.get("/", (_req, res) => { setCors(res); res.json({ ok: true, service: "backend", ts: Date.now() }); });
+app.get("/", (_req, res) => { 
+  setCors(res); 
+  res.json({ ok: true, service: "backend", ts: Date.now() }); 
+});
 
 /* ========= OpenAI ========= */
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const LANG_NAME = (l="es") => ({es:"español",en:"English",pt:"português",it:"italiano",de:"Deutsch",ca:"català",fr:"français"}[l]||"español");
+const LANG_NAME = (l="es") => ({
+  es:"español",en:"English",pt:"português",it:"italiano",
+  de:"Deutsch",ca:"català",fr:"français"
+}[l]||"español");
 
 /* ========= /api/welcome ========= */
 app.post("/api/welcome", async (req, res, next) => {
@@ -47,7 +55,7 @@ app.post("/api/welcome", async (req, res, next) => {
     const SYSTEM = `
 Responde SIEMPRE y SOLO en ${LANG_NAME(lang)} (${lang}).
 Genera bienvenida con:
-1) saludo según hora ({{hour}}) + nombre ({{name}}) si viene; usa {{gender}} si es natural.
+1) saludo según hora (${h}) + nombre (${name||""}) si viene; usa género (${gender||""}) si es natural.
 2) 1 frase motivadora espiritual breve (sin clichés).
 3) 1 pregunta breve y abierta.
 Salida SOLO JSON: {"message":"saludo + frase","question":"pregunta"}
@@ -60,7 +68,7 @@ Salida SOLO JSON: {"message":"saludo + frase","question":"pregunta"}
       temperature: 0.7,
       max_tokens: 220,
       messages: [
-        { role: "system", content: SYSTEM.replace(/{{hour}}/g, String(h)).replace(/{{name}}/g, String(name||"")).replace(/{{gender}}/g, String(gender||"")) },
+        { role: "system", content: SYSTEM },
         { role: "user", content: USER },
       ],
       response_format: {
@@ -69,21 +77,41 @@ Salida SOLO JSON: {"message":"saludo + frase","question":"pregunta"}
           name: "Welcome",
           schema: {
             type: "object",
-            properties: { message: { type: "string" }, question: { type: "string" } },
-            required: ["message", "question"], additionalProperties: false,
+            properties: { 
+              message: { type: "string" }, 
+              question: { type: "string" } 
+            },
+            required: ["message", "question"], 
+            additionalProperties: false,
           },
         },
       },
     });
 
-    let data = {}; try { data = JSON.parse(r?.choices?.[0]?.message?.content || "{}"); } catch {}
+    let data = {}; 
+    try { data = JSON.parse(r?.choices?.[0]?.message?.content || "{}"); } catch {}
+    
     const message = String(data?.message||"").trim();
     const question = String(data?.question||"").trim();
-    if (!message || !question) return res.status(502).json({ error: "bad_openai_output" });
+    
+    if (!message || !question) {
+      setCors(res);
+      return res.status(200).json({ 
+        message: "¡Hola! La paz sea contigo.", 
+        question: "¿Qué te gustaría compartir hoy?" 
+      });
+    }
 
     setCors(res);
     res.json({ message, question });
-  } catch (e) { next(e); }
+  } catch (e) { 
+    console.error("WELCOME ERROR:", e);
+    setCors(res);
+    res.status(200).json({ 
+      message: "¡Hola! La paz sea contigo.", 
+      question: "¿Qué te gustaría compartir hoy?" 
+    });
+  }
 });
 
 /* ========= /api/ask ========= */
@@ -94,13 +122,16 @@ app.post("/api/ask", async (req, res, next) => {
 
     const convo = [];
     const recent = Array.isArray(history) ? history.slice(-8) : [];
-    for (const h of recent) if (typeof h === "string") convo.push({ role: "user", content: h });
+    for (const h of recent) {
+      if (typeof h === "string") convo.push({ role: "user", content: h });
+    }
     convo.push({ role: "user", content: userTxt });
 
     const SYS = `
-Voz cristiana/católica; SOLO ${LANG_NAME(lang)} (${lang}). Enfoque en fe, sanación personal, relaciones, emociones.
-Redirige con suavidad si se van a temas ajenos (sin datos externos). Varía lenguaje; 1 sola pregunta breve al final.
-Incluye SIEMPRE una cita bíblica pertinente distinta de Mateo/Matthew 11:28 (evítala en cualquier idioma). Si el usuario rechaza Biblia, respeta y devuelve bible con strings vacíos.
+Voz cristiana/católica; SOLO ${LANG_NAME(lang)} (${lang}). 
+Enfoque en fe, sanación personal, relaciones, emociones.
+Redirige con suavidad si se van a temas ajenos. Varía lenguaje; 1 sola pregunta breve al final.
+Incluye SIEMPRE una cita bíblica pertinente distinta de Mateo/Matthew 11:28.
 Salida SOLO JSON: {"message":"...", "question":"...?", "bible":{"text":"...","ref":"Libro 0:0"}}
 `.trim();
 
@@ -118,34 +149,66 @@ Salida SOLO JSON: {"message":"...", "question":"...?", "bible":{"text":"...","re
             properties: {
               message: { type: "string" },
               question: { type: "string" },
-              bible: { type: "object", properties: { text: { type: "string" }, ref: { type: "string" } }, required: ["text","ref"] },
+              bible: { 
+                type: "object", 
+                properties: { 
+                  text: { type: "string" }, 
+                  ref: { type: "string" } 
+                }, 
+                required: ["text","ref"] 
+              },
             },
-            required: ["message", "question", "bible"], additionalProperties: false,
+            required: ["message", "question", "bible"], 
+            additionalProperties: false,
           },
         },
       },
     });
 
-    let data = {}; try { data = JSON.parse(r?.choices?.[0]?.message?.content || "{}"); } catch {}
+    let data = {}; 
+    try { data = JSON.parse(r?.choices?.[0]?.message?.content || "{}"); } catch {}
+    
     const msg = String(data?.message||"").trim();
-    const q   = String(data?.question||"").trim();
+    const q = String(data?.question||"").trim();
     const btx = String(data?.bible?.text||"").trim();
-    const bref= String(data?.bible?.ref||"").trim();
-    if (!msg || !q || !btx || !bref) return res.status(502).json({ error: "bad_openai_output" });
+    const bref = String(data?.bible?.ref||"").trim();
+    
+    if (!msg || !q) {
+      setCors(res);
+      return res.status(200).json({ 
+        message: "Estoy contigo. ¿Qué necesitas?",
+        question: "¿Qué te preocupa ahora?",
+        bible: { text: "", ref: "" }
+      });
+    }
 
     setCors(res);
     res.json({ message: msg, question: q, bible: { text: btx, ref: bref } });
-  } catch (e) { next(e); }
+  } catch (e) { 
+    console.error("ASK ERROR:", e);
+    setCors(res);
+    res.status(200).json({ 
+      message: "La paz sea contigo.",
+      question: "¿Qué te gustaría compartir?",
+      bible: { 
+        text: "Cercano está Jehová a los quebrantados de corazón.", 
+        ref: "Salmos 34:18" 
+      }
+    });
+  }
 });
 
 /* ========= 404 con CORS ========= */
-app.use((req, res) => { setCors(res); res.status(404).json({ error: "not_found" }); });
+app.use((req, res) => { 
+  setCors(res); 
+  res.status(404).json({ error: "not_found" }); 
+});
 
 /* ========= Error handler con CORS ========= */
 app.use((err, req, res, _next) => {
   console.error("SERVER ERROR:", err);
   setCors(res);
-  res.status(502).json({ error: "server_error", detail: String(err?.message || "unknown") });
+  res.status(500).json({ error: "server_error", detail: String(err?.message || "unknown") });
 });
 
 /* ========= Start ========= */
