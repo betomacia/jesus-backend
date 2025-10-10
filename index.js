@@ -1,9 +1,5 @@
 // index.js — Backend monolítico, dominios acotados y respuestas naturales (multi-idioma)
-// - /api/welcome: Saludo por hora + nombre + (opcional hijo/hija 25%) + 1 frase IA + 1 pregunta IA (variada, íntima)
-// - /api/ask: TODA la Biblia viene de OpenAI. Si es inválida/repetida/prohibida, se pide una alternativa a OpenAI.
-// - VOZ (XTTS FastAPI): /api/tts, /api/tts_save, /api/tts_save_segmented, /api/files/:name, /api/voice/diag, /api/voice/segment
-// - PROXY SSE optimizado: /api/tts_stream_segmented
-// - Warmup/diagnóstico: /api/voice/prime, /api/_diag/tts_probe
+// Mantiene OpenAI EXACTO (no se toca la lógica). Mejora proxy TTS (baja latencia).
 
 require("dotenv").config();
 
@@ -13,7 +9,7 @@ const bodyParser = require("body-parser");
 const OpenAI = require("openai");
 const path = require("path");
 const fs = require("fs/promises");
-const { Readable } = require("stream"); // CommonJS
+const { Readable } = require("stream");
 const http = require("http");
 const https = require("https");
 
@@ -23,8 +19,8 @@ if (typeof fetch === "undefined") {
 }
 
 // ====== Keep-Alive Agents para reducir latencias con el servidor de voz ======
-const HTTP_AGENT  = new http.Agent({ keepAlive: true, keepAliveMsecs: 10000, maxSockets: 100 });
-const HTTPS_AGENT = new https.Agent({ keepAlive: true, keepAliveMsecs: 10000, maxSockets: 100 });
+const HTTP_AGENT  = new http.Agent({ keepAlive: true, keepAliveMsecs: 10000, maxSockets: 256 });
+const HTTPS_AGENT = new https.Agent({ keepAlive: true, keepAliveMsecs: 10000, maxSockets: 256 });
 function agentFor(url) {
   return String(url).startsWith("https:")
     ? { agent: HTTPS_AGENT }
@@ -36,7 +32,7 @@ const app = express();
 app.disable("x-powered-by");
 
 // Parsers
-app.use(bodyParser.json());
+app.use(bodyParser.json({ limit: "1mb" }));
 
 // CORS robusto + preflight (una sola vez)
 app.use(cors({
@@ -54,7 +50,7 @@ app.use((req, res, next) => {
 });
 
 // ====== Config VOZ (FastAPI XTTS) ======
-const VOZ_URL = (process.env.VOZ_URL || "http://136.114.108.182:8000").replace(/\/+$/, "");
+const VOZ_URL = (process.env.VOZ_URL || "http://136.114.108.182:8006").replace(/\/+$/, "");
 
 // ====== OpenAI ======
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -84,7 +80,6 @@ function langLabel(l = "es") {
   return m[l] || "Español";
 }
 
-// Hora local
 function resolveLocalHour({ hour = null, tzOffsetMinutes = null } = {}) {
   if (Number.isInteger(hour) && hour >= 0 && hour <= 23) return hour;
   if (Number.isInteger(tzOffsetMinutes)) {
@@ -146,7 +141,7 @@ async function readMem(userId) {
     const m = JSON.parse(raw);
     return {
       name: m.name || "",
-      sex: m.sex || "", // "male" | "female" | "" (unknown)
+      sex: m.sex || "",
       last_user_text: m.last_user_text || "",
       last_user_ts: m.last_user_ts || 0,
       last_bot: m.last_bot || null,
@@ -159,44 +154,6 @@ async function readMem(userId) {
 async function writeMem(userId, mem) {
   await ensureDataDir();
   await fs.writeFile(memPath(userId), JSON.stringify(mem, null, 2), "utf8");
-}
-
-// Filtros de alcance
-const OFFTOPIC = [
-  // entretenimiento/deporte/celebridades
-  /\b(f[úu]tbol|futbol|deporte|champions|nba|tenis|selecci[oó]n|mundial|goles?)\b/i,
-  /\b(pel[ií]cula|serie|netflix|hbo|max|disney|spotify|cantante|concierto|celebridad|famos[oa]s?)\b/i,
-  // técnica/ciencia/educación
-  /\b(program(a|ar|aci[oó]n)|c[oó]digo|javascript|react|inform[aá]tica|computaci[oó]n|pc|ordenador|linux|windows|macos|driver|api|prompt)\b/i,
-  /\b(ingenier[ií]a|software|hardware|servidor|cloud|nube|red(es)?|wifi|routing|docker|kubernetes)\b/i,
-  /\b(matem[aá]ticas?|algebra|c[aá]lculo|geometr[ií]a|trigonometr[ií]a)\b/i,
-  /\b(f[ií]sica|qu[ií]mica|biolog[ií]a|geolog[ií]a|astronom[ií]a|laboratorio)\b/i,
-  // mecánica/electrónica/juegos
-  /\b(mec[aá]nica|alternador|bater[ií]a del auto|motor|embrague|inyector|buj[ií]a|correa|nafta|diesel)\b/i,
-  /\b(circuito|voltaje|ohmios|arduino|raspberry|microcontrolador|placa)\b/i,
-  /\b(videojuego|fortnite|minecraft|playstation|xbox|nintendo|steam)\b/i,
-  // geografía/turismo no religioso
-  /\b(pa[ií]s|capital|mapa|d[oó]nde queda|ubicaci[oó]n|distancia|kil[oó]metros|frontera|r[íi]o|monta[ñn]a|cordillera)\b/i,
-  /\b(viaje|hotel|playa|turismo|destino|vuelo|itinerario|tour|gu[ií]a tur[ií]stica)\b/i,
-  // gastronomía / comidas / bebidas
-  /\b(gastronom[ií]a|gastronomia|cocina|recet(a|ario)s?|platos?|ingredientes?|men[uú]|men[uú]s|postres?|dulces?|salado?s?)\b/i,
-  /\b(comida|comidas|almuerzo|cena|desayuno|merienda|vianda|raci[oó]n|calor[ií]as|nutrici[oó]n|dieta)\b/i,
-  /\b(bebidas?|vino|cerveza|licor|coctel|c[oó]ctel|trago|fermentado|maridaje|bar|caf[eé]|cafeter[ií]a|restaurante|restaurantes?)\b/i,
-  // política/negocios/finanzas
-  /\b(pol[ií]tica|elecci[oó]n|partido|diputado|senador|presidente|gobierno)\b/i,
-  /\b(criptomonedas?|bitcoin|acciones|bolsa|nasdaq|d[oó]lar|euro)\b/i,
-];
-const RELIGIOUS_ALLOW = [
-  /\b(iglesia|templo|catedral|parroquia|misa|sacramento|oraci[oó]n|santuario|santo|santos|biblia|evangelio|rosario|confesi[oó]n|eucarist[ií]a|liturgia|vaticano|lourdes|f[aá]tima|peregrinaci[oó]n|camino de santiago)\b/i,
-];
-function isReligiousException(s) { return RELIGIOUS_ALLOW.some((r) => r.test(NORM(s))); }
-function isOffTopic(s) { return OFFTOPIC.some((r) => r.test(NORM(s))); }
-function isGibberish(s) {
-  const x = (s || "").trim();
-  if (!x) return true;
-  if (x.length < 2) return true;
-  const letters = (x.match(/[a-záéíóúüñàèìòùçâêîôûäëïöüß]/gi) || []).length;
-  return letters < Math.ceil(x.length * 0.25);
 }
 
 // ---------- Health ----------
@@ -224,7 +181,7 @@ app.get("/db/test", async (_req, res) => {
   }
 });
 
-// ---------- /api/welcome ----------
+// ---------- /api/welcome (OpenAI) ----------
 app.post("/api/welcome", async (req, res) => {
   try {
     const {
@@ -259,7 +216,7 @@ Devuélveme SOLO un JSON en ${langLabel(lang)} con este esquema:
  "question":"<UNA pregunta íntima/acompañamiento (no cuestionario), distinta a '¿Qué te gustaría compartir hoy?'>"}
 Condiciones:
 - Evita fórmulas gastadas: nada de “cada pequeño paso cuenta” ni “camino hacia tus metas”.
-- La pregunta invita a hablar (“¿Querés que te escuche?”, “¿Cómo te gustaría empezar?”, “¿Preferís contarme algo sencillo?”… pero NO repitas literal estos ejemplos).
+- La pregunta invita a hablar (variada). 
 - No incluyas nada fuera del JSON.
 `.trim();
 
@@ -301,7 +258,38 @@ Condiciones:
   }
 });
 
-// ---------- /api/ask ----------
+// ---------- /api/ask (OpenAI) ----------
+const RELIGIOUS_ALLOW = [
+  /\b(iglesia|templo|catedral|parroquia|misa|sacramento|oraci[oó]n|santuario|santo|santos|biblia|evangelio|rosario|confesi[oó]n|eucarist[ií]a|liturgia|vaticano|lourdes|f[aá]tima|peregrinaci[oó]n|camino de santiago)\b/i,
+];
+const OFFTOPIC = [
+  /\b(f[úu]tbol|futbol|deporte|champions|nba|tenis|selecci[oó]n|mundial|goles?)\b/i,
+  /\b(pel[ií]cula|serie|netflix|hbo|max|disney|spotify|cantante|concierto|celebridad|famos[oa]s?)\b/i,
+  /\b(program(a|ar|aci[oó]n)|c[oó]digo|javascript|react|inform[aá]tica|computaci[oó]n|pc|ordenador|linux|windows|macos|driver|api|prompt)\b/i,
+  /\b(ingenier[ií]a|software|hardware|servidor|cloud|nube|red(es)?|wifi|routing|docker|kubernetes)\b/i,
+  /\b(matem[aá]ticas?|algebra|c[aá]lculo|geometr[ií]a|trigonometr[ií]a)\b/i,
+  /\b(f[ií]sica|qu[ií]mica|biolog[ií]a|geolog[ií]a|astronom[ií]a|laboratorio)\b/i,
+  /\b(mec[aá]nica|alternador|bater[ií]a del auto|motor|embrague|inyector|buj[ií]a|correa|nafta|diesel)\b/i,
+  /\b(circuito|voltaje|ohmios|arduino|raspberry|microcontrolador|placa)\b/i,
+  /\b(videojuego|fortnite|minecraft|playstation|xbox|nintendo|steam)\b/i,
+  /\b(pa[ií]s|capital|mapa|d[oó]nde queda|ubicaci[oó]n|distancia|kil[oó]metros|frontera|r[íi]o|monta[ñn]a|cordillera)\b/i,
+  /\b(viaje|hotel|playa|turismo|destino|vuelo|itinerario|tour|gu[ií]a tur[ií]stica)\b/i,
+  /\b(gastronom[ií]a|cocina|recet(a|ario)s?|platos?|ingredientes?|men[uú]|postres?)\b/i,
+  /\b(comida|almuerzo|cena|desayuno|merienda|calor[ií]as|nutrici[oó]n|dieta)\b/i,
+  /\b(bebidas?|vino|cerveza|licor|c[oó]ctel|trago|caf[eé]|restaurante)\b/i,
+  /\b(pol[ií]tica|elecci[oó]n|partido|diputado|senador|presidente|gobierno)\b/i,
+  /\b(criptomonedas?|bitcoin|acciones|bolsa|nasdaq|d[oó]lar|euro)\b/i,
+];
+function isReligiousException(s) { return RELIGIOUS_ALLOW.some((r) => r.test(NORM(s))); }
+function isOffTopic(s) { return OFFTOPIC.some((r) => r.test(NORM(s))); }
+function isGibberish(s) {
+  const x = (s || "").trim();
+  if (!x) return true;
+  if (x.length < 2) return true;
+  const letters = (x.match(/[a-záéíóúüñàèìòùçâêîôûäëïöüß]/gi) || []).length;
+  return letters < Math.ceil(x.length * 0.25);
+}
+
 app.post("/api/ask", async (req, res) => {
   try {
     const { message = "", history = [], userId = "anon", lang = "es" } = req.body || {};
@@ -341,7 +329,7 @@ app.post("/api/ask", async (req, res) => {
       const q =
         lang === "en" ? "What would help you most right now—your emotions, a relationship, or your prayer life?" :
         lang === "pt" ? "O que mais ajudaria agora — suas emoções, uma relação, ou a sua vida de oração?" :
-        lang === "it" ? "Cosa ti aiuterebbe ora — le emozioni, una relazione o la tua vita di preghiera?" :
+        lang === "it" ? "Cosa ti aiuterebbe ora — le emozioni, una relazione o la tua vida di preghiera?" :
         lang === "de" ? "Was würde dir jetzt am meisten helfen – deine Gefühle, eine Beziehung oder dein Gebetsleben?" :
         lang === "ca" ? "Què t’ajudaria ara — les teves emocions, una relació o la teva vida de pregària?" :
         lang === "fr" ? "Qu’est-ce qui t’aiderait le plus — tes émotions, une relation ou ta vie de prière ?" :
@@ -357,8 +345,8 @@ Eres cercano, claro y compasivo, desde una voz cristiana (católica).
 Alcance: espiritualidad/fe católica, psicología/autoayuda personal, relaciones y emociones. Evita lo demás.
 Varía el lenguaje; no repitas muletillas. No hagas cuestionarios; 1 sola pregunta breve y pertinente.
 Formato (JSON en ${langLabel(lang)}): {"message":"...", "question":"...?", "bible":{"text":"...","ref":"Libro 0:0"}}
-- "message": natural y concreto; si el usuario pide pasos, dáselos con claridad breve.
-- "question": **una** pregunta simple y útil (sin interrogar de más).
+- "message": natural y concreto.
+- "question": **una** pregunta simple.
 - "bible": SIEMPRE incluida; pertinente; NO Mateo/Matthew 11:28 (ninguna variante).
 NO incluyas el versículo dentro de "message"; va SOLO en "bible".
 No incluyas nada fuera del JSON.
@@ -416,8 +404,8 @@ No incluyas nada fuera del JSON.
     if (invalid) {
       const altSys = `
 Devuélveme SOLO un JSON {"bible":{"text":"...","ref":"Libro 0:0"}} en ${langLabel(lang)}.
-Cita bíblica pertinente al siguiente mensaje del usuario, evita Mateo/Matthew 11:28 y evita estas referencias ya usadas: ${Array.from(used).join(", ") || "ninguna"}.
-No incluyas nada fuera del JSON. Texto exacto de la Biblia y su referencia legible.
+Cita bíblica pertinente al mensaje del usuario, evita Mateo/Matthew 11:28 y evita estas referencias ya usadas: ${Array.from(used).join(", ") || "ninguna"}.
+No incluyas nada fuera del JSON. Texto exacto y referencia legible.
 `.trim();
 
       try {
@@ -486,14 +474,13 @@ No incluyas nada fuera del JSON. Texto exacto de la Biblia y su referencia legib
 // ===============  RUTAS DE VOZ (XTTS)  ==============
 // ====================================================
 
-// base URL del request (para reescribir URLs del upstream)
 function _base(req) {
   const proto = req.headers["x-forwarded-proto"] || req.protocol || "https";
   const host  = req.headers["x-forwarded-host"]  || req.get("host");
   return `${proto}://${host}`;
 }
 
-// ---- Health proxy + upstream FastAPI
+// Health del proxy + upstream FastAPI
 app.get("/api/health", async (req, res) => {
   try {
     let upstream = null;
@@ -501,24 +488,24 @@ app.get("/api/health", async (req, res) => {
       const r = await fetch(`${VOZ_URL}/health`, { method: "GET", ...agentFor(VOZ_URL) });
       upstream = await r.json().catch(() => null);
     } catch (_) {}
-    res.json({ ok: true, proxy: "railway", voz_url: VOZ_URL, upstream });
-  } catch (e) {
-    res.status(500).json({ ok:false, error: String(e.message || e) });
-  }
-});
-
-// Nueva: health “directa” del XTTS
-app.get("/api/voice/diag", async (_req, res) => {
-  try {
-    const r = await fetch(`${VOZ_URL}/health`, { method: "GET", ...agentFor(VOZ_URL) });
-    const j = await r.json().catch(() => null);
-    res.json({ ok: true, upstream: j });
+    res.json({ ok: true, proxy: "node", voz_url: VOZ_URL, upstream });
   } catch (e) {
     res.status(500).json({ ok:false, error: String(e?.message || e) });
   }
 });
 
-// ===== WAV directo (bufferizado) =====
+// === Precargar TTS (llamar APENAS el usuario habilita audio en el front) ===
+app.post("/api/voice/warmup", async (_req, res) => {
+  try {
+    const url = `${VOZ_URL}/tts?text=${encodeURIComponent("ok")}&lang=es&trim_db=0&gap_ms=0&fade_ms=0`;
+    await fetch(url, { method: "GET", ...agentFor(VOZ_URL) });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+// Passthrough WAV directo (bufferizado controlado; simple)
 app.get("/api/tts", async (req, res) => {
   try {
     const q = new URLSearchParams();
@@ -528,79 +515,27 @@ app.get("/api/tts", async (req, res) => {
     if (req.query.temp) q.set("temp", String(req.query.temp));
     if (req.query.fx)   q.set("fx",   String(req.query.fx));
     if (req.query.t)    q.set("t",    String(req.query.t));
+    if (req.query.seg_max) q.set("seg_max", String(req.query.seg_max));
+    if (req.query.trim_db) q.set("trim_db", String(req.query.trim_db));
+    if (req.query.gap_ms)  q.set("gap_ms",  String(req.query.gap_ms));
+    if (req.query.fade_ms) q.set("fade_ms", String(req.query.fade_ms));
+    if (req.query.mode)    q.set("mode",    String(req.query.mode));
 
     const url = `${VOZ_URL}/tts?${q.toString()}`;
     const up  = await fetch(url, { headers: { Accept: "audio/wav" }, ...agentFor(VOZ_URL) });
-
     const ct = up.headers.get("content-type") || "audio/wav";
-    const ab = await up.arrayBuffer(); // bufferizamos
+    const ab = await up.arrayBuffer();
     const buf = Buffer.from(ab);
 
     res.status(up.status).set("Content-Type", ct);
     res.set("Access-Control-Allow-Origin", "*");
     res.send(buf);
   } catch (e) {
-    res.status(500).send("proxy_tts_error: " + String(e.message || e));
+    res.status(500).send("proxy_tts_error: " + String(e?.message || e));
   }
 });
 
-// ===== Guardar y reescribir a /api/files/:name =====
-app.get("/api/tts_save", async (req, res) => {
-  try {
-    const q = new URLSearchParams();
-    q.set("text", String(req.query.text || "Hola"));
-    q.set("lang", String(req.query.lang || "es"));
-    if (req.query.rate) q.set("rate", String(req.query.rate));
-    if (req.query.temp) q.set("temp", String(req.query.temp));
-    if (req.query.fx)   q.set("fx",   String(req.query.fx));
-    if (req.query.t)    q.set("t",    String(req.query.t));
-
-    const r = await fetch(`${VOZ_URL}/tts_save?${q.toString()}`, { headers: { Accept: "application/json" }, ...agentFor(VOZ_URL) });
-    const j = await r.json();
-    if (!j || !j.ok || !(j.url || j.file || j.path)) {
-      return res.status(502).json({ ok:false, error:"upstream_invalid" });
-    }
-    const upstreamUrl = j.url || j.file || j.path;
-    const name = upstreamUrl.split("/").pop();
-    if (!name) return res.status(502).json({ ok:false, error:"filename_missing" });
-
-    const mine = `${_base(req)}/api/files/${name}`;
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.json({ ok: true, url: mine, file: mine, path: mine });
-  } catch (e) {
-    res.status(500).json({ ok:false, error: String(e.message || e) });
-  }
-});
-
-// ===== Segmentado (pull) =====
-app.get("/api/tts_save_segmented", async (req, res) => {
-  try {
-    const q = new URLSearchParams();
-    q.set("text", String(req.query.text || "Hola"));
-    q.set("lang", String(req.query.lang || "es"));
-    if (req.query.rate)    q.set("rate",    String(req.query.rate));
-    if (req.query.seg_max) q.set("seg_max", String(req.query.seg_max));
-
-    const r = await fetch(`${VOZ_URL}/tts_save_segmented?${q.toString()}`, { headers: { Accept: "application/json" }, ...agentFor(VOZ_URL) });
-    const j = await r.json();
-    if (!j || !j.ok || !Array.isArray(j.parts)) {
-      return res.status(502).json({ ok:false, error:"upstream_invalid" });
-    }
-
-    const base = _base(req);
-    const parts = j.parts.map((u) => {
-      const name = String(u || "").split("/").pop();
-      return name ? `${base}/api/files/${name}` : u;
-    });
-
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.json({ ok: true, chunks: parts.length, ttfb_ms: j.ttfb_ms || 0, parts });
-  } catch (e) {
-    res.status(500).json({ ok:false, error: String(e.message || e) });
-  }
-});
-
-// ===== Descarga de WAV (streaming passthrough) =====
+// Descarga del WAV: /api/files/:name —> STREAMING (sin buffer)
 app.get("/api/files/:name", async (req, res) => {
   try {
     const name = String(req.params.name || "");
@@ -634,33 +569,25 @@ app.get("/api/files/:name", async (req, res) => {
   }
 });
 
-// ---- Stubs mínimos para el viewer (mientras tanto) ----
-app.post("/api/viewer/offer", (_req, res) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  return res.json({ ok: true });
-});
-app.post("/api/viewer/candidate", (_req, res) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  return res.json({ ok: true });
-});
-app.post("/api/viewer/ice", (_req, res) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  return res.json({ ok: true });
-});
-
-// ===== Segmentado XTTS via backend (reescritura a HTTPS) =====
+// Pull segmentado (descarga lista de parts)
 app.get("/api/voice/segment", async (req, res) => {
   try {
     const text   = (req.query.text || "").toString();
     const lang   = (req.query.lang || "es").toString();
     const rate   = (req.query.rate || "1.0").toString();
     const segMax = (req.query.seg_max || "60").toString();
+    const trimDb = (req.query.trim_db || "0").toString();
+    const gapMs  = (req.query.gap_ms || "0").toString();
+    const fadeMs = (req.query.fade_ms || "0").toString();
 
     const url = `${VOZ_URL}/tts_save_segmented?` +
-      `text=${encodeURIComponent(text)}&lang=${encodeURIComponent(lang)}&rate=${encodeURIComponent(rate)}&seg_max=${encodeURIComponent(segMax)}`;
+      `text=${encodeURIComponent(text)}&lang=${encodeURIComponent(lang)}` +
+      `&rate=${encodeURIComponent(rate)}&seg_max=${encodeURIComponent(segMax)}` +
+      `&trim_db=${encodeURIComponent(trimDb)}&gap_ms=${encodeURIComponent(gapMs)}` +
+      `&fade_ms=${encodeURIComponent(fadeMs)}`;
 
     const r = await fetch(url, { method: "GET", headers: { Accept: "application/json" }, ...agentFor(VOZ_URL) });
-    const j = await r.json().catch(() => ({}));
+    const j = await r.json();
     if (!r.ok || !j?.ok || !Array.isArray(j?.parts)) {
       return res.status(r.ok ? 502 : r.status).json({ ok: false, error: "segment_failed", detail: j || {} });
     }
@@ -674,19 +601,17 @@ app.get("/api/voice/segment", async (req, res) => {
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.json({ ok: true, chunks: parts.length, ttfb_ms: j.ttfb_ms || 0, parts });
   } catch (e) {
-    console.error("segment_passthrough_error:", e);
+    console.error("segment_error:", e);
     res.status(500).json({ ok: false, error: "segment_error", detail: String(e) });
   }
 });
 
-// === PROXY SSE: /api/tts_stream_segmented  ===============================
-// Reenvía el SSE del servidor de voz y reescribe cada "url" a /api/files/:name
+// === PROXY SSE: /api/tts_stream_segmented  (baja latencia, sin buffering) ===
 app.get("/api/tts_stream_segmented", async (req, res) => {
-  // Minimizar latencia TCP
   req.socket?.setNoDelay?.(true);
   res.socket?.setNoDelay?.(true);
 
-  // Cabeceras para streaming y evitar buffering en proxies/CDN
+  // Cabeceras SSE sin buffering (importante para TTFB bajo)
   res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Cache-Control", "no-cache, no-transform");
@@ -696,23 +621,18 @@ app.get("/api/tts_stream_segmented", async (req, res) => {
   res.setHeader("Transfer-Encoding", "chunked");
   res.flushHeaders?.();
 
-  // PRELUDIO anti-buffering: padding + retry + ready inmediato
-  res.write("retry: 1000\n");
+  // Padding anti-buffer + ping inmediato
   res.write(":" + " ".repeat(2048) + "\n");
-  res.write(`event: ready\ndata: {"ts":${Date.now()}}\n\n`);
   res.write(`event: ping\ndata: {"ts":${Date.now()}}\n\n`);
   res.flush?.();
 
-  // Heartbeat periódico (mantiene vivo el stream)
   const hb = setInterval(() => {
     try { res.write(`event: ping\ndata: {"ts":${Date.now()}}\n\n`); res.flush?.(); } catch {}
-  }, 1000);
+  }, 2000);
 
-  // Armar URL upstream con mismos query params
   const url = new URL("/tts_stream_segmented", VOZ_URL);
   for (const [k, v] of Object.entries(req.query)) url.searchParams.set(k, String(v));
 
-  // Abortar si el cliente cierra
   const controller = new AbortController();
   req.on("close", () => controller.abort());
 
@@ -733,8 +653,8 @@ app.get("/api/tts_stream_segmented", async (req, res) => {
     const decoder = new TextDecoder();
     let carry = "";
     const base = _base(req);
-    const reader = upstream.body.getReader();
 
+    const reader = upstream.body.getReader();
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -760,7 +680,6 @@ app.get("/api/tts_stream_segmented", async (req, res) => {
             res.write(line + "\n");
           }
         } else {
-          // Pasar comentarios y event: tal cual
           res.write(line + "\n");
         }
       }
@@ -771,7 +690,7 @@ app.get("/api/tts_stream_segmented", async (req, res) => {
     res.end();
   } catch (e) {
     try {
-      res.write(`data: ${JSON.stringify({ event: "error", detail: String(e.message || e) })}\n\n`);
+      res.write(`data: ${JSON.stringify({ event: "error", detail: String(e?.message || e) })}\n\n`);
     } finally {
       res.end();
     }
@@ -780,7 +699,7 @@ app.get("/api/tts_stream_segmented", async (req, res) => {
   }
 });
 
-// ====== /api/memory/sync  (noop persistente para el front) ======
+// ====== /api/memory/sync (noop persistente para el front) ======
 app.post("/api/memory/sync", async (req, res) => {
   try {
     const body = req.body || {};
@@ -801,45 +720,6 @@ app.post("/api/memory/sync", async (req, res) => {
   } catch (e) {
     console.error("MEMORY_SYNC_ERROR:", e);
     res.status(500).json({ ok: false, error: String(e?.message || e) });
-  }
-});
-
-// ===== Warm-up / prime para bajar TTFB en el primer audio =====
-async function _warmOnce(lang = "es") {
-  const u = `${VOZ_URL}/tts?text=${encodeURIComponent("ok")}&lang=${encodeURIComponent(lang)}`;
-  try {
-    const r = await fetch(u, { method: "GET", headers: { Accept: "audio/wav" }, ...agentFor(VOZ_URL) });
-    // No hace falta leer todo; con leer un poco alcanza para “despertar”
-    await r.arrayBuffer().catch(()=>null);
-  } catch {}
-}
-
-app.get("/api/voice/prime", async (_req, res) => {
-  try {
-    // dos pequeños warmups en paralelo
-    await Promise.race([
-      Promise.all([_warmOnce("es"), _warmOnce("en")]),
-      new Promise((r) => setTimeout(r, 1800)),
-    ]);
-    res.json({ ok: true, primed: true, ts: Date.now() });
-  } catch {
-    res.json({ ok: false, primed: false, ts: Date.now() });
-  }
-});
-
-// Diag TTFB simple para el front (lo puedes llamar al habilitar audio)
-app.get("/api/_diag/tts_probe", async (req, res) => {
-  const lang = String(req.query.lang || "es");
-  const t0 = Date.now();
-  try {
-    const u = `${VOZ_URL}/tts?text=${encodeURIComponent("ok")}&lang=${encodeURIComponent(lang)}&t=${Date.now()}`;
-    const r = await fetch(u, { method: "GET", headers: { Accept: "audio/wav" }, ...agentFor(VOZ_URL) });
-    const ttfb = Date.now() - t0;
-    // leer un poco
-    await r.arrayBuffer().catch(()=>null);
-    res.json({ ok: true, ttfb_ms: ttfb, status: r.status });
-  } catch (e) {
-    res.json({ ok: false, error: String(e?.message || e), ttfb_ms: Date.now() - t0 });
   }
 });
 
