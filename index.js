@@ -1,4 +1,4 @@
-// index.js — CORS blindado + OpenAI (welcome/ask)
+// index.js — Backend mínimo: CORS blindado + OpenAI en /api/welcome y /api/ask
 
 const express = require("express");
 const OpenAI = require("openai");
@@ -6,9 +6,9 @@ require("dotenv").config();
 
 const app = express();
 
-/* ========== CORS (DEBE IR *ANTES* DE TODO) ========== */
+/* ===== CORS (PRIMERO) ===== */
 const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "*",                // FE usa credentials:'omit'
+  "Access-Control-Allow-Origin": "*",                 // FE usa credentials: 'omit'
   "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization, Accept",
   "Access-Control-Max-Age": "600",
@@ -18,24 +18,24 @@ function setCors(res) {
 }
 app.use((req, res, next) => {
   setCors(res);
-  if (req.method === "OPTIONS") return res.status(204).end(); // ← preflight OK
+  if (req.method === "OPTIONS") return res.status(204).end(); // preflight OK
   next();
 });
-/* ===================================================== */
 
+/* ===== JSON parser ===== */
 app.use(express.json());
 
-// Health
-app.get("/", (req, res) => {
+/* ===== Health ===== */
+app.get("/", (_req, res) => {
   setCors(res);
   res.json({ ok: true, ts: Date.now() });
 });
 
-// OpenAI
+/* ===== OpenAI ===== */
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 /* ===== /api/welcome =====
-   Saludo por hora + 1 frase motivacional + 1 pregunta (todo desde OpenAI) */
+   Saludo por hora + 1 frase motivadora (aleatoria, no cliché) + 1 pregunta  */
 app.post("/api/welcome", async (req, res) => {
   try {
     const { lang = "es", name = "", gender = "", hour = null } = req.body || {};
@@ -44,7 +44,7 @@ app.post("/api/welcome", async (req, res) => {
     const SYSTEM = `
 Eres un asistente espiritual cálido y cercano. Genera una BIENVENIDA en {{lang}} con:
 1) Saludo por hora ({{hour}}) y usa el nombre ({{name}}) si viene; matiza con {{gender}} ("male"/"female") solo si suena natural.
-2) UNA sola frase motivadora/espiritual breve y original para arrancar el día (gratitud, esperanza, acción desde el presente, mindfulness, fortaleza interior/psicología positiva). Varía el lenguaje; evita clichés.
+2) UNA sola frase motivadora/espiritual breve y original para arrancar el día (gratitud, esperanza, acción desde el presente, mindfulness, fortaleza interior/psicología positiva). Varía el lenguaje; evita clichés y repeticiones.
 3) UNA pregunta breve y abierta para iniciar conversación.
 Salida SOLO JSON:
 {"message":"saludo + frase ({{lang}})","question":"pregunta ({{lang}})"}
@@ -97,10 +97,11 @@ Genera bienvenida en ${lang} con:
 });
 
 /* ===== /api/ask =====
-   Respuesta + (opcional) biblia + 1 pregunta */
+   Respuesta + (opcional) cita bíblica + 1 pregunta */
 app.post("/api/ask", async (req, res) => {
   try {
     const { message = "", history = [], lang = "es" } = req.body || {};
+
     const SYS = `
 Eres cercano, claro y compasivo (voz cristiana). Alcance: fe/espiritualidad, autoayuda, emociones/relaciones.
 UNA sola pregunta breve. Salida JSON: {"message":"...", "question":"...?", "bible":{"text":"...","ref":"Libro 0:0"}}.
