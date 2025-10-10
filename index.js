@@ -723,6 +723,18 @@ app.post("/api/memory/sync", async (req, res) => {
   }
 });
 
+// ====== WebSocket directo (nuevo servidor optimizado) ======
+const WS_VOZ_URL = process.env.WS_VOZ_URL || "ws://34.58.141.246:8000";
+
+// Info de conexión WS para el frontend
+app.get("/api/voice/ws_url", (_req, res) => {
+  res.json({ 
+    ws_url: `${WS_VOZ_URL}/ws/tts`,
+    http_url: VOZ_URL 
+  });
+});
+
 // ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
+
