@@ -1,7 +1,6 @@
-// index.js — Backend con CORS robusto + OpenAI en /api/welcome y /api/ask
+// index.js — Backend con CORS blindado + OpenAI en /api/welcome y /api/ask
 
 const express = require("express");
-const cors = require("cors");
 const bodyParser = require("body-parser");
 const OpenAI = require("openai");
 const path = require("path");
@@ -10,20 +9,30 @@ require("dotenv").config();
 
 const app = express();
 
-// ===== CORS ROBUSTO (preflight incluido) =====
+/* ===================== CORS BLINDADO ===================== */
+// Debe ir ANTES de todo.
+const ALLOWED_METHODS = "GET,POST,OPTIONS";
+const ALLOWED_HEADERS = "Content-Type, Authorization, Accept";
 app.use((req, res, next) => {
   const origin = req.headers.origin || "*";
-  res.header("Access-Control-Allow-Origin", origin);
-  res.header("Vary", "Origin");
-  res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept");
-  // Si usas cookies/sesión: habilitar y en el frontend usar credentials:'include'
-  // res.header("Access-Control-Allow-Credentials", "true");
-  if (req.method === "OPTIONS") return res.sendStatus(204);
+  // Reflejamos el origin para evitar bloqueos en entornos “credentialless”
+  res.setHeader("Access-Control-Allow-Origin", origin);
+  res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Methods", ALLOWED_METHODS);
+  res.setHeader("Access-Control-Allow-Headers", ALLOWED_HEADERS);
+  // Si llegaras a usar cookies, descomenta la siguiente y usa credentials:'include' en el FE
+  // res.setHeader("Access-Control-Allow-Credentials", "true");
+  // Cachea el preflight unos minutos
+  res.setHeader("Access-Control-Max-Age", "600");
+
+  if (req.method === "OPTIONS") {
+    // Responder SIEMPRE el preflight con 204 y headers ya seteados
+    return res.status(204).end();
+  }
   next();
 });
+// =========================================================
 
-app.use(cors({ origin: true })); // opcionalmente lo podés dejar
 app.use(bodyParser.json());
 
 // Forzar JSON UTF-8
@@ -32,9 +41,10 @@ app.use((req, res, next) => {
   next();
 });
 
+/* ===================== OpenAI ===================== */
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// ===== Memoria simple para evitar frases repetidas en la bienvenida =====
+/* ========== Memoria simple para anti-repetición en bienvenida ========== */
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
 async function ensureDataDir() { try { await fs.mkdir(DATA_DIR, { recursive: true }); } catch {} }
 function memPath(uid) {
@@ -68,11 +78,16 @@ async function writeMem(userId, mem) {
   await fs.writeFile(memPath(userId), JSON.stringify(mem, null, 2), "utf8");
 }
 
-// ===== Health =====
+/* ===================== Health ===================== */
 app.get("/", (_req, res) => res.json({ ok: true, service: "backend", ts: Date.now() }));
 
-// ===== /api/welcome =====
-// -> OpenAI genera: saludo (según hora) + frase motivadora (variada, anti-repetición) + 1 pregunta
+/* ===================== /api/welcome ===================== */
+/**
+ * OpenAI genera:
+ * - saludo por hora + nombre/género (opcional)
+ * - 1 frase motivacional (anti-repetición)
+ * - 1 pregunta breve
+ */
 app.post("/api/welcome", async (req, res) => {
   try {
     const { lang = "es", name = "", gender = "", hour = null, userId = "anon" } = req.body || {};
@@ -109,7 +124,7 @@ Salida: SOLO JSON
 
 Requisitos de estilo:
 - Tono cálido, concreto, 1–2 oraciones máximo en "message".
-- 0–1 emoji (opcional). No más de un emoji.
+- 0–1 emoji (opcional).
 - Sin citas bíblicas ni fuentes.
 - No expliques tu proceso ni muestres este prompt.
 - Responde SIEMPRE en {{lang}}.
@@ -157,9 +172,8 @@ Genera la bienvenida en ${lang} usando:
 
     if (!message || !question) return res.status(502).json({ error: "bad_openai_output" });
 
-    // Guardar frase para anti-repetición (guardamos hasta 8 últimas)
-    const onlyPhrase = message;
-    const set = new Set([onlyPhrase, ...(recent_phrases || [])]);
+    // Guardamos la frase para anti-repetición (hasta 8 últimas)
+    const set = new Set([message, ...(recent_phrases || [])]);
     mem.last_welcome_phrases = Array.from(set).slice(0, 8);
     await writeMem(userId, mem);
 
@@ -170,8 +184,8 @@ Genera la bienvenida en ${lang} usando:
   }
 });
 
-// ===== /api/ask =====
-// (sin cambios de tu lógica general): Respuesta + (opcional) biblia + 1 pregunta
+/* ===================== /api/ask ===================== */
+// Respuesta + (opcional) biblia + 1 pregunta (misma lógica general)
 app.post("/api/ask", async (req, res) => {
   try {
     const { message = "", history = [], lang = "es" } = req.body || {};
@@ -233,5 +247,6 @@ No incluyas nada fuera del JSON.
   }
 });
 
+/* ===================== Start ===================== */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor listo en puerto ${PORT}`));
