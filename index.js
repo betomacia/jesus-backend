@@ -213,161 +213,86 @@ app.post("/api/tts-stream", async (req, res, next) => {
 });
 
 
-/* ================== ⭐ NUEVO: WebSocket Proxy TTS con Pausas ================== */
+/* ================== ⭐ NUEVO: WebSocket Proxy TTS con Metadata ================== */
 
 /**
- * Detecta posiciones de pausas en el texto
- */
-function detectPauses(text) {
-  const pausas = [];
-  const pauseChars = {
-    '.': 0.5,   // Punto
-    '?': 0.5,   // Pregunta
-    '!': 0.5,   // Exclamación
-    ',': 0.3,   // Coma
-    ';': 0.4,   // Punto y coma
-    ':': 0.3,   // Dos puntos
-  };
-
-  for (let i = 0; i < text.length; i++) {
-    const char = text[i];
-    if (pauseChars[char]) {
-      pausas.push({ index: i, char: char, duration: pauseChars[char] });
-    }
-  }
-
-  return pausas;
-}
-
-/**
- * WebSocket Proxy: Frontend ↔ Backend ↔ TTS Server
+ * WebSocket Proxy: Pasa metadata del TTS al frontend
  */
 app.ws('/ws/tts', (ws, req) => {
-  console.log('[WS] ✅ Cliente conectado');
+  console.log('[WS-Proxy] ✅ Cliente conectado');
 
   let ttsWS = null;
-  let currentText = '';
-  let pauseMarkers = [];
-  let chunkCount = 0;
-  let audioPosition = 0;
-  const CHARS_PER_SECOND = 15;
 
   // Conectar al servidor TTS
   try {
     ttsWS = new WebSocket('wss://voz.movilive.es/ws/tts');
 
     ttsWS.on('open', () => {
-      console.log('[WS] ✅ Conectado a TTS server');
+      console.log('[WS-Proxy] ✅ Conectado a TTS');
     });
 
     ttsWS.on('message', (data) => {
       try {
         const msg = JSON.parse(data.toString());
-
-        if (msg.event === 'chunk' && msg.audio) {
-          chunkCount++;
-          
-          // Estimar duración
-          const audioBytes = msg.audio.length * 0.75;
-          const estimatedDuration = audioBytes / 24000;
-          const charsInChunk = CHARS_PER_SECOND * estimatedDuration;
-
-          // Buscar pausa
-          const nextPause = pauseMarkers.find(p => 
-            p.index >= audioPosition && 
-            p.index < audioPosition + charsInChunk
-          );
-
-          // Enriquecer chunk
-          const enrichedChunk = {
-            event: 'chunk',
-            id: chunkCount,
-            audio: msg.audio,
-            duration: estimatedDuration,
-            pause_after: nextPause ? nextPause.duration : 0,
-            order: chunkCount,
-            is_final: false
-          };
-
-          console.log(`[WS] 📦 Chunk ${chunkCount} | Pausa: ${enrichedChunk.pause_after}s`);
-          ws.send(JSON.stringify(enrichedChunk));
-
-          audioPosition += charsInChunk;
-        }
-
-        if (msg.event === 'done') {
-          console.log('[WS] ✅ Stream completo');
-          ws.send(JSON.stringify({
-            event: 'done',
-            total_chunks: chunkCount
-          }));
-          
-          // Reset
-          chunkCount = 0;
-          audioPosition = 0;
-          currentText = '';
-          pauseMarkers = [];
-        }
-
-        if (msg.event === 'error') {
-          console.error('[WS] ❌ Error TTS:', msg.error);
-          ws.send(JSON.stringify(msg));
+        
+        // Pasar TODO el mensaje del TTS al frontend SIN MODIFICAR
+        // El TTS ya envía la metadata completa
+        ws.send(data.toString());
+        
+        // Log para debug
+        if (msg.event === 'chunk') {
+          console.log(`[WS-Proxy] 📦 Chunk ${msg.index}/${msg.total} | Pausa: ${msg.pause_after}s`);
+        } else if (msg.event === 'done') {
+          console.log('[WS-Proxy] ✅ Completo');
+        } else if (msg.event === 'error') {
+          console.error('[WS-Proxy] ❌ Error:', msg.error);
         }
 
       } catch (e) {
-        console.error('[WS] ❌ Parse error:', e);
+        console.error('[WS-Proxy] ❌ Parse error:', e);
       }
     });
 
     ttsWS.on('error', (error) => {
-      console.error('[WS] ❌ TTS error:', error);
+      console.error('[WS-Proxy] ❌ TTS error:', error);
       ws.send(JSON.stringify({ event: 'error', error: 'tts_connection_error' }));
     });
 
     ttsWS.on('close', () => {
-      console.log('[WS] 🔌 TTS desconectado');
+      console.log('[WS-Proxy] 🔌 TTS desconectado');
     });
 
   } catch (error) {
-    console.error('[WS] ❌ Connect error:', error);
+    console.error('[WS-Proxy] ❌ Connect error:', error);
     ws.send(JSON.stringify({ event: 'error', error: 'tts_connection_failed' }));
     ws.close();
     return;
   }
 
-  // Mensajes del frontend
+  // Mensajes del frontend → reenviar al TTS
   ws.on('message', (data) => {
     try {
       const msg = JSON.parse(data.toString());
       
-      if (msg.text && msg.lang) {
-        currentText = msg.text;
-        pauseMarkers = detectPauses(currentText);
-        
-        console.log(`[WS] 🎯 Texto: "${currentText.substring(0, 50)}..."`);
-        console.log(`[WS] 📍 Pausas: ${pauseMarkers.length}`);
-        
-        chunkCount = 0;
-        audioPosition = 0;
-
-        if (ttsWS && ttsWS.readyState === WebSocket.OPEN) {
-          ttsWS.send(JSON.stringify(msg));
-        } else {
-          ws.send(JSON.stringify({ event: 'error', error: 'tts_not_ready' }));
-        }
+      console.log(`[WS-Proxy] 📤 Texto: "${msg.text?.substring(0, 50)}..." [${msg.lang}]`);
+      
+      if (ttsWS && ttsWS.readyState === WebSocket.OPEN) {
+        ttsWS.send(data.toString());
+      } else {
+        ws.send(JSON.stringify({ event: 'error', error: 'tts_not_ready' }));
       }
     } catch (e) {
-      console.error('[WS] ❌ Message error:', e);
+      console.error('[WS-Proxy] ❌ Message error:', e);
     }
   });
 
   ws.on('close', () => {
-    console.log('[WS] 🔌 Cliente desconectado');
+    console.log('[WS-Proxy] 🔌 Cliente desconectado');
     if (ttsWS) ttsWS.close();
   });
 
   ws.on('error', (error) => {
-    console.error('[WS] ❌ Cliente error:', error);
+    console.error('[WS-Proxy] ❌ Error:', error);
   });
 });
 
