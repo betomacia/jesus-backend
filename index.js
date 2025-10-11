@@ -357,7 +357,7 @@ Salida EXCLUSIVA en JSON:
   }
 });
 
-/* ================== WebSocket TTS Proxy ================== */
+/* ================== WebSocket TTS Proxy (✅ CORREGIDO) ================== */
 app.ws('/ws/tts', (ws, req) => {
   console.log('[TTS-Proxy] Cliente conectado');
   let ttsWS = null;
@@ -366,63 +366,105 @@ app.ws('/ws/tts', (ws, req) => {
     ttsWS = new WebSocket('wss://voz.movilive.es/ws/tts');
 
     ttsWS.on('open', () => {
-      console.log('[TTS-Proxy] Conectado a servidor TTS');
+      console.log('[TTS-Proxy] ✅ Conectado a servidor TTS');
     });
 
     ttsWS.on('message', (data) => {
       // Reenviar todo al frontend sin modificar
-      ws.send(data.toString());
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(data.toString());
+      }
       
       // Log para debug
       try {
         const msg = JSON.parse(data.toString());
         if (msg.event === 'chunk') {
-          console.log(`[TTS-Proxy] Chunk ${msg.index}/${msg.total}`);
+          console.log(`[TTS-Proxy] 📦 Chunk ${msg.index}/${msg.total}`);
         } else if (msg.event === 'done') {
-          console.log('[TTS-Proxy] Completo');
+          console.log('[TTS-Proxy] ✅ Audio completo');
         }
       } catch {}
     });
 
     ttsWS.on('error', (error) => {
-      console.error('[TTS-Proxy] Error TTS:', error);
-      ws.send(JSON.stringify({ event: 'error', error: 'tts_error' }));
+      console.error('[TTS-Proxy] ❌ Error TTS:', error.message);
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ event: 'error', error: 'tts_error' }));
+      }
     });
 
     ttsWS.on('close', () => {
-      console.log('[TTS-Proxy] TTS desconectado');
+      console.log('[TTS-Proxy] 🔌 TTS desconectado');
     });
 
   } catch (error) {
-    console.error('[TTS-Proxy] Error de conexión:', error);
-    ws.send(JSON.stringify({ event: 'error', error: 'connection_failed' }));
-    ws.close();
+    console.error('[TTS-Proxy] ❌ Error de conexión:', error.message);
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ event: 'error', error: 'connection_failed' }));
+      ws.close();
+    }
     return;
   }
 
-  // Mensajes del frontend → TTS
+  // ✅ CORREGIDO: Mensajes del frontend
   ws.on('message', (data) => {
     try {
       const msg = JSON.parse(data.toString());
-      console.log(`[TTS-Proxy] Enviando texto: "${msg.text?.substring(0, 30)}..."`);
       
-      if (ttsWS && ttsWS.readyState === WebSocket.OPEN) {
-        ttsWS.send(data.toString());
-      } else {
-        ws.send(JSON.stringify({ event: 'error', error: 'tts_not_ready' }));
+      // ✅ CRÍTICO: Responder a pings del heartbeat
+      if (msg.type === 'ping') {
+        console.log('[TTS-Proxy] 💓 Ping recibido - enviando pong');
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'pong' }));
+        }
+        return;
       }
+      
+      // ✅ Mensajes TTS normales → reenviar al servidor TTS
+      if (msg.text) {
+        console.log(`[TTS-Proxy] 📤 Enviando texto: "${msg.text?.substring(0, 50)}..."`);
+        
+        if (ttsWS && ttsWS.readyState === WebSocket.OPEN) {
+          ttsWS.send(data.toString());
+        } else {
+          console.warn('[TTS-Proxy] ⚠️ TTS no disponible');
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ event: 'error', error: 'tts_not_ready' }));
+          }
+        }
+      }
+      
     } catch (e) {
-      console.error('[TTS-Proxy] Error procesando mensaje:', e);
+      console.error('[TTS-Proxy] ❌ Error procesando mensaje:', e.message);
     }
   });
 
-  ws.on('close', () => {
-    console.log('[TTS-Proxy] Cliente desconectado');
-    if (ttsWS) ttsWS.close();
+  ws.on('close', (code, reason) => {
+    console.log(`[TTS-Proxy] 🔌 Cliente desconectado (code: ${code})`);
+    if (ttsWS && ttsWS.readyState === WebSocket.OPEN) {
+      ttsWS.close();
+    }
   });
 
   ws.on('error', (error) => {
-    console.error('[TTS-Proxy] Error cliente:', error);
+    console.error('[TTS-Proxy] ❌ Error cliente:', error.message);
+  });
+
+  // ✅ OPCIONAL: Implementar heartbeat del servidor
+  const heartbeatInterval = setInterval(() => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.ping();
+    } else {
+      clearInterval(heartbeatInterval);
+    }
+  }, 30000);
+
+  ws.on('pong', () => {
+    console.log('[TTS-Proxy] 💚 Pong nativo recibido');
+  });
+
+  ws.on('close', () => {
+    clearInterval(heartbeatInterval);
   });
 });
 
@@ -456,3 +498,4 @@ app.listen(PORT, () => {
   console.log(`   GET  / - Health check`);
   console.log(`${"=".repeat(50)}\n`);
 });
+
