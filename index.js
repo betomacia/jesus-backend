@@ -1,10 +1,15 @@
-
 // index.js — CORS blindado + 100% OpenAI + bienvenida con frase alentadora (tres estilos)
+// ⭐ AGREGADO: WebSocket Proxy para TTS
 const express = require("express");
+const expressWs = require("express-ws");
+const WebSocket = require("ws");
 const OpenAI = require("openai");
 require("dotenv").config();
 
 const app = express();
+
+// ⭐ Habilitar WebSocket en Express
+expressWs(app);
 
 /* ================== CORS (robusto) ================== */
 const CORS_HEADERS = {
@@ -56,7 +61,7 @@ Genera una BIENVENIDA con:
    - Elige **una** de estas líneas editoriales al azar (varía entre sesiones):
      a) Gratitud y belleza: presencia, asombro por estar vivo, milagro de lo cotidiano.
      b) Esperanza y fe: confianza en el camino, luz que aparece al avanzar.
-     c) Motivación para actuar: sentido del hoy, pequeña acción significativa, “sé la chispa/cambio”.
+     c) Motivación para actuar: sentido del hoy, pequeña acción significativa, "sé la chispa/cambio".
    - Inspírate en el tono de autores y tradiciones (p. ej., Tolle, Chopra, Wayne Dyer, Louise Hay, Thich Nhat Hanh; psicología positiva; espiritualidad cristiana y otras),
      **pero crea redacción propia** y sin mencionar autores ni bibliografía en la salida.
    - Lenguaje claro y cercano. Evita tono grandilocuente y signos excesivos.
@@ -208,6 +213,165 @@ app.post("/api/tts-stream", async (req, res, next) => {
 });
 
 
+/* ================== ⭐ NUEVO: WebSocket Proxy TTS con Pausas ================== */
+
+/**
+ * Detecta posiciones de pausas en el texto
+ */
+function detectPauses(text) {
+  const pausas = [];
+  const pauseChars = {
+    '.': 0.5,   // Punto
+    '?': 0.5,   // Pregunta
+    '!': 0.5,   // Exclamación
+    ',': 0.3,   // Coma
+    ';': 0.4,   // Punto y coma
+    ':': 0.3,   // Dos puntos
+  };
+
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    if (pauseChars[char]) {
+      pausas.push({ index: i, char: char, duration: pauseChars[char] });
+    }
+  }
+
+  return pausas;
+}
+
+/**
+ * WebSocket Proxy: Frontend ↔ Backend ↔ TTS Server
+ */
+app.ws('/ws/tts', (ws, req) => {
+  console.log('[WS] ✅ Cliente conectado');
+
+  let ttsWS = null;
+  let currentText = '';
+  let pauseMarkers = [];
+  let chunkCount = 0;
+  let audioPosition = 0;
+  const CHARS_PER_SECOND = 15;
+
+  // Conectar al servidor TTS
+  try {
+    ttsWS = new WebSocket('wss://voz.movilive.es/ws/tts');
+
+    ttsWS.on('open', () => {
+      console.log('[WS] ✅ Conectado a TTS server');
+    });
+
+    ttsWS.on('message', (data) => {
+      try {
+        const msg = JSON.parse(data.toString());
+
+        if (msg.event === 'chunk' && msg.audio) {
+          chunkCount++;
+          
+          // Estimar duración
+          const audioBytes = msg.audio.length * 0.75;
+          const estimatedDuration = audioBytes / 24000;
+          const charsInChunk = CHARS_PER_SECOND * estimatedDuration;
+
+          // Buscar pausa
+          const nextPause = pauseMarkers.find(p => 
+            p.index >= audioPosition && 
+            p.index < audioPosition + charsInChunk
+          );
+
+          // Enriquecer chunk
+          const enrichedChunk = {
+            event: 'chunk',
+            id: chunkCount,
+            audio: msg.audio,
+            duration: estimatedDuration,
+            pause_after: nextPause ? nextPause.duration : 0,
+            order: chunkCount,
+            is_final: false
+          };
+
+          console.log(`[WS] 📦 Chunk ${chunkCount} | Pausa: ${enrichedChunk.pause_after}s`);
+          ws.send(JSON.stringify(enrichedChunk));
+
+          audioPosition += charsInChunk;
+        }
+
+        if (msg.event === 'done') {
+          console.log('[WS] ✅ Stream completo');
+          ws.send(JSON.stringify({
+            event: 'done',
+            total_chunks: chunkCount
+          }));
+          
+          // Reset
+          chunkCount = 0;
+          audioPosition = 0;
+          currentText = '';
+          pauseMarkers = [];
+        }
+
+        if (msg.event === 'error') {
+          console.error('[WS] ❌ Error TTS:', msg.error);
+          ws.send(JSON.stringify(msg));
+        }
+
+      } catch (e) {
+        console.error('[WS] ❌ Parse error:', e);
+      }
+    });
+
+    ttsWS.on('error', (error) => {
+      console.error('[WS] ❌ TTS error:', error);
+      ws.send(JSON.stringify({ event: 'error', error: 'tts_connection_error' }));
+    });
+
+    ttsWS.on('close', () => {
+      console.log('[WS] 🔌 TTS desconectado');
+    });
+
+  } catch (error) {
+    console.error('[WS] ❌ Connect error:', error);
+    ws.send(JSON.stringify({ event: 'error', error: 'tts_connection_failed' }));
+    ws.close();
+    return;
+  }
+
+  // Mensajes del frontend
+  ws.on('message', (data) => {
+    try {
+      const msg = JSON.parse(data.toString());
+      
+      if (msg.text && msg.lang) {
+        currentText = msg.text;
+        pauseMarkers = detectPauses(currentText);
+        
+        console.log(`[WS] 🎯 Texto: "${currentText.substring(0, 50)}..."`);
+        console.log(`[WS] 📍 Pausas: ${pauseMarkers.length}`);
+        
+        chunkCount = 0;
+        audioPosition = 0;
+
+        if (ttsWS && ttsWS.readyState === WebSocket.OPEN) {
+          ttsWS.send(JSON.stringify(msg));
+        } else {
+          ws.send(JSON.stringify({ event: 'error', error: 'tts_not_ready' }));
+        }
+      }
+    } catch (e) {
+      console.error('[WS] ❌ Message error:', e);
+    }
+  });
+
+  ws.on('close', () => {
+    console.log('[WS] 🔌 Cliente desconectado');
+    if (ttsWS) ttsWS.close();
+  });
+
+  ws.on('error', (error) => {
+    console.error('[WS] ❌ Cliente error:', error);
+  });
+});
+
+
 /* ================== 404 con CORS ================== */
 app.use((req, res) => {
   setCors(res);
@@ -222,6 +386,5 @@ app.use((err, req, res, _next) => {
 });
 
 /* ================== Start ================== */
-const PORT = process.env.PORT || 3000; // Asegurate que Railway use 3000 si así lo configuraste
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`✅ Backend listo en puerto ${PORT}`));
-
