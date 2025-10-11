@@ -1,5 +1,6 @@
 // index.js — CORS blindado + 100% OpenAI + bienvenida CORREGIDA + prompt SIMPLIFICADO
 // ⭐ AGREGADO: WebSocket Proxy para TTS
+// ⭐ NUEVO: Integración Avatar WebRTC
 const express = require("express");
 const expressWs = require("express-ws");
 const WebSocket = require("ws");
@@ -371,7 +372,7 @@ app.post("/api/tts-stream", async (req, res, next) => {
 });
 
 
-/* ================== ⭐ NUEVO: WebSocket Proxy TTS con Metadata ================== */
+/* ================== ⭐ WebSocket Proxy TTS con Metadata ================== */
 
 /**
  * WebSocket Proxy: Pasa metadata del TTS al frontend
@@ -455,6 +456,121 @@ app.ws('/ws/tts', (ws, req) => {
 });
 
 
+/* ================== ⭐ AVATAR INTEGRATION - WebRTC Proxy ================== */
+
+/**
+ * Proxy WebRTC: Conecta el frontend con el servidor Avatar
+ * El frontend establece conexión WebRTC con el servidor Avatar a través de este proxy
+ */
+
+// Endpoint para recibir video del avatar (viewer)
+app.post("/api/avatar/viewer-offer", async (req, res, next) => {
+  try {
+    const { sdp, type } = req.body || {};
+    
+    if (!sdp || !type) {
+      return res.status(400).json({ error: "missing_sdp_or_type" });
+    }
+
+    console.log("[Avatar] 📹 Forwarding viewer offer to avatar server...");
+
+    // Reenviar la oferta al servidor Avatar
+    const avatarResponse = await fetch("https://avatar.movilive.es/viewer/offer", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ sdp, type }),
+    });
+
+    if (!avatarResponse.ok) {
+      console.error("[Avatar] ❌ Avatar server error:", avatarResponse.status);
+      return res.status(avatarResponse.status).json({ 
+        error: "avatar_server_error",
+        status: avatarResponse.status
+      });
+    }
+
+    const avatarData = await avatarResponse.json();
+    
+    console.log("[Avatar] ✅ Got answer from avatar server");
+    
+    setCors(res);
+    res.json(avatarData);
+    
+  } catch (e) {
+    console.error("[Avatar] ❌ Error:", e);
+    next(e);
+  }
+});
+
+// Endpoint para enviar audio al avatar (ingest)
+app.post("/api/avatar/ingest-offer", async (req, res, next) => {
+  try {
+    const { sdp, type } = req.body || {};
+    
+    if (!sdp || !type) {
+      return res.status(400).json({ error: "missing_sdp_or_type" });
+    }
+
+    console.log("[Avatar] 🎤 Forwarding ingest offer to avatar server...");
+
+    // Reenviar la oferta al servidor Avatar
+    const avatarResponse = await fetch("https://avatar.movilive.es/ingest/offer", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ sdp, type }),
+    });
+
+    if (!avatarResponse.ok) {
+      console.error("[Avatar] ❌ Avatar server error:", avatarResponse.status);
+      return res.status(avatarResponse.status).json({ 
+        error: "avatar_server_error",
+        status: avatarResponse.status
+      });
+    }
+
+    const avatarData = await avatarResponse.json();
+    
+    console.log("[Avatar] ✅ Got answer from avatar server");
+    
+    setCors(res);
+    res.json(avatarData);
+    
+  } catch (e) {
+    console.error("[Avatar] ❌ Error:", e);
+    next(e);
+  }
+});
+
+// Health check del servidor Avatar
+app.get("/api/avatar/health", async (req, res, next) => {
+  try {
+    console.log("[Avatar] 🏥 Checking avatar server health...");
+
+    const avatarResponse = await fetch("https://avatar.movilive.es/health");
+
+    if (!avatarResponse.ok) {
+      return res.status(avatarResponse.status).json({ 
+        error: "avatar_server_unhealthy",
+        status: avatarResponse.status
+      });
+    }
+
+    const avatarData = await avatarResponse.json();
+    
+    setCors(res);
+    res.json(avatarData);
+    
+  } catch (e) {
+    console.error("[Avatar] ❌ Health check error:", e);
+    next(e);
+  }
+});
+
+
 /* ================== 404 con CORS ================== */
 app.use((req, res) => {
   setCors(res);
@@ -470,4 +586,14 @@ app.use((err, req, res, _next) => {
 
 /* ================== Start ================== */
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`✅ Backend listo en puerto ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`✅ Backend listo en puerto ${PORT}`);
+  console.log("📋 Endpoints disponibles:");
+  console.log("   - POST /api/welcome");
+  console.log("   - POST /api/ask");
+  console.log("   - POST /api/tts-stream");
+  console.log("   - WS   /ws/tts");
+  console.log("   - POST /api/avatar/viewer-offer");
+  console.log("   - POST /api/avatar/ingest-offer");
+  console.log("   - GET  /api/avatar/health");
+});
