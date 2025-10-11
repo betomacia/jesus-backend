@@ -357,6 +357,157 @@ Salida EXCLUSIVA en JSON:
   }
 });
 
+/* ================== WebSocket Avatar + TTS Sincronizado ================== */
+app.ws('/ws/avatar-tts', (ws, req) => {
+  console.log('[Avatar-TTS] Cliente conectado');
+  
+  let ttsWS = null;
+  let avatarSessionId = `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+  
+  try {
+    // Conectar a TTS
+    ttsWS = new WebSocket('wss://voz.movilive.es/ws/tts');
+    
+    ttsWS.on('open', () => {
+      console.log('[Avatar-TTS] ✅ TTS conectado');
+    });
+    
+    ttsWS.on('message', async (data) => {
+      try {
+        const msg = JSON.parse(data.toString());
+        
+        // Reenviar chunks de audio al frontend
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(data.toString());
+        }
+        
+        // Si es audio chunk, también enviarlo al servidor avatar para lip-sync
+        if (msg.event === 'chunk' && msg.audio) {
+          console.log(`[Avatar-TTS] 📤 Enviando audio chunk ${msg.index} a avatar para lip-sync`);
+          
+          try {
+            // Enviar audio al servidor avatar para sincronización
+            await fetch('https://avatar.movilive.es/api/lipsync', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                sessionId: avatarSessionId,
+                audioChunk: msg.audio,
+                index: msg.index,
+                total: msg.total,
+                pauseAfter: msg.pause_after
+              })
+            });
+          } catch (e) {
+            console.error('[Avatar-TTS] ❌ Error enviando a avatar:', e.message);
+          }
+        }
+        
+        if (msg.event === 'done') {
+          console.log('[Avatar-TTS] ✅ Audio completo - notificando a avatar');
+          
+          // Notificar al avatar que terminó el audio
+          try {
+            await fetch('https://avatar.movilive.es/api/lipsync-complete', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ sessionId: avatarSessionId })
+            });
+          } catch (e) {
+            console.error('[Avatar-TTS] ❌ Error notificando completado:', e.message);
+          }
+        }
+        
+      } catch (e) {
+        console.error('[Avatar-TTS] ❌ Error procesando mensaje TTS:', e);
+      }
+    });
+    
+    ttsWS.on('error', (error) => {
+      console.error('[Avatar-TTS] ❌ Error TTS:', error.message);
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ event: 'error', error: 'tts_error' }));
+      }
+    });
+    
+    ttsWS.on('close', () => {
+      console.log('[Avatar-TTS] 🔌 TTS desconectado');
+    });
+    
+  } catch (error) {
+    console.error('[Avatar-TTS] ❌ Error inicial:', error.message);
+    ws.close();
+    return;
+  }
+  
+  // Mensajes del frontend
+  ws.on('message', (data) => {
+    try {
+      const msg = JSON.parse(data.toString());
+      
+      // Responder a pings
+      if (msg.type === 'ping') {
+        console.log('[Avatar-TTS] 💓 Ping recibido');
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'pong' }));
+        }
+        return;
+      }
+      
+      // Cuando se inicia una nueva sesión de avatar
+      if (msg.type === 'avatar-init') {
+        avatarSessionId = msg.sessionId || avatarSessionId;
+        console.log(`[Avatar-TTS] 🎭 Avatar iniciado con session: ${avatarSessionId}`);
+        return;
+      }
+      
+      // Si tiene texto, enviarlo a TTS para generar audio
+      if (msg.text) {
+        console.log(`[Avatar-TTS] 📤 Texto: "${msg.text?.substring(0, 50)}..."`);
+        
+        if (ttsWS && ttsWS.readyState === WebSocket.OPEN) {
+          ttsWS.send(data.toString());
+          console.log('[Avatar-TTS] → TTS enviado');
+        } else {
+          console.warn('[Avatar-TTS] ⚠️ TTS no disponible');
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ event: 'error', error: 'tts_not_ready' }));
+          }
+        }
+      }
+      
+    } catch (e) {
+      console.error('[Avatar-TTS] ❌ Error:', e.message);
+    }
+  });
+  
+  ws.on('close', (code) => {
+    console.log(`[Avatar-TTS] 🔌 Cliente desconectado (${code})`);
+    if (ttsWS) ttsWS.close();
+  });
+  
+  ws.on('error', (error) => {
+    console.error('[Avatar-TTS] ❌ Error cliente:', error.message);
+  });
+  
+  // Heartbeat
+  const heartbeatInterval = setInterval(() => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.ping();
+    } else {
+      clearInterval(heartbeatInterval);
+    }
+  }, 30000);
+  
+  ws.on('pong', () => {
+    console.log('[Avatar-TTS] 💚 Pong recibido');
+  });
+  
+  ws.on('close', () => {
+    clearInterval(heartbeatInterval);
+  });
+});
+
 /* ================== WebSocket TTS Proxy (✅ CORREGIDO) ================== */
 app.ws('/ws/tts', (ws, req) => {
   console.log('[TTS-Proxy] Cliente conectado');
@@ -498,4 +649,5 @@ app.listen(PORT, () => {
   console.log(`   GET  / - Health check`);
   console.log(`${"=".repeat(50)}\n`);
 });
+
 
