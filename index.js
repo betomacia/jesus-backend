@@ -1,6 +1,4 @@
-// index.js — CORS blindado + 100% OpenAI + bienvenida CORREGIDA + prompt SIMPLIFICADO
-// ⭐ AGREGADO: WebSocket Proxy para TTS
-// ⭐ NUEVO: Integración Avatar WebRTC
+// index.js — Backend Railway + OpenAI + WebSocket TTS Proxy
 const express = require("express");
 const expressWs = require("express-ws");
 const WebSocket = require("ws");
@@ -8,44 +6,54 @@ const OpenAI = require("openai");
 require("dotenv").config();
 
 const app = express();
-
-// ⭐ Habilitar WebSocket en Express
 expressWs(app);
 
-/* ================== CORS (robusto) ================== */
+/* ================== CORS ================== */
 const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "*", // FE usa credentials: "omit"
+  "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization, Accept",
   "Access-Control-Max-Age": "86400",
   "Vary": "Origin",
   "Content-Type": "application/json; charset=utf-8",
 };
-function setCors(res) { for (const [k, v] of Object.entries(CORS_HEADERS)) res.setHeader(k, v); }
 
-// Siempre antes de todo
+function setCors(res) { 
+  for (const [k, v] of Object.entries(CORS_HEADERS)) res.setHeader(k, v); 
+}
+
 app.use((req, res, next) => { setCors(res); next(); });
-// Responder cualquier preflight
 app.options("*", (req, res) => { setCors(res); return res.status(204).end(); });
-
-// Body parser
 app.use(express.json());
 
-/* ================== Diagnóstico CORS ================== */
+/* ================== Health Checks ================== */
+app.get("/", (_req, res) => {
+  setCors(res);
+  res.json({ 
+    ok: true, 
+    service: "Jesus Backend", 
+    version: "2.0",
+    endpoints: ["/api/welcome", "/api/ask", "/ws/tts"],
+    ts: Date.now() 
+  });
+});
+
 app.get("/__cors", (req, res) => {
   setCors(res);
   res.status(200).json({ ok: true, headers: CORS_HEADERS, ts: Date.now() });
 });
 
-/* ================== Health ================== */
-app.get("/", (_req, res) => {
-  setCors(res);
-  res.json({ ok: true, service: "backend", ts: Date.now() });
-});
-
-/* ================== OpenAI ================== */
+/* ================== OpenAI Setup ================== */
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const LANG_NAME = (l="es") => ({es:"español",en:"English",pt:"português",it:"italiano",de:"Deutsch",ca:"català",fr:"français"}[l]||"español");
+const LANG_NAME = (l="es") => ({
+  es:"español",
+  en:"English",
+  pt:"português",
+  it:"italiano",
+  de:"Deutsch",
+  ca:"català",
+  fr:"français"
+}[l]||"español");
 
 /* ================== /api/welcome ================== */
 app.post("/api/welcome", async (req, res, next) => {
@@ -314,7 +322,10 @@ Salida EXCLUSIVA en JSON:
               question: { type: "string" },
               bible: {
                 type: "object",
-                properties: { text: { type: "string" }, ref: { type: "string" } },
+                properties: { 
+                  text: { type: "string" }, 
+                  ref: { type: "string" } 
+                },
                 required: ["text", "ref"],
               },
             },
@@ -336,104 +347,64 @@ Salida EXCLUSIVA en JSON:
     if (!msg || !q) return res.status(502).json({ error: "bad_openai_output" });
 
     setCors(res);
-    res.json({ message: msg, question: q, bible: { text: btx, ref: bref } });
+    res.json({ 
+      message: msg, 
+      question: q, 
+      bible: { text: btx, ref: bref } 
+    });
   } catch (e) {
     next(e);
   }
 });
 
-
-/* ================== /api/tts-stream ================== */
-app.post("/api/tts-stream", async (req, res, next) => {
-  try {
-    const { text = "", lang = "es" } = req.body || {};
-    if (!text.trim()) return res.status(400).json({ error: "missing_text" });
-
-    // Llamar al servidor TTS con HTTPS
-    const ttsUrl = `https://voz.movilive.es/tts?text=${encodeURIComponent(text)}&lang=${lang}`;
-    
-    const response = await fetch(ttsUrl);
-    
-    if (!response.ok) {
-      return res.status(response.status).json({ error: "tts_server_error" });
-    }
-
-    // Obtener el audio como buffer
-    const audioBuffer = await response.arrayBuffer();
-    
-    // Enviar al frontend
-    setCors(res);
-    res.setHeader("Content-Type", "audio/wav");
-    res.send(Buffer.from(audioBuffer));
-  } catch (e) {
-    console.error("[TTS] Error:", e);
-    next(e);
-  }
-});
-
-
-/* ================== ⭐ WebSocket Proxy TTS con Metadata ================== */
-
-/**
- * WebSocket Proxy: Pasa metadata del TTS al frontend
- */
+/* ================== WebSocket TTS Proxy ================== */
 app.ws('/ws/tts', (ws, req) => {
-  console.log('[WS-Proxy] ✅ Cliente conectado');
-
+  console.log('[TTS-Proxy] Cliente conectado');
   let ttsWS = null;
 
-  // Conectar al servidor TTS
   try {
     ttsWS = new WebSocket('wss://voz.movilive.es/ws/tts');
 
     ttsWS.on('open', () => {
-      console.log('[WS-Proxy] ✅ Conectado a TTS');
+      console.log('[TTS-Proxy] Conectado a servidor TTS');
     });
 
     ttsWS.on('message', (data) => {
+      // Reenviar todo al frontend sin modificar
+      ws.send(data.toString());
+      
+      // Log para debug
       try {
         const msg = JSON.parse(data.toString());
-        
-        // Pasar TODO el mensaje del TTS al frontend SIN MODIFICAR
-        // El TTS ya envía la metadata completa
-        ws.send(data.toString());
-        
-        // Log para debug
         if (msg.event === 'chunk') {
-          console.log(`[WS-Proxy] 📦 Chunk ${msg.index}/${msg.total} | Pausa: ${msg.pause_after}s`);
+          console.log(`[TTS-Proxy] Chunk ${msg.index}/${msg.total}`);
         } else if (msg.event === 'done') {
-          console.log('[WS-Proxy] ✅ Completo');
-        } else if (msg.event === 'error') {
-          console.error('[WS-Proxy] ❌ Error:', msg.error);
+          console.log('[TTS-Proxy] Completo');
         }
-
-      } catch (e) {
-        console.error('[WS-Proxy] ❌ Parse error:', e);
-      }
+      } catch {}
     });
 
     ttsWS.on('error', (error) => {
-      console.error('[WS-Proxy] ❌ TTS error:', error);
-      ws.send(JSON.stringify({ event: 'error', error: 'tts_connection_error' }));
+      console.error('[TTS-Proxy] Error TTS:', error);
+      ws.send(JSON.stringify({ event: 'error', error: 'tts_error' }));
     });
 
     ttsWS.on('close', () => {
-      console.log('[WS-Proxy] 🔌 TTS desconectado');
+      console.log('[TTS-Proxy] TTS desconectado');
     });
 
   } catch (error) {
-    console.error('[WS-Proxy] ❌ Connect error:', error);
-    ws.send(JSON.stringify({ event: 'error', error: 'tts_connection_failed' }));
+    console.error('[TTS-Proxy] Error de conexión:', error);
+    ws.send(JSON.stringify({ event: 'error', error: 'connection_failed' }));
     ws.close();
     return;
   }
 
-  // Mensajes del frontend → reenviar al TTS
+  // Mensajes del frontend → TTS
   ws.on('message', (data) => {
     try {
       const msg = JSON.parse(data.toString());
-      
-      console.log(`[WS-Proxy] 📤 Texto: "${msg.text?.substring(0, 50)}..." [${msg.lang}]`);
+      console.log(`[TTS-Proxy] Enviando texto: "${msg.text?.substring(0, 30)}..."`);
       
       if (ttsWS && ttsWS.readyState === WebSocket.OPEN) {
         ttsWS.send(data.toString());
@@ -441,159 +412,47 @@ app.ws('/ws/tts', (ws, req) => {
         ws.send(JSON.stringify({ event: 'error', error: 'tts_not_ready' }));
       }
     } catch (e) {
-      console.error('[WS-Proxy] ❌ Message error:', e);
+      console.error('[TTS-Proxy] Error procesando mensaje:', e);
     }
   });
 
   ws.on('close', () => {
-    console.log('[WS-Proxy] 🔌 Cliente desconectado');
+    console.log('[TTS-Proxy] Cliente desconectado');
     if (ttsWS) ttsWS.close();
   });
 
   ws.on('error', (error) => {
-    console.error('[WS-Proxy] ❌ Error:', error);
+    console.error('[TTS-Proxy] Error cliente:', error);
   });
 });
 
-
-/* ================== ⭐ AVATAR INTEGRATION - WebRTC Proxy ================== */
-
-/**
- * Proxy WebRTC: Conecta el frontend con el servidor Avatar
- * El frontend establece conexión WebRTC con el servidor Avatar a través de este proxy
- */
-
-// Endpoint para recibir video del avatar (viewer)
-app.post("/api/avatar/viewer-offer", async (req, res, next) => {
-  try {
-    const { sdp, type } = req.body || {};
-    
-    if (!sdp || !type) {
-      return res.status(400).json({ error: "missing_sdp_or_type" });
-    }
-
-    console.log("[Avatar] 📹 Forwarding viewer offer to avatar server...");
-
-    // Reenviar la oferta al servidor Avatar
-    const avatarResponse = await fetch("https://avatar.movilive.es/viewer/offer", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ sdp, type }),
-    });
-
-    if (!avatarResponse.ok) {
-      console.error("[Avatar] ❌ Avatar server error:", avatarResponse.status);
-      return res.status(avatarResponse.status).json({ 
-        error: "avatar_server_error",
-        status: avatarResponse.status
-      });
-    }
-
-    const avatarData = await avatarResponse.json();
-    
-    console.log("[Avatar] ✅ Got answer from avatar server");
-    
-    setCors(res);
-    res.json(avatarData);
-    
-  } catch (e) {
-    console.error("[Avatar] ❌ Error:", e);
-    next(e);
-  }
-});
-
-// Endpoint para enviar audio al avatar (ingest)
-app.post("/api/avatar/ingest-offer", async (req, res, next) => {
-  try {
-    const { sdp, type } = req.body || {};
-    
-    if (!sdp || !type) {
-      return res.status(400).json({ error: "missing_sdp_or_type" });
-    }
-
-    console.log("[Avatar] 🎤 Forwarding ingest offer to avatar server...");
-
-    // Reenviar la oferta al servidor Avatar
-    const avatarResponse = await fetch("https://avatar.movilive.es/ingest/offer", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ sdp, type }),
-    });
-
-    if (!avatarResponse.ok) {
-      console.error("[Avatar] ❌ Avatar server error:", avatarResponse.status);
-      return res.status(avatarResponse.status).json({ 
-        error: "avatar_server_error",
-        status: avatarResponse.status
-      });
-    }
-
-    const avatarData = await avatarResponse.json();
-    
-    console.log("[Avatar] ✅ Got answer from avatar server");
-    
-    setCors(res);
-    res.json(avatarData);
-    
-  } catch (e) {
-    console.error("[Avatar] ❌ Error:", e);
-    next(e);
-  }
-});
-
-// Health check del servidor Avatar
-app.get("/api/avatar/health", async (req, res, next) => {
-  try {
-    console.log("[Avatar] 🏥 Checking avatar server health...");
-
-    const avatarResponse = await fetch("https://avatar.movilive.es/health");
-
-    if (!avatarResponse.ok) {
-      return res.status(avatarResponse.status).json({ 
-        error: "avatar_server_unhealthy",
-        status: avatarResponse.status
-      });
-    }
-
-    const avatarData = await avatarResponse.json();
-    
-    setCors(res);
-    res.json(avatarData);
-    
-  } catch (e) {
-    console.error("[Avatar] ❌ Health check error:", e);
-    next(e);
-  }
-});
-
-
-/* ================== 404 con CORS ================== */
+/* ================== 404 Handler ================== */
 app.use((req, res) => {
   setCors(res);
   res.status(404).json({ error: "not_found" });
 });
 
-/* ================== Error handler con CORS ================== */
+/* ================== Error Handler ================== */
 app.use((err, req, res, _next) => {
   console.error("SERVER ERROR:", err);
   setCors(res);
-  res.status(502).json({ error: "server_error", detail: String(err?.message || "unknown") });
+  res.status(502).json({ 
+    error: "server_error", 
+    detail: String(err?.message || "unknown") 
+  });
 });
 
-/* ================== Start ================== */
+/* ================== Start Server ================== */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`✅ Backend listo en puerto ${PORT}`);
-  console.log("📋 Endpoints disponibles:");
-  console.log("   - POST /api/welcome");
-  console.log("   - POST /api/ask");
-  console.log("   - POST /api/tts-stream");
-  console.log("   - WS   /ws/tts");
-  console.log("   - POST /api/avatar/viewer-offer");
-  console.log("   - POST /api/avatar/ingest-offer");
-  console.log("   - GET  /api/avatar/health");
+  console.log(`\n${"=".repeat(50)}`);
+  console.log(`✅ Jesus Backend v2.0`);
+  console.log(`🚀 Puerto: ${PORT}`);
+  console.log(`${"=".repeat(50)}`);
+  console.log(`📋 Endpoints disponibles:`);
+  console.log(`   POST /api/welcome - Mensaje de bienvenida`);
+  console.log(`   POST /api/ask - Chat con IA`);
+  console.log(`   WS   /ws/tts - WebSocket TTS proxy`);
+  console.log(`   GET  / - Health check`);
+  console.log(`${"=".repeat(50)}\n`);
 });
