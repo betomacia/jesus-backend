@@ -1,4 +1,4 @@
-// index.js — Backend Railway + OpenAI + WebSocket TTS Proxy + Avatar
+// index.js — Backend Google Cloud + OpenAI + WebSocket TTS Proxy + Avatar
 const express = require("express");
 const expressWs = require("express-ws");
 const WebSocket = require("ws");
@@ -7,6 +7,23 @@ require("dotenv").config();
 
 const app = express();
 expressWs(app);
+
+/* ================== CONFIG RED LOCAL GOOGLE CLOUD ================== */
+const TTS_HOST = process.env.TTS_HOST || "voz.movilive.es";
+const TTS_PORT = process.env.TTS_PORT || "443";
+const AVATAR_HOST = process.env.AVATAR_HOST || "avatar.movilive.es";
+const AVATAR_PORT = process.env.AVATAR_PORT || "443";
+
+const TTS_URL = TTS_PORT === "443" 
+  ? `wss://${TTS_HOST}/ws/tts` 
+  : `ws://${TTS_HOST}:${TTS_PORT}/ws/tts`;
+
+const AVATAR_URL = AVATAR_PORT === "443" 
+  ? `wss://${AVATAR_HOST}/ws/audio` 
+  : `ws://${AVATAR_HOST}:${AVATAR_PORT}/ws/audio`;
+
+console.log(`🌐 TTS URL: ${TTS_URL}`);
+console.log(`🎭 Avatar URL: ${AVATAR_URL}`);
 
 /* ================== CORS ================== */
 const CORS_HEADERS = {
@@ -32,7 +49,12 @@ app.get("/", (_req, res) => {
   res.json({ 
     ok: true, 
     service: "Jesus Backend", 
-    version: "2.1",
+    version: "2.2-local-network",
+    network: {
+      tts: TTS_URL,
+      avatar: AVATAR_URL,
+      mode: TTS_PORT === "443" ? "internet" : "local"
+    },
     endpoints: ["/api/welcome", "/api/ask", "/ws/tts", "/ws/avatar-tts"],
     ts: Date.now() 
   });
@@ -357,7 +379,7 @@ Salida EXCLUSIVA en JSON:
   }
 });
 
-/* ================== WebSocket Avatar + TTS Sincronizado (✅ CORREGIDO) ================== */
+/* ================== WebSocket Avatar + TTS Sincronizado ================== */
 app.ws('/ws/avatar-tts', (ws, req) => {
   console.log('[Avatar-TTS] Cliente conectado');
   
@@ -366,8 +388,9 @@ app.ws('/ws/avatar-tts', (ws, req) => {
   let sessionId = `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
   
   try {
-    // ✅ Conectar a TTS
-    ttsWS = new WebSocket('wss://voz.movilive.es/ws/tts');
+    // ✅ Conectar a TTS (usa red local si está configurado)
+    console.log(`[Avatar-TTS] Conectando a TTS: ${TTS_URL}`);
+    ttsWS = new WebSocket(TTS_URL);
     
     ttsWS.on('open', () => {
       console.log('[Avatar-TTS] ✅ TTS conectado');
@@ -423,9 +446,9 @@ app.ws('/ws/avatar-tts', (ws, req) => {
       console.log('[Avatar-TTS] 🔌 TTS desconectado');
     });
     
-    // ✅ Conectar al Avatar Server para enviar audio
-    console.log('[Avatar-TTS] 🎭 Conectando al Avatar Server WebSocket...');
-    avatarWS = new WebSocket('wss://avatar.movilive.es/ws/audio');
+    // ✅ Conectar al Avatar Server (usa red local si está configurado)
+    console.log(`[Avatar-TTS] Conectando a Avatar: ${AVATAR_URL}`);
+    avatarWS = new WebSocket(AVATAR_URL);
     
     avatarWS.on('open', () => {
       console.log('[Avatar-TTS] ✅ Avatar WebSocket conectado');
@@ -525,7 +548,8 @@ app.ws('/ws/tts', (ws, req) => {
   let ttsWS = null;
 
   try {
-    ttsWS = new WebSocket('wss://voz.movilive.es/ws/tts');
+    console.log(`[TTS-Proxy] Conectando a: ${TTS_URL}`);
+    ttsWS = new WebSocket(TTS_URL);
 
     ttsWS.on('open', () => {
       console.log('[TTS-Proxy] ✅ Conectado a servidor TTS');
@@ -650,8 +674,13 @@ app.use((err, req, res, _next) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`\n${"=".repeat(70)}`);
-  console.log(`✅ Jesus Backend v2.1 - Avatar Integration`);
+  console.log(`✅ Jesus Backend v2.2 - Red Local Google Cloud`);
   console.log(`🚀 Puerto: ${PORT}`);
+  console.log(`${"=".repeat(70)}`);
+  console.log(`🌐 Configuración de Red:`);
+  console.log(`   TTS: ${TTS_URL}`);
+  console.log(`   Avatar: ${AVATAR_URL}`);
+  console.log(`   Modo: ${TTS_PORT === "443" ? "Internet (HTTPS)" : "Red Local (sin SSL)"}`);
   console.log(`${"=".repeat(70)}`);
   console.log(`📋 Endpoints disponibles:`);
   console.log(`   POST /api/welcome - Mensaje de bienvenida`);
@@ -660,10 +689,10 @@ app.listen(PORT, () => {
   console.log(`   WS   /ws/avatar-tts - WebSocket TTS + Avatar sincronizado`);
   console.log(`   GET  / - Health check`);
   console.log(`${"=".repeat(70)}`);
-  console.log(`\n🎭 Modo Avatar:`);
-  console.log(`   1. TTS genera audio (voz.movilive.es)`);
-  console.log(`   2. Audio → Frontend (reproducir)`);
-  console.log(`   3. Audio → Avatar Server (lip-sync)`);
+  console.log(`\n🎭 Flujo Avatar:`);
+  console.log(`   1. Frontend envía texto`);
+  console.log(`   2. Backend → TTS (genera audio)`);
+  console.log(`   3. TTS → Frontend (reproducir) + Avatar (lip-sync)`);
   console.log(`   4. Avatar → Video WebRTC con labios sincronizados`);
   console.log(`${"=".repeat(70)}\n`);
 });
