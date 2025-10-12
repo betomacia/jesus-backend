@@ -13,19 +13,17 @@ expressWs(app);
 const TTS_IP = "10.128.0.40";
 const TTS_PORT = 8000;
 const AVATAR_IP = "10.128.0.39";
-const AVATAR_PORT = 8443;
+const AVATAR_PORT = 8080;
 
 // URLs internas (ws:// sin SSL para menor latencia)
 const TTS_URL = `ws://${TTS_IP}:${TTS_PORT}/ws/tts`;
+const AVATAR_URL = `ws://${AVATAR_IP}:${AVATAR_PORT}/ws/audio`;
 
-// Avatar en red interna (puerto 8080 sin SSL)
-const AVATAR_URL = `ws://${AVATAR_IP}:8080/ws/audio`;
-
-console.log("="*70);
+console.log("\n" + "=".repeat(70));
 console.log("🔒 RED INTERNA GOOGLE CLOUD");
 console.log(`🎤 TTS:    ${TTS_URL}`);
 console.log(`🎭 Avatar: ${AVATAR_URL}`);
-console.log("="*70);
+console.log("=".repeat(70) + "\n");
 
 /* ================== CORS ================== */
 const CORS_HEADERS = {
@@ -391,6 +389,11 @@ app.ws('/ws/avatar-tts', (ws, req) => {
   let avatarWS = null;
   let sessionId = `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
   let audioBuffer = [];  // Buffer para acumular audio antes de enviar al avatar
+  
+  try {
+    // ✅ Conectar a TTS usando IP interna
+    console.log(`[Avatar-TTS] Conectando a TTS: ${TTS_URL}`);
+    ttsWS = new WebSocket(TTS_URL);
     
     ttsWS.on('open', () => {
       console.log('[Avatar-TTS] ✅ TTS conectado (red interna)');
@@ -659,32 +662,32 @@ app.use((err, req, res, _next) => {
 /* ================== Start Server ================== */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`\n${"=".repeat(70)}`);
-  console.log(`✅ Jesus Backend v3.0 - RED INTERNA GOOGLE CLOUD`);
-  console.log(`🚀 Puerto: ${PORT}`);
-  console.log(`${"=".repeat(70)}`);
-  console.log(`🔒 Red Interna (sin subdominios):`);
-  console.log(`   TTS:    ${TTS_IP}:${TTS_PORT} → ${TTS_URL}`);
-  console.log(`   Avatar: ${AVATAR_IP}:${AVATAR_PORT} → ${AVATAR_URL}`);
-  console.log(`${"=".repeat(70)}`);
-  console.log(`📋 Endpoints:`);
-  console.log(`   POST /api/welcome - Mensaje de bienvenida`);
-  console.log(`   POST /api/ask - Chat con IA`);
-  console.log(`   WS   /ws/tts - Audio solo (modo AUDIO)`);
-  console.log(`   WS   /ws/avatar-tts - Audio + Video (modo VIDEO)`);
-  console.log(`   GET  / - Health check`);
-  console.log(`${"=".repeat(70)}`);
-  console.log(`\n🎭 Flujo Modo VIDEO:`);
-  console.log(`   1. Frontend → Backend (texto)`);
-  console.log(`   2. Backend → TTS (${TTS_IP}) → genera audio WAV 24kHz`);
-  console.log(`   3. Backend → Frontend (audio para reproducir)`);
-  console.log(`   4. Backend → Avatar (${AVATAR_IP}) → MuseTalk lip-sync`);
-  console.log(`   5. Avatar → Frontend (video WebRTC sincronizado)`);
-  console.log(`${"=".repeat(70)}`);
-  console.log(`\n💡 Ventajas Red Interna:`);
-  console.log(`   ✅ Menor latencia (10x más rápido)`);
-  console.log(`   ✅ Sin overhead SSL entre servidores`);
-  console.log(`   ✅ Comunicación directa IP a IP`);
-  console.log(`   ✅ Throughput máximo (10Gbps+)`);
-  console.log(`${"=".repeat(70)}\n`);
+  console.log("\n" + "=".repeat(70));
+  console.log("✅ Jesus Backend v3.0 - RED INTERNA GOOGLE CLOUD");
+  console.log("🚀 Puerto: " + PORT);
+  console.log("=".repeat(70));
+  console.log("🔒 Red Interna (sin subdominios):");
+  console.log("   TTS:    " + TTS_IP + ":" + TTS_PORT + " → " + TTS_URL);
+  console.log("   Avatar: " + AVATAR_IP + ":" + AVATAR_PORT + " → " + AVATAR_URL);
+  console.log("=".repeat(70));
+  console.log("📋 Endpoints:");
+  console.log("   POST /api/welcome - Mensaje de bienvenida");
+  console.log("   POST /api/ask - Chat con IA");
+  console.log("   WS   /ws/tts - Audio solo (modo AUDIO)");
+  console.log("   WS   /ws/avatar-tts - Audio + Video (modo VIDEO)");
+  console.log("   GET  / - Health check");
+  console.log("=".repeat(70));
+  console.log("\n🎭 Flujo Modo VIDEO:");
+  console.log("   1. Frontend → Backend (texto)");
+  console.log("   2. Backend → TTS (" + TTS_IP + ") → genera audio WAV 24kHz");
+  console.log("   3. Backend → Frontend (audio para reproducir)");
+  console.log("   4. Backend → Avatar (" + AVATAR_IP + ") → MuseTalk lip-sync");
+  console.log("   5. Avatar → Frontend (video WebRTC sincronizado)");
+  console.log("=".repeat(70));
+  console.log("\n💡 Ventajas Red Interna:");
+  console.log("   ✅ Menor latencia (10x más rápido)");
+  console.log("   ✅ Sin overhead SSL entre servidores");
+  console.log("   ✅ Comunicación directa IP a IP");
+  console.log("   ✅ Throughput máximo (10Gbps+)");
+  console.log("=".repeat(70) + "\n");
 });
