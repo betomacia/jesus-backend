@@ -1,4 +1,4 @@
-// index.js — Backend Google Cloud + OpenAI + WebSocket TTS Proxy + Avatar
+// index.js — Backend Google Cloud RED INTERNA (solo IPs)
 const express = require("express");
 const expressWs = require("express-ws");
 const WebSocket = require("ws");
@@ -8,22 +8,24 @@ require("dotenv").config();
 const app = express();
 expressWs(app);
 
-/* ================== CONFIG RED LOCAL GOOGLE CLOUD ================== */
-const TTS_HOST = process.env.TTS_HOST || "voz.movilive.es";
-const TTS_PORT = process.env.TTS_PORT || "443";
-const AVATAR_HOST = process.env.AVATAR_HOST || "avatar.movilive.es";
-const AVATAR_PORT = process.env.AVATAR_PORT || "443";
+/* ================== CONFIG RED INTERNA GOOGLE CLOUD ================== */
+// Comunicación interna: SOLO IPs locales, sin subdominios
+const TTS_IP = "10.128.0.40";
+const TTS_PORT = 8000;
+const AVATAR_IP = "10.128.0.39";
+const AVATAR_PORT = 8443;
 
-const TTS_URL = TTS_PORT === "443" 
-  ? `wss://${TTS_HOST}/ws/tts` 
-  : `ws://${TTS_HOST}:${TTS_PORT}/ws/tts`;
+// URLs internas (ws:// sin SSL para menor latencia)
+const TTS_URL = `ws://${TTS_IP}:${TTS_PORT}/ws/tts`;
 
-const AVATAR_URL = AVATAR_PORT === "443" 
-  ? `wss://${AVATAR_HOST}/ws/audio` 
-  : `ws://${AVATAR_HOST}:${AVATAR_PORT}/ws/audio`;
+// Avatar en red interna (puerto 8080 sin SSL)
+const AVATAR_URL = `ws://${AVATAR_IP}:8080/ws/audio`;
 
-console.log(`🌐 TTS URL: ${TTS_URL}`);
-console.log(`🎭 Avatar URL: ${AVATAR_URL}`);
+console.log("="*70);
+console.log("🔒 RED INTERNA GOOGLE CLOUD");
+console.log(`🎤 TTS:    ${TTS_URL}`);
+console.log(`🎭 Avatar: ${AVATAR_URL}`);
+console.log("="*70);
 
 /* ================== CORS ================== */
 const CORS_HEADERS = {
@@ -49,11 +51,13 @@ app.get("/", (_req, res) => {
   res.json({ 
     ok: true, 
     service: "Jesus Backend", 
-    version: "2.2-local-network",
+    version: "3.0-internal-ips",
     network: {
-      tts: TTS_URL,
-      avatar: AVATAR_URL,
-      mode: TTS_PORT === "443" ? "internet" : "local"
+      mode: "internal",
+      tts_ip: TTS_IP,
+      avatar_ip: AVATAR_IP,
+      tts_url: TTS_URL,
+      avatar_url: AVATAR_URL
     },
     endpoints: ["/api/welcome", "/api/ask", "/ws/tts", "/ws/avatar-tts"],
     ts: Date.now() 
@@ -379,55 +383,71 @@ Salida EXCLUSIVA en JSON:
   }
 });
 
-/* ================== WebSocket Avatar + TTS Sincronizado ================== */
+/* ================== WebSocket Avatar + TTS (MODO VIDEO) ================== */
 app.ws('/ws/avatar-tts', (ws, req) => {
-  console.log('[Avatar-TTS] Cliente conectado');
+  console.log('[Avatar-TTS] 🎭 Cliente conectado (modo VIDEO)');
   
   let ttsWS = null;
   let avatarWS = null;
   let sessionId = `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-  
-  try {
-    // ✅ Conectar a TTS (usa red local si está configurado)
-    console.log(`[Avatar-TTS] Conectando a TTS: ${TTS_URL}`);
-    ttsWS = new WebSocket(TTS_URL);
+  let audioBuffer = [];  // Buffer para acumular audio antes de enviar al avatar
     
     ttsWS.on('open', () => {
-      console.log('[Avatar-TTS] ✅ TTS conectado');
+      console.log('[Avatar-TTS] ✅ TTS conectado (red interna)');
     });
     
     ttsWS.on('message', async (data) => {
       try {
         const msg = JSON.parse(data.toString());
         
-        // ✅ Reenviar chunks de audio al frontend para reproducir
+        // ✅ Reenviar eventos al frontend
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(data.toString());
         }
         
-        // ✅ CRÍTICO: Si es audio chunk, enviarlo al Avatar Server
+        // ✅ CRÍTICO: Acumular chunks de audio para Avatar
         if (msg.event === 'chunk' && msg.audio) {
-          console.log(`[Avatar-TTS] 📤 Chunk ${msg.index}/${msg.total} → Avatar (${msg.audio.length} chars base64)`);
+          console.log(`[Avatar-TTS] 📦 Chunk ${msg.index}/${msg.total} (${msg.duration_s}s)`);
           
           try {
             // Convertir base64 a buffer
-            const audioBuffer = Buffer.from(msg.audio, 'base64');
-            console.log(`[Avatar-TTS] 📦 Buffer: ${audioBuffer.length} bytes`);
+            const audioChunk = Buffer.from(msg.audio, 'base64');
+            audioBuffer.push(audioChunk);
             
-            // ✅ Enviar al WebSocket del avatar
-            if (avatarWS && avatarWS.readyState === WebSocket.OPEN) {
-              avatarWS.send(audioBuffer);
-              console.log(`[Avatar-TTS] ✅ Audio enviado al avatar`);
-            } else {
-              console.warn('[Avatar-TTS] ⚠️ Avatar WS no disponible');
+            console.log(`[Avatar-TTS] 📊 Buffer: ${audioBuffer.length} chunks acumulados`);
+            
+            // Enviar al avatar cuando tengamos suficiente audio (ej: cada 3 chunks)
+            // O al final de la oración
+            if (audioBuffer.length >= 3 || msg.index === msg.total) {
+              const combinedAudio = Buffer.concat(audioBuffer);
+              
+              if (avatarWS && avatarWS.readyState === WebSocket.OPEN) {
+                avatarWS.send(combinedAudio);
+                console.log(`[Avatar-TTS] ✅ ${combinedAudio.length} bytes enviados al Avatar`);
+              } else {
+                console.warn('[Avatar-TTS] ⚠️ Avatar WS no disponible');
+              }
+              
+              // Limpiar buffer
+              audioBuffer = [];
             }
+            
           } catch (e) {
-            console.error('[Avatar-TTS] ❌ Error enviando audio a avatar:', e.message);
+            console.error('[Avatar-TTS] ❌ Error procesando audio:', e.message);
           }
         }
         
         if (msg.event === 'done') {
-          console.log('[Avatar-TTS] ✅ Audio completo');
+          console.log('[Avatar-TTS] ✅ Audio completo generado');
+          // Enviar cualquier audio restante en el buffer
+          if (audioBuffer.length > 0) {
+            const remainingAudio = Buffer.concat(audioBuffer);
+            if (avatarWS && avatarWS.readyState === WebSocket.OPEN) {
+              avatarWS.send(remainingAudio);
+              console.log(`[Avatar-TTS] ✅ Audio restante enviado (${remainingAudio.length} bytes)`);
+            }
+            audioBuffer = [];
+          }
         }
         
       } catch (e) {
@@ -438,7 +458,7 @@ app.ws('/ws/avatar-tts', (ws, req) => {
     ttsWS.on('error', (error) => {
       console.error('[Avatar-TTS] ❌ Error TTS:', error.message);
       if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ event: 'error', error: 'tts_error' }));
+        ws.send(JSON.stringify({ event: 'error', error: 'tts_connection_error' }));
       }
     });
     
@@ -446,12 +466,12 @@ app.ws('/ws/avatar-tts', (ws, req) => {
       console.log('[Avatar-TTS] 🔌 TTS desconectado');
     });
     
-    // ✅ Conectar al Avatar Server (usa red local si está configurado)
+    // ✅ Conectar al Avatar Server usando IP interna (sin SSL)
     console.log(`[Avatar-TTS] Conectando a Avatar: ${AVATAR_URL}`);
     avatarWS = new WebSocket(AVATAR_URL);
     
     avatarWS.on('open', () => {
-      console.log('[Avatar-TTS] ✅ Avatar WebSocket conectado');
+      console.log('[Avatar-TTS] ✅ Avatar WebSocket conectado (red interna)');
       console.log(`[Avatar-TTS] 🎭 Session: ${sessionId}`);
     });
     
@@ -464,11 +484,15 @@ app.ws('/ws/avatar-tts', (ws, req) => {
     });
     
     avatarWS.on('message', (data) => {
-      console.log('[Avatar-TTS] 📥 Mensaje del avatar:', data.toString().substring(0, 100));
+      // Log de mensajes del avatar (para debugging)
+      console.log('[Avatar-TTS] 📥 Mensaje del avatar');
     });
     
   } catch (error) {
     console.error('[Avatar-TTS] ❌ Error inicial:', error.message);
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ event: 'error', error: 'initialization_failed' }));
+    }
     ws.close();
     return;
   }
@@ -478,29 +502,28 @@ app.ws('/ws/avatar-tts', (ws, req) => {
     try {
       const msg = JSON.parse(data.toString());
       
-      // Responder a pings
+      // Heartbeat
       if (msg.type === 'ping') {
-        console.log('[Avatar-TTS] 💓 Ping recibido');
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: 'pong' }));
         }
         return;
       }
       
-      // Inicializar sesión
+      // Inicializar sesión avatar
       if (msg.type === 'avatar-init') {
         sessionId = msg.sessionId || sessionId;
-        console.log(`[Avatar-TTS] 🎭 Avatar session actualizada: ${sessionId}`);
+        console.log(`[Avatar-TTS] 🎭 Session: ${sessionId}`);
         return;
       }
       
-      // ✅ Si tiene texto, enviarlo a TTS para generar audio
+      // ✅ Texto para TTS
       if (msg.text) {
-        console.log(`[Avatar-TTS] 📤 Texto recibido: "${msg.text?.substring(0, 50)}..."`);
+        console.log(`[Avatar-TTS] 📤 Texto: "${msg.text?.substring(0, 50)}..." [${msg.lang || 'es'}]`);
         
         if (ttsWS && ttsWS.readyState === WebSocket.OPEN) {
           ttsWS.send(data.toString());
-          console.log('[Avatar-TTS] → TTS enviado');
+          console.log('[Avatar-TTS] → Enviado a TTS');
         } else {
           console.warn('[Avatar-TTS] ⚠️ TTS no disponible');
           if (ws.readyState === WebSocket.OPEN) {
@@ -518,33 +541,17 @@ app.ws('/ws/avatar-tts', (ws, req) => {
     console.log(`[Avatar-TTS] 🔌 Cliente desconectado (${code})`);
     if (ttsWS) ttsWS.close();
     if (avatarWS) avatarWS.close();
+    audioBuffer = [];
   });
   
   ws.on('error', (error) => {
     console.error('[Avatar-TTS] ❌ Error cliente:', error.message);
   });
-  
-  // Heartbeat
-  const heartbeatInterval = setInterval(() => {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.ping();
-    } else {
-      clearInterval(heartbeatInterval);
-    }
-  }, 30000);
-  
-  ws.on('pong', () => {
-    console.log('[Avatar-TTS] 💚 Pong recibido');
-  });
-  
-  ws.on('close', () => {
-    clearInterval(heartbeatInterval);
-  });
 });
 
-/* ================== WebSocket TTS Proxy (sin avatar) ================== */
+/* ================== WebSocket TTS Proxy (MODO AUDIO) ================== */
 app.ws('/ws/tts', (ws, req) => {
-  console.log('[TTS-Proxy] Cliente conectado');
+  console.log('[TTS-Proxy] 🎤 Cliente conectado (modo AUDIO)');
   let ttsWS = null;
 
   try {
@@ -552,16 +559,16 @@ app.ws('/ws/tts', (ws, req) => {
     ttsWS = new WebSocket(TTS_URL);
 
     ttsWS.on('open', () => {
-      console.log('[TTS-Proxy] ✅ Conectado a servidor TTS');
+      console.log('[TTS-Proxy] ✅ TTS conectado (red interna)');
     });
 
     ttsWS.on('message', (data) => {
-      // Reenviar todo al frontend sin modificar
+      // Reenviar todo al frontend
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(data.toString());
       }
       
-      // Log para debug
+      // Log
       try {
         const msg = JSON.parse(data.toString());
         if (msg.event === 'chunk') {
@@ -575,7 +582,7 @@ app.ws('/ws/tts', (ws, req) => {
     ttsWS.on('error', (error) => {
       console.error('[TTS-Proxy] ❌ Error TTS:', error.message);
       if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ event: 'error', error: 'tts_error' }));
+        ws.send(JSON.stringify({ event: 'error', error: 'tts_connection_error' }));
       }
     });
 
@@ -592,21 +599,17 @@ app.ws('/ws/tts', (ws, req) => {
     return;
   }
 
-  // Mensajes del frontend
   ws.on('message', (data) => {
     try {
       const msg = JSON.parse(data.toString());
       
-      // Responder a pings del heartbeat
       if (msg.type === 'ping') {
-        console.log('[TTS-Proxy] 💓 Ping recibido');
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: 'pong' }));
         }
         return;
       }
       
-      // Mensajes TTS normales → reenviar al servidor TTS
       if (msg.text) {
         console.log(`[TTS-Proxy] 📤 Texto: "${msg.text?.substring(0, 50)}..."`);
         
@@ -635,23 +638,6 @@ app.ws('/ws/tts', (ws, req) => {
   ws.on('error', (error) => {
     console.error('[TTS-Proxy] ❌ Error cliente:', error.message);
   });
-
-  // Heartbeat del servidor
-  const heartbeatInterval = setInterval(() => {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.ping();
-    } else {
-      clearInterval(heartbeatInterval);
-    }
-  }, 30000);
-
-  ws.on('pong', () => {
-    console.log('[TTS-Proxy] 💚 Pong nativo recibido');
-  });
-
-  ws.on('close', () => {
-    clearInterval(heartbeatInterval);
-  });
 });
 
 /* ================== 404 Handler ================== */
@@ -674,25 +660,31 @@ app.use((err, req, res, _next) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`\n${"=".repeat(70)}`);
-  console.log(`✅ Jesus Backend v2.2 - Red Local Google Cloud`);
+  console.log(`✅ Jesus Backend v3.0 - RED INTERNA GOOGLE CLOUD`);
   console.log(`🚀 Puerto: ${PORT}`);
   console.log(`${"=".repeat(70)}`);
-  console.log(`🌐 Configuración de Red:`);
-  console.log(`   TTS: ${TTS_URL}`);
-  console.log(`   Avatar: ${AVATAR_URL}`);
-  console.log(`   Modo: ${TTS_PORT === "443" ? "Internet (HTTPS)" : "Red Local (sin SSL)"}`);
+  console.log(`🔒 Red Interna (sin subdominios):`);
+  console.log(`   TTS:    ${TTS_IP}:${TTS_PORT} → ${TTS_URL}`);
+  console.log(`   Avatar: ${AVATAR_IP}:${AVATAR_PORT} → ${AVATAR_URL}`);
   console.log(`${"=".repeat(70)}`);
-  console.log(`📋 Endpoints disponibles:`);
+  console.log(`📋 Endpoints:`);
   console.log(`   POST /api/welcome - Mensaje de bienvenida`);
   console.log(`   POST /api/ask - Chat con IA`);
-  console.log(`   WS   /ws/tts - WebSocket TTS solo audio`);
-  console.log(`   WS   /ws/avatar-tts - WebSocket TTS + Avatar sincronizado`);
+  console.log(`   WS   /ws/tts - Audio solo (modo AUDIO)`);
+  console.log(`   WS   /ws/avatar-tts - Audio + Video (modo VIDEO)`);
   console.log(`   GET  / - Health check`);
   console.log(`${"=".repeat(70)}`);
-  console.log(`\n🎭 Flujo Avatar:`);
-  console.log(`   1. Frontend envía texto`);
-  console.log(`   2. Backend → TTS (genera audio)`);
-  console.log(`   3. TTS → Frontend (reproducir) + Avatar (lip-sync)`);
-  console.log(`   4. Avatar → Video WebRTC con labios sincronizados`);
+  console.log(`\n🎭 Flujo Modo VIDEO:`);
+  console.log(`   1. Frontend → Backend (texto)`);
+  console.log(`   2. Backend → TTS (${TTS_IP}) → genera audio WAV 24kHz`);
+  console.log(`   3. Backend → Frontend (audio para reproducir)`);
+  console.log(`   4. Backend → Avatar (${AVATAR_IP}) → MuseTalk lip-sync`);
+  console.log(`   5. Avatar → Frontend (video WebRTC sincronizado)`);
+  console.log(`${"=".repeat(70)}`);
+  console.log(`\n💡 Ventajas Red Interna:`);
+  console.log(`   ✅ Menor latencia (10x más rápido)`);
+  console.log(`   ✅ Sin overhead SSL entre servidores`);
+  console.log(`   ✅ Comunicación directa IP a IP`);
+  console.log(`   ✅ Throughput máximo (10Gbps+)`);
   console.log(`${"=".repeat(70)}\n`);
 });
