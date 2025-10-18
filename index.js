@@ -1,4 +1,4 @@
-// index.js — Backend Google Cloud (Solo OpenAI)
+// index.js — Backend Google Cloud (Solo OpenAI + reenvío al servidor de voz)
 const express = require("express");
 const OpenAI = require("openai");
 require("dotenv").config();
@@ -14,10 +14,7 @@ const CORS_HEADERS = {
   "Vary": "Origin",
   "Content-Type": "application/json; charset=utf-8",
 };
-
-function setCors(res) { 
-  for (const [k, v] of Object.entries(CORS_HEADERS)) res.setHeader(k, v); 
-}
+function setCors(res) { for (const [k, v] of Object.entries(CORS_HEADERS)) res.setHeader(k, v); }
 
 app.use((req, res, next) => { setCors(res); next(); });
 app.options("*", (req, res) => { setCors(res); return res.status(204).end(); });
@@ -25,25 +22,25 @@ app.use(express.json());
 
 /* ================== OpenAI Setup ================== */
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const LANG_NAME = (l="es") => ({
-  es:"español",
-  en:"English",
-  pt:"português",
-  it:"italiano",
-  de:"Deutsch",
-  ca:"català",
-  fr:"français"
-}[l]||"español");
+const LANG_NAME = (l = "es") => ({
+  es: "español",
+  en: "English",
+  pt: "português",
+  it: "italiano",
+  de: "Deutsch",
+  ca: "català",
+  fr: "français",
+}[l] || "español");
 
 /* ================== Health Check ================== */
 app.get("/", (_req, res) => {
   setCors(res);
-  res.json({ 
-    ok: true, 
-    service: "Jesus Backend (OpenAI Only)", 
-    version: "3.0-openai",
+  res.json({
+    ok: true,
+    service: "Jesus Backend (OpenAI Only)",
+    version: "3.1-audio-forward",
     ts: Date.now(),
-    endpoints: ["/api/welcome", "/api/ask"]
+    endpoints: ["/api/welcome", "/api/ask"],
   });
 });
 
@@ -107,7 +104,7 @@ Salida EXCLUSIVA en JSON:
 /* ================== /api/ask ================== */
 app.post("/api/ask", async (req, res, next) => {
   try {
-    const { message = "", history = [], lang = "es" } = req.body || {};
+    const { message = "", history = [], lang = "es", route = "frontend", sessionId = "" } = req.body || {};
     const userTxt = String(message || "").trim();
 
     const convo = [];
@@ -133,9 +130,9 @@ app.post("/api/ask", async (req, res, next) => {
               question: { type: "string" },
               bible: {
                 type: "object",
-                properties: { 
-                  text: { type: "string" }, 
-                  ref: { type: "string" } 
+                properties: {
+                  text: { type: "string" },
+                  ref: { type: "string" },
                 },
                 required: ["text", "ref"],
               },
@@ -151,17 +148,37 @@ app.post("/api/ask", async (req, res, next) => {
     try { data = JSON.parse(r?.choices?.[0]?.message?.content || "{}"); } catch {}
 
     const msg = String(data?.message || "").trim();
-    const q   = String(data?.question || "").trim();
+    const q = String(data?.question || "").trim();
     const btx = String(data?.bible?.text || "").trim();
-    const bref= String(data?.bible?.ref  || "").trim();
+    const bref = String(data?.bible?.ref || "").trim();
 
     if (!msg || !q) return res.status(502).json({ error: "bad_openai_output" });
 
+    /* 🔊 Reenvío al servidor de voz (voz.movilive.es) */
+    try {
+      const payload = {
+        text: [msg, q].filter(Boolean).join("\n\n"),
+        lang,
+        route,
+        sessionId,
+      };
+      const ws = new (require("ws"))("wss://voz.movilive.es/ws/tts");
+      ws.on("open", () => {
+        ws.send(JSON.stringify(payload));
+        ws.close();
+      });
+      console.log(`📤 Enviado al servidor de voz: route=${route}, sessionId=${sessionId || "N/A"}`);
+    } catch (err) {
+      console.error("⚠️ Error reenviando al servidor de voz:", err.message);
+    }
+
     setCors(res);
-    res.json({ 
-      message: msg, 
-      question: q, 
-      bible: { text: btx, ref: bref } 
+    res.json({
+      message: msg,
+      question: q,
+      bible: { text: btx, ref: bref },
+      route,
+      sessionId,
     });
   } catch (e) {
     next(e);
@@ -178,9 +195,9 @@ app.use((req, res) => {
 app.use((err, req, res, _next) => {
   console.error("SERVER ERROR:", err);
   setCors(res);
-  res.status(502).json({ 
-    error: "server_error", 
-    detail: String(err?.message || "unknown") 
+  res.status(502).json({
+    error: "server_error",
+    detail: String(err?.message || "unknown"),
   });
 });
 
@@ -188,7 +205,7 @@ app.use((err, req, res, _next) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("\n" + "=".repeat(70));
-  console.log("✅ Jesus Backend (Solo OpenAI)");
+  console.log("✅ Jesus Backend (OpenAI + Voz Forward)");
   console.log("🚀 Puerto: " + PORT);
   console.log("📋 Endpoints: POST /api/welcome, POST /api/ask, GET /");
   console.log("=".repeat(70));
