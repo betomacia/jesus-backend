@@ -70,9 +70,10 @@ Genera una BIENVENIDA con DOS elementos separados:
 Salida EXCLUSIVA en JSON:
 {"message":"saludo+nombre punto + frase","question":"pregunta conversacional"}`.trim();
 
-    const USER = `Genera bienvenida en ${lang} con:\n- hour: ${h}\n- name: ${String(
-      name || ""
-    ).trim()}\n- gender: ${String(gender || "").trim()}`;
+    const USER = `Genera bienvenida en ${lang} con:
+- hour: ${h}
+- name: ${String(name || "").trim()}
+- gender: ${String(gender || "").trim()}`;
 
     const r = await openai.chat.completions.create({
       model: "gpt-4o",
@@ -178,7 +179,7 @@ app.post("/api/ask", async (req, res, next) => {
     if (!msg || !q)
       return res.status(502).json({ error: "bad_openai_output" });
 
-    /* 🔊 Reenvío al servidor de voz */
+    // 🔊 Reenvío al servidor de voz
     try {
       const payload = {
         text: [msg, q].filter(Boolean).join("\n\n"),
