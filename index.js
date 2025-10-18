@@ -47,7 +47,7 @@ app.get("/", (_req, res) => {
   res.json({
     ok: true,
     service: "Jesus Backend (OpenAI + Voz Forward)",
-    version: "3.1",
+    version: "3.2",
     ts: Date.now(),
     endpoints: ["/api/welcome", "/api/ask"],
   });
@@ -194,9 +194,7 @@ app.post("/api/ask", async (req, res, next) => {
       ws.on("open", () => {
         ws.send(JSON.stringify(payload));
         console.log(
-          `📤 Enviado al servidor de voz: route=${route}, sessionId=${
-            sessionId || "N/A"
-          }`
+          `📤 Enviado al servidor de voz: route=${route}, sessionId=${sessionId || "N/A"}`
         );
         ws.close();
       });
@@ -241,6 +239,7 @@ app.use((err, req, res, _next) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("\n" + "=".repeat(70));
+  console.log("🌟 JESUS BACKEND v3.2 — BUILD: 'ACTUALIZADO " + new Date().toISOString() + "' 🌟");
   console.log("✅ Jesus Backend (OpenAI + Voz Forward)");
   console.log("🚀 Puerto: " + PORT);
   console.log("📋 Endpoints: POST /api/welcome, POST /api/ask, GET /");
