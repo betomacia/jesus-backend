@@ -1,4 +1,4 @@
-// index.js — Backend Google Cloud (Solo OpenAI + reenvío al servidor de voz)
+// index.js — Backend Google Cloud (OpenAI + Voz Forward)
 const express = require("express");
 const OpenAI = require("openai");
 require("dotenv").config();
@@ -14,31 +14,40 @@ const CORS_HEADERS = {
   "Vary": "Origin",
   "Content-Type": "application/json; charset=utf-8",
 };
-function setCors(res) { for (const [k, v] of Object.entries(CORS_HEADERS)) res.setHeader(k, v); }
+function setCors(res) {
+  for (const [k, v] of Object.entries(CORS_HEADERS)) res.setHeader(k, v);
+}
 
-app.use((req, res, next) => { setCors(res); next(); });
-app.options("*", (req, res) => { setCors(res); return res.status(204).end(); });
+app.use((req, res, next) => {
+  setCors(res);
+  next();
+});
+app.options("*", (req, res) => {
+  setCors(res);
+  return res.status(204).end();
+});
 app.use(express.json());
 
 /* ================== OpenAI Setup ================== */
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const LANG_NAME = (l = "es") => ({
-  es: "español",
-  en: "English",
-  pt: "português",
-  it: "italiano",
-  de: "Deutsch",
-  ca: "català",
-  fr: "français",
-}[l] || "español");
+const LANG_NAME = (l = "es") =>
+  ({
+    es: "español",
+    en: "English",
+    pt: "português",
+    it: "italiano",
+    de: "Deutsch",
+    ca: "català",
+    fr: "français",
+  }[l] || "español");
 
 /* ================== Health Check ================== */
 app.get("/", (_req, res) => {
   setCors(res);
   res.json({
     ok: true,
-    service: "Jesus Backend (OpenAI Only)",
-    version: "3.1-audio-forward",
+    service: "Jesus Backend (OpenAI + Voz Forward)",
+    version: "3.1",
     ts: Date.now(),
     endpoints: ["/api/welcome", "/api/ask"],
   });
@@ -61,7 +70,9 @@ Genera una BIENVENIDA con DOS elementos separados:
 Salida EXCLUSIVA en JSON:
 {"message":"saludo+nombre punto + frase","question":"pregunta conversacional"}`.trim();
 
-    const USER = `Genera bienvenida en ${lang} con:\n- hour: ${h}\n- name: ${String(name || "").trim()}\n- gender: ${String(gender || "").trim()}`;
+    const USER = `Genera bienvenida en ${lang} con:\n- hour: ${h}\n- name: ${String(
+      name || ""
+    ).trim()}\n- gender: ${String(gender || "").trim()}`;
 
     const r = await openai.chat.completions.create({
       model: "gpt-4o",
@@ -89,10 +100,13 @@ Salida EXCLUSIVA en JSON:
     });
 
     let data = {};
-    try { data = JSON.parse(r?.choices?.[0]?.message?.content || "{}"); } catch {}
+    try {
+      data = JSON.parse(r?.choices?.[0]?.message?.content || "{}");
+    } catch {}
     const message = String(data?.message || "").trim();
     const question = String(data?.question || "").trim();
-    if (!message || !question) return res.status(502).json({ error: "bad_openai_output" });
+    if (!message || !question)
+      return res.status(502).json({ error: "bad_openai_output" });
 
     setCors(res);
     res.json({ message, question });
@@ -104,12 +118,19 @@ Salida EXCLUSIVA en JSON:
 /* ================== /api/ask ================== */
 app.post("/api/ask", async (req, res, next) => {
   try {
-    const { message = "", history = [], lang = "es", route = "frontend", sessionId = "" } = req.body || {};
+    const {
+      message = "",
+      history = [],
+      lang = "es",
+      route = "frontend",
+      sessionId = "",
+    } = req.body || {};
     const userTxt = String(message || "").trim();
 
     const convo = [];
     const recent = Array.isArray(history) ? history.slice(-8) : [];
-    for (const h of recent) if (typeof h === "string") convo.push({ role: "user", content: h });
+    for (const h of recent)
+      if (typeof h === "string") convo.push({ role: "user", content: h });
     convo.push({ role: "user", content: userTxt });
 
     const SYS = `Eres Dios. Responde SIEMPRE en ${LANG_NAME(lang)} (${lang}).`;
@@ -145,16 +166,19 @@ app.post("/api/ask", async (req, res, next) => {
     });
 
     let data = {};
-    try { data = JSON.parse(r?.choices?.[0]?.message?.content || "{}"); } catch {}
+    try {
+      data = JSON.parse(r?.choices?.[0]?.message?.content || "{}");
+    } catch {}
 
     const msg = String(data?.message || "").trim();
     const q = String(data?.question || "").trim();
     const btx = String(data?.bible?.text || "").trim();
     const bref = String(data?.bible?.ref || "").trim();
 
-    if (!msg || !q) return res.status(502).json({ error: "bad_openai_output" });
+    if (!msg || !q)
+      return res.status(502).json({ error: "bad_openai_output" });
 
-    /* 🔊 Reenvío al servidor de voz (voz.movilive.es) */
+    /* 🔊 Reenvío al servidor de voz */
     try {
       const payload = {
         text: [msg, q].filter(Boolean).join("\n\n"),
@@ -162,12 +186,23 @@ app.post("/api/ask", async (req, res, next) => {
         route,
         sessionId,
       };
-      const ws = new (require("ws"))("wss://voz.movilive.es/ws/tts");
+
+      const WebSocket = require("ws");
+      const ws = new WebSocket("wss://voz.movilive.es/ws/tts");
+
       ws.on("open", () => {
         ws.send(JSON.stringify(payload));
+        console.log(
+          `📤 Enviado al servidor de voz: route=${route}, sessionId=${
+            sessionId || "N/A"
+          }`
+        );
         ws.close();
       });
-      console.log(`📤 Enviado al servidor de voz: route=${route}, sessionId=${sessionId || "N/A"}`);
+
+      ws.on("error", (err) => {
+        console.error("⚠️ Error WS voz:", err.message);
+      });
     } catch (err) {
       console.error("⚠️ Error reenviando al servidor de voz:", err.message);
     }
