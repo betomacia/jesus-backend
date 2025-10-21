@@ -1,7 +1,6 @@
 /**
- * ✝️ JESUS BACKEND v4.3 — OpenAI + Voz WebRTC Router
- * Mantiene toda la lógica OpenAI original (sin tocar prompts)
- * Solo migra la comunicación de voz a WebRTC real (DataChannel)
+ * ✝️ JESUS BACKEND v4.4 — OpenAI + Voz WebRTC Router
+ * Responde INMEDIATAMENTE al frontend, envía a voz en background
  */
 
 import express from "express";
@@ -10,7 +9,7 @@ import fetch from "node-fetch";
 import OpenAI from "openai";
 import { exec } from "child_process";
 import { v4 as uuidv4 } from "uuid";
-import { sendTextViaWebRTC } from "./webrtc_voice_client.js"; // ✅ nuevo import WebRTC real
+import { sendTextViaWebRTC } from "./webrtc_voice_client.js";
 
 dotenv.config({ path: "/home/ubuntu/jesus-backend/.env" });
 const app = express();
@@ -46,7 +45,7 @@ app.get("/", (_req, res) =>
   res.json({
     ok: true,
     service: "Jesus Backend (OpenAI + Voz WebRTC)",
-    version: "4.3",
+    version: "4.4",
     voice_server: VOICE_SERVER_URL_RTC,
     endpoints: ["/api/welcome", "/api/ask", "/webhook"],
   })
@@ -104,10 +103,13 @@ Salida EXCLUSIVA en JSON:
     res.status(500).json({ error: "welcome_failed" });
   }
 });
+
 /* ================== /api/ask ================== */
 app.post("/api/ask", async (req, res) => {
   try {
     const { message = "", history = [], lang = "es", route = "frontend", sessionId = uuidv4() } = req.body || {};
+
+    console.log(`[API] 📥 Mensaje recibido con route="${route}"`);
 
     // 💬 Mantener flujo OpenAI intacto
     const convo = [];
@@ -151,17 +153,8 @@ app.post("/api/ask", async (req, res) => {
     const bref = String(data?.bible?.ref || "").trim();
     const fullText = [msg, btx ? `— ${btx} (${bref})` : "", q].filter(Boolean).join("\n\n");
 
-    // ===================== 🔊 ENVÍO WEBRTC REAL =====================
-    if (route !== "frontend" && fullText) {
-      console.log(`🎙️ [WebRTC] Enviando texto al servidor de voz (${lang})...`);
-      try {
-        await sendTextViaWebRTC(fullText, lang, sessionId);
-      } catch (err) {
-        console.error("⚠️ Error enviando al servidor de voz WebRTC:", err.message);
-      }
-    }
-
-    // ===================== 🔁 RESPUESTA AL FRONTEND =====================
+    // ===================== ✅ RESPONDER AL FRONTEND INMEDIATAMENTE =====================
+    console.log(`[API] ✅ Enviando respuesta al frontend (${fullText.length} caracteres)`);
     res.json({
       message: msg,
       question: q,
@@ -169,11 +162,27 @@ app.post("/api/ask", async (req, res) => {
       route,
       sessionId,
     });
+
+    // ===================== 🔊 ENVÍO WEBRTC EN BACKGROUND (NO BLOQUEA) =====================
+    if (route !== "frontend" && fullText) {
+      console.log(`[API] 🎙️ Iniciando envío a WebRTC en background (route=${route})...`);
+      
+      // ⚡ Ejecutar en background sin await - no bloquea la respuesta
+      sendTextViaWebRTC(fullText, lang, sessionId)
+        .then(() => {
+          console.log(`[API] ✅ Audio enviado correctamente a servidor de voz`);
+        })
+        .catch((err) => {
+          console.warn(`[API] ⚠️ Error enviando audio (no crítico):`, err.message);
+        });
+    }
+
   } catch (err) {
     console.error("❌ /api/ask error:", err);
     res.status(500).json({ error: "ask_failed" });
   }
 });
+
 /* ================== GITHUB AUTO-UPDATE ================== */
 app.post("/webhook", async (req, res) => {
   console.log("🚀 Webhook recibido desde GitHub — iniciando actualización...");
@@ -188,11 +197,11 @@ app.post("/webhook", async (req, res) => {
 });
 
 /* ================== Start ================== */
-const PORT = process.env.PORT || 3100;
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("=".repeat(70));
-  console.log(`🌟 JESUS BACKEND v4.3 — Ejecutando en puerto ${PORT}`);
-  console.log("📡 OpenAI intacto + Voz WebRTC activo");
+  console.log(`🌟 JESUS BACKEND v4.4 — Ejecutando en puerto ${PORT}`);
+  console.log("📡 OpenAI intacto + Voz WebRTC en background (no bloquea)");
   console.log("📬 Webhook GitHub activo en /webhook");
   console.log("=".repeat(70));
 });
