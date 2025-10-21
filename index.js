@@ -18,7 +18,7 @@ app.use(express.json({ limit: "2mb" }));
 const VOICE_SERVER_URL = "http://10.128.0.40:8000/webrtc/tts"; // WebRTC TTS interno
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-/* ================== CORS ================== */
+/* ====================== CORS ================== */
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
@@ -198,3 +198,4 @@ app.listen(PORT, () => {
   console.log("📡 OpenAI + WebRTC Voice bridge activo");
   console.log("=".repeat(70));
 });
+
