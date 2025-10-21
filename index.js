@@ -197,7 +197,7 @@ app.post("/webhook", async (req, res) => {
 });
 
 /* ================== Start ================== */
-const PORT = process.env.PORT || 3100;
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("=".repeat(70));
   console.log(`🌟 JESUS BACKEND v4.4 — Ejecutando en puerto ${PORT}`);
@@ -205,4 +205,5 @@ app.listen(PORT, () => {
   console.log("📬 Webhook GitHub activo en /webhook");
   console.log("=".repeat(70));
 });
+
 
