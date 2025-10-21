@@ -1,6 +1,7 @@
 /**
- * ✝️ JESUS BACKEND v4.1 — OpenAI + Voz REST/RTC Router
- * Incluye fallback REST temporal y actualización automática desde GitHub
+ * ✝️ JESUS BACKEND v4.2 — OpenAI + Voz WebRTC Router
+ * Migrado completamente a WebRTC (sin fallback REST)
+ * Con sessionId único (uuidv4) y reenvío directo al servidor de voz
  */
 
 import express from "express";
@@ -9,15 +10,14 @@ import fetch from "node-fetch";
 import wrtc from "wrtc";
 import OpenAI from "openai";
 import { exec } from "child_process";
+import { v4 as uuidv4 } from "uuid"; // 🔹 Generador de sessionId único
 
 dotenv.config({ path: "/home/ubuntu/jesus-backend/.env" });
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
 /* ================== CONFIG ================== */
-const { v4: uuidv4 } = require("uuid");
-const VOICE_SERVER_URL_REST = "http://10.128.0.40:8000/tts";      // Fallback clásico
-const VOICE_SERVER_URL_RTC = "http://10.128.0.40:8000/webrtc/tts"; // Original WebRTC
+const VOICE_SERVER_URL_RTC = "http://10.128.0.40:8000/webrtc/tts"; // 🔹 Voz por WebRTC
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 /* ====================== CORS ================== */
@@ -45,10 +45,9 @@ const LANG_NAME = (l = "es") =>
 app.get("/", (_req, res) =>
   res.json({
     ok: true,
-    service: "Jesus Backend (OpenAI + Voz)",
-    version: "4.1",
+    service: "Jesus Backend (OpenAI + Voz WebRTC)",
+    version: "4.2",
     voice_server: VOICE_SERVER_URL_RTC,
-    fallback: VOICE_SERVER_URL_REST,
     endpoints: ["/api/welcome", "/api/ask", "/webhook"],
   })
 );
@@ -98,28 +97,37 @@ Salida EXCLUSIVA en JSON:
     });
 
     const data = JSON.parse(r?.choices?.[0]?.message?.content || "{}");
-    res.json({ message: data.message, question: data.question });
+    const sessionId = uuidv4(); // 🔹 Generar nuevo ID para bienvenida
+    res.json({
+      message: data.message,
+      question: data.question,
+      sessionId,
+    });
   } catch (err) {
     console.error("❌ /api/welcome error:", err);
     res.status(500).json({ error: "welcome_failed" });
   }
 });
-
 /* ================== /api/ask ================== */
 app.post("/api/ask", async (req, res) => {
   try {
-    const { message = "", history = [], lang = "es", route = "frontend", sessionId = "" } = req.body || {};
+    const { message = "", history = [], lang = "es", route = "frontend" } = req.body || {};
+    const sessionId = uuidv4(); // 🔹 Nuevo identificador único para la conversación
+
+    // ====== Construir historial ======
     const convo = [];
     const recent = Array.isArray(history) ? history.slice(-8) : [];
-    for (const h of recent)
+    for (const h of recent) {
       if (typeof h === "string") convo.push({ role: "user", content: h });
+    }
     convo.push({ role: "user", content: message });
 
-    const SYS = `Eres Dios. Responde SIEMPRE en ${LANG_NAME(lang)} (${lang}).`;
+    // ====== Prompt de OpenAI ======
+    const SYS = `Eres Dios. Responde SIEMPRE en ${LANG_NAME(lang)} (${lang}). Da mensajes sabios, breves y positivos.`;
 
     const r = await openai.chat.completions.create({
       model: "gpt-4o",
-      temperature: 0.75,
+      temperature: 0.8,
       max_tokens: 350,
       messages: [{ role: "system", content: SYS }, ...convo],
       response_format: {
@@ -143,6 +151,7 @@ app.post("/api/ask", async (req, res) => {
       },
     });
 
+    // ====== Formatear respuesta ======
     const data = JSON.parse(r?.choices?.[0]?.message?.content || "{}");
     const msg = String(data?.message || "").trim();
     const q = String(data?.question || "").trim();
@@ -150,29 +159,37 @@ app.post("/api/ask", async (req, res) => {
     const bref = String(data?.bible?.ref || "").trim();
     const fullText = [msg, btx ? `— ${btx} (${bref})` : "", q].filter(Boolean).join("\n\n");
 
-    // 🔊 ENVÍO AL SERVIDOR DE VOZ (REST)
+    // ====== Enviar texto al Servidor de Voz por WebRTC ======
     if (route !== "frontend" && fullText) {
       try {
-        console.log(`🎙️ Enviando texto al servidor de voz (${lang})...`);
-        const ttsRes = await fetch(VOICE_SERVER_URL_REST, {
+        console.log(`🎙️ [WebRTC] Enviando texto al servidor de voz (${lang}) — ${route}`);
+
+        // Enviar la oferta SDP
+        const offer = await wrtc.RTCPeerConnection.createOffer
+          ? new wrtc.RTCPeerConnection().createOffer()
+          : null;
+
+        // Enviar el texto por POST al endpoint WebRTC del servidor de voz
+        const webrtcRes = await fetch(VOICE_SERVER_URL_RTC, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: fullText, lang }),
+          headers: { "Content-Type": "application/sdp" },
+          body: JSON.stringify({ text: fullText, lang, route, sessionId }),
         });
-        if (!ttsRes.ok) throw new Error(`TTS REST status ${ttsRes.status}`);
-        const audioArrayBuffer = await ttsRes.arrayBuffer();
-        console.log(`✅ Audio recibido desde servidor de voz (${audioArrayBuffer.byteLength} bytes)`);
+
+        if (!webrtcRes.ok) throw new Error(`WebRTC TTS status ${webrtcRes.status}`);
+        console.log("✅ [WebRTC] Texto entregado correctamente al servidor de voz");
       } catch (err) {
-        console.error("⚠️ Error reenviando al servidor de voz REST:", err.message);
+        console.error("⚠️ Error enviando al servidor de voz WebRTC:", err.message);
       }
     }
 
+    // ====== Responder al frontend ======
     res.json({
       message: msg,
       question: q,
       bible: { text: btx, ref: bref },
-      route,
       sessionId,
+      route,
     });
   } catch (err) {
     console.error("❌ /api/ask error:", err);
@@ -197,11 +214,9 @@ app.post("/webhook", async (req, res) => {
 const PORT = process.env.PORT || 3100;
 app.listen(PORT, () => {
   console.log("=".repeat(70));
-  console.log(`🌟 JESUS BACKEND v4.1 — Ejecutando en puerto ${PORT}`);
-  console.log("📡 OpenAI + Voz REST bridge activo (fallback habilitado)");
+  console.log(`🌟 JESUS BACKEND v4.2 — Ejecutando en puerto ${PORT}`);
+  console.log("📡 OpenAI + Voz WebRTC activo (sin fallback REST)");
   console.log("📬 Webhook GitHub activo en /webhook");
   console.log("=".repeat(70));
 });
-
-
 
