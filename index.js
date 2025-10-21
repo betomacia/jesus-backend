@@ -186,10 +186,11 @@ app.post("/api/ask", async (req, res) => {
 });
 
 /* ================== Start ================== */
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3100;
 app.listen(PORT, () => {
   console.log("=".repeat(70));
   console.log(`🌟 JESUS BACKEND v4.1 — Ejecutando en puerto ${PORT}`);
   console.log("📡 OpenAI + Voz REST bridge activo (fallback habilitado)");
   console.log("=".repeat(70));
 });
+
