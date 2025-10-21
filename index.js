@@ -1,6 +1,6 @@
 /**
  * ✝️ JESUS BACKEND v4.1 — OpenAI + Voz REST/RTC Router
- * Incluye fallback REST temporal para pruebas directas de TTS
+ * Incluye fallback REST temporal y actualización automática desde GitHub
  */
 
 import express from "express";
@@ -8,6 +8,7 @@ import dotenv from "dotenv";
 import fetch from "node-fetch";
 import wrtc from "wrtc";
 import OpenAI from "openai";
+import { exec } from "child_process";
 
 dotenv.config();
 const app = express();
@@ -47,7 +48,7 @@ app.get("/", (_req, res) =>
     version: "4.1",
     voice_server: VOICE_SERVER_URL_RTC,
     fallback: VOICE_SERVER_URL_REST,
-    endpoints: ["/api/welcome", "/api/ask"],
+    endpoints: ["/api/welcome", "/api/ask", "/webhook"],
   })
 );
 
@@ -148,25 +149,18 @@ app.post("/api/ask", async (req, res) => {
     const bref = String(data?.bible?.ref || "").trim();
     const fullText = [msg, btx ? `— ${btx} (${bref})` : "", q].filter(Boolean).join("\n\n");
 
-    // 🔊 ENVÍO AL SERVIDOR DE VOZ SI APLICA
+    // 🔊 ENVÍO AL SERVIDOR DE VOZ (REST)
     if (route !== "frontend" && fullText) {
       try {
-        console.log(`🎙️ Intentando enviar texto al servidor de voz (${lang})...`);
-
-        // ==== REST Fallback Test ====
+        console.log(`🎙️ Enviando texto al servidor de voz (${lang})...`);
         const ttsRes = await fetch(VOICE_SERVER_URL_REST, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ text: fullText, lang }),
         });
-
         if (!ttsRes.ok) throw new Error(`TTS REST status ${ttsRes.status}`);
-
         const audioArrayBuffer = await ttsRes.arrayBuffer();
         console.log(`✅ Audio recibido desde servidor de voz (${audioArrayBuffer.byteLength} bytes)`);
-
-        // opcional: podrías guardar o enviar el audio al frontend en el futuro
-
       } catch (err) {
         console.error("⚠️ Error reenviando al servidor de voz REST:", err.message);
       }
@@ -185,13 +179,25 @@ app.post("/api/ask", async (req, res) => {
   }
 });
 
+/* ================== GITHUB AUTO-UPDATE ================== */
+app.post("/webhook", async (req, res) => {
+  console.log("🚀 Webhook recibido desde GitHub — iniciando actualización...");
+  exec("cd /home/ubuntu/jesus-backend && git pull && pm2 restart jesus-backend --update-env", (err, stdout, stderr) => {
+    if (err) {
+      console.error("❌ Error al actualizar:", stderr);
+      return res.status(500).send("Update failed");
+    }
+    console.log("✅ Actualización completada:\n", stdout);
+    res.status(200).send("OK");
+  });
+});
+
 /* ================== Start ================== */
 const PORT = process.env.PORT || 3200;
 app.listen(PORT, () => {
   console.log("=".repeat(70));
   console.log(`🌟 JESUS BACKEND v4.1 — Ejecutando en puerto ${PORT}`);
   console.log("📡 OpenAI + Voz REST bridge activo (fallback habilitado)");
+  console.log("📬 Webhook GitHub activo en /webhook");
   console.log("=".repeat(70));
 });
-
-
