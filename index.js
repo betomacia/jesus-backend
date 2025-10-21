@@ -15,6 +15,7 @@ const app = express();
 app.use(express.json({ limit: "2mb" }));
 
 /* ================== CONFIG ================== */
+const { v4: uuidv4 } = require("uuid");
 const VOICE_SERVER_URL_REST = "http://10.128.0.40:8000/tts";      // Fallback clásico
 const VOICE_SERVER_URL_RTC = "http://10.128.0.40:8000/webrtc/tts"; // Original WebRTC
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -201,5 +202,6 @@ app.listen(PORT, () => {
   console.log("📬 Webhook GitHub activo en /webhook");
   console.log("=".repeat(70));
 });
+
 
 
