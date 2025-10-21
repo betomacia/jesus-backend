@@ -5,10 +5,17 @@ const VOICE_SERVER_URL = "http://10.128.0.40:8000/webrtc/tts";
 
 /**
  * Envía texto al servidor de voz (jesus-voice) usando WebRTC DataChannel.
+ * Incluye logs detallados del texto enviado y respuestas recibidas.
  */
 export async function sendTextViaWebRTC(text, lang = "es", sessionId = "default") {
   try {
-    console.log(`🎙️ [WebRTC] Enviando texto al servidor de voz (${lang})...`);
+    console.log("──────────────────────────────────────────────");
+    console.log(`🎙️ [WebRTC] Iniciando envío de texto al servidor de voz`);
+    console.log(`🌐 Destino: ${VOICE_SERVER_URL}`);
+    console.log(`🗣️ Idioma: ${lang}`);
+    console.log(`💬 Texto (${text.length} caracteres):`);
+    console.log(text);
+    console.log("──────────────────────────────────────────────");
 
     const pc = new wrtc.RTCPeerConnection();
     const channel = pc.createDataChannel("tts");
@@ -22,12 +29,14 @@ export async function sendTextViaWebRTC(text, lang = "es", sessionId = "default"
     channel.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data);
-        if (msg.event === "done") {
-          console.log("[WebRTC] ✅ Voz procesada correctamente");
+        if (msg.event === "audio_chunk") {
+          console.log(`[WebRTC] 🎧 Chunk recibido (${msg.audio?.length || 0} bytes base64)`);
+        } else if (msg.event === "done") {
+          console.log("[WebRTC] ✅ Servidor completó transmisión de audio");
           pc.close();
         }
       } catch (err) {
-        console.error("[WebRTC] ❌ Error al recibir mensaje:", err);
+        console.error("[WebRTC] ❌ Error procesando mensaje:", err);
       }
     };
 
