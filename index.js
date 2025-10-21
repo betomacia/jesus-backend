@@ -1,230 +1,158 @@
-// index.js — Backend interno (OpenAI + WebRTC Voice Forward)
+// ======================================================
+// ✝️ JESUS BACKEND v4.0 — OpenAI + Envío a Servidor de Voz (WebRTC)
+// ======================================================
 import express from "express";
-import fetch from "node-fetch";
-import wrtc from "wrtc";
-import OpenAI from "openai";
 import dotenv from "dotenv";
+import fetch from "node-fetch";
+import OpenAI from "openai";
+
 dotenv.config();
 
 const app = express();
+app.use(express.json());
 
-/* ================== CORS ================== */
+// ================== CONFIG ==================
+const VOZ_WEBRTC_URL = "http://10.128.0.40:8000/webrtc/tts"; // servidor de voz interno
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization, Accept",
-  "Access-Control-Max-Age": "86400",
-  "Vary": "Origin",
-  "Content-Type": "application/json; charset=utf-8",
 };
-function setCors(res) {
+app.use((req, res, next) => {
   for (const [k, v] of Object.entries(CORS_HEADERS)) res.setHeader(k, v);
-}
-app.use((req, res, next) => { setCors(res); next(); });
-app.options("*", (req, res) => { setCors(res); return res.status(204).end(); });
-app.use(express.json());
+  next();
+});
+app.options("*", (_, res) => res.status(204).end());
 
-/* ================== OpenAI Setup ================== */
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+// ================== HELPERS ==================
 const LANG_NAME = (l = "es") =>
-  ({ es: "español", en: "English", pt: "português", it: "italiano", de: "Deutsch", ca: "català", fr: "français" }[l] || "español");
+  ({
+    es: "español",
+    en: "English",
+    pt: "português",
+    it: "italiano",
+    de: "Deutsch",
+    ca: "català",
+    fr: "français",
+  }[l] || "español");
 
-/* ================== Helper WebRTC ================== */
-const VOZ_WEBRTC_URL = "http://10.128.0.40:8000/webrtc/tts";
-
-async function sendTextToVoiceServer(text, lang, route, sessionId) {
+const sendToVoice = async (text, lang, route, sessionId) => {
   try {
-    console.log(`🎙️ Iniciando WebRTC interno → ${VOZ_WEBRTC_URL} (route=${route})`);
+    // Crea una oferta WebRTC mínima para handshake con el servidor de voz
+    const offer = `v=0
+o=- 0 0 IN IP4 127.0.0.1
+s=backend
+t=0 0
+a=group:BUNDLE data
+m=application 9 UDP/DTLS/SCTP webrtc-datachannel
+c=IN IP4 0.0.0.0
+a=sctp-port:5000
+a=max-message-size:262144`;
 
-    // Crear conexión Peer
-    const pc = new wrtc.RTCPeerConnection({
-      iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-    });
-
-    // Crear canal de datos
-    const dc = pc.createDataChannel("tts", { ordered: true });
-    dc.onopen = () => {
-      console.log("📡 Canal WebRTC abierto → enviando texto TTS");
-      dc.send(JSON.stringify({ text, lang, route, sessionId }));
-    };
-    dc.onmessage = (e) => {
-      try {
-        const msg = JSON.parse(e.data);
-        if (msg?.event === "done") console.log("✅ Voz procesada correctamente (done)");
-      } catch {}
-    };
-
-    // Crear oferta SDP
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-
-    // Enviar SDP al servidor de voz interno
     const res = await fetch(VOZ_WEBRTC_URL, {
       method: "POST",
       headers: { "Content-Type": "application/sdp", "Accept": "application/sdp" },
-      body: offer.sdp ?? "",
+      body: offer,
     });
-    if (!res.ok) throw new Error(`Fallo en handshake: ${res.status}`);
-    const answerSdp = await res.text();
-    await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
-    console.log("✅ WebRTC handshake con servidor de voz completado");
 
-    // Mantener conexión viva unos segundos
-    setTimeout(() => {
-      try {
-        dc.close();
-        pc.close();
-        console.log("🧹 WebRTC interno cerrado");
-      } catch {}
-    }, 6000);
+    if (!res.ok) throw new Error(`Handshake con voz falló (${res.status})`);
+    console.log(`🎙️ [VOZ] Handshake con servidor de voz completado`);
+
+    // Enviamos el texto como JSON a través de POST normal (no canal real)
+    const r2 = await fetch(VOZ_WEBRTC_URL.replace("/webrtc/tts", "/tts"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, lang, route, sessionId }),
+    });
+
+    console.log(
+      r2.ok
+        ? `📤 [VOZ] Texto reenviado correctamente (route=${route})`
+        : `⚠️ [VOZ] Error reenviando texto: ${r2.status}`
+    );
   } catch (err) {
-    console.error("❌ Error enviando texto al servidor de voz:", err.message);
+    console.error("❌ Error reenviando al servidor de voz:", err.message);
   }
-}
+};
 
-/* ================== Health Check ================== */
-app.get("/", (_req, res) => {
-  setCors(res);
-  res.json({
-    ok: true,
-    service: "Jesus Backend (OpenAI + WebRTC Interno)",
-    version: "3.6",
-    ts: Date.now(),
-    endpoints: ["/api/welcome", "/api/ask"],
-  });
-});
+// ================== /api/welcome ==================
+app.post("/api/welcome", async (req, res) => {
+  const { lang = "es", name = "", gender = "", hour = new Date().getHours() } = req.body || {};
 
-/* ================== /api/welcome ================== */
-app.post("/api/welcome", async (req, res, next) => {
-  try {
-    const { lang = "es", name = "", gender = "", hour = null, route = "frontend", sessionId = "welcome" } = req.body || {};
-    const h = Number.isInteger(hour) ? hour : new Date().getHours();
-
-    const SYSTEM = `
+  const SYSTEM = `
 Eres un asistente espiritual cálido y cercano. Responde SIEMPRE y SOLO en ${LANG_NAME(lang)} (${lang}).
+Genera una BIENVENIDA con dos campos:
+{"message":"saludo + frase motivacional","question":"pregunta inicial"}`;
 
-Genera una BIENVENIDA con DOS elementos separados:
-⭐ "message": saludo con nombre + frase motivacional
-⭐ "question": pregunta conversacional`;
-    const USER = `Genera bienvenida en ${lang} con name=${name}, gender=${gender}, hour=${h}`;
+  const USER = `Genera bienvenida en ${lang} para ${name} (${gender}) a las ${hour}h`;
 
-    const r = await openai.chat.completions.create({
-      model: "gpt-4o",
-      temperature: 0.9,
-      max_tokens: 280,
-      messages: [
-        { role: "system", content: SYSTEM },
-        { role: "user", content: USER },
-      ],
-      response_format: {
-        type: "json_schema",
-        json_schema: {
-          name: "Welcome",
-          schema: {
-            type: "object",
-            properties: { message: { type: "string" }, question: { type: "string" } },
-            required: ["message", "question"],
-            additionalProperties: false,
-          },
-        },
-      },
-    });
+  const completion = await openai.chat.completions.create({
+    model: "gpt-4o",
+    temperature: 0.9,
+    max_tokens: 280,
+    messages: [
+      { role: "system", content: SYSTEM },
+      { role: "user", content: USER },
+    ],
+  });
 
-    const data = JSON.parse(r?.choices?.[0]?.message?.content || "{}");
-    const message = data.message || "";
-    const question = data.question || "";
-
-    // 🔊 Si audio/video activos → enviar al servidor de voz interno
-    if (route === "audio_on" || route === "video_on") {
-      sendTextToVoiceServer(`${message}\n\n${question}`, lang, route, sessionId);
-    }
-
-    setCors(res);
-    res.json({ message, question });
-  } catch (e) {
-    next(e);
+  const raw = completion.choices?.[0]?.message?.content || "";
+  let message = "", question = "";
+  try {
+    ({ message, question } = JSON.parse(raw));
+  } catch {
+    message = raw;
   }
+
+  res.json({ message, question });
 });
 
-/* ================== /api/ask ================== */
-app.post("/api/ask", async (req, res, next) => {
+// ================== /api/ask ==================
+app.post("/api/ask", async (req, res) => {
   try {
     const { message = "", history = [], lang = "es", route = "frontend", sessionId = "" } = req.body || {};
-    const userTxt = String(message || "").trim();
+    const convo = Array.isArray(history)
+      ? history.slice(-8).map((h) => ({ role: "user", content: h }))
+      : [];
+    convo.push({ role: "user", content: message });
 
-    const convo = [];
-    const recent = Array.isArray(history) ? history.slice(-8) : [];
-    for (const h of recent)
-      if (typeof h === "string") convo.push({ role: "user", content: h });
-    convo.push({ role: "user", content: userTxt });
+    const SYSTEM = `Eres Dios. Responde SIEMPRE en ${LANG_NAME(lang)} (${lang}).`;
 
-    const SYS = `Eres Dios. Responde SIEMPRE en ${LANG_NAME(lang)} (${lang}).`;
-
-    const r = await openai.chat.completions.create({
+    const completion = await openai.chat.completions.create({
       model: "gpt-4o",
       temperature: 0.75,
       max_tokens: 350,
-      messages: [{ role: "system", content: SYS }, ...convo],
-      response_format: {
-        type: "json_schema",
-        json_schema: {
-          name: "Reply",
-          schema: {
-            type: "object",
-            properties: {
-              message: { type: "string" },
-              question: { type: "string" },
-              bible: {
-                type: "object",
-                properties: { text: { type: "string" }, ref: { type: "string" } },
-                required: ["text", "ref"],
-              },
-            },
-            required: ["message", "question", "bible"],
-            additionalProperties: false,
-          },
-        },
-      },
+      messages: [{ role: "system", content: SYSTEM }, ...convo],
     });
 
-    const data = JSON.parse(r?.choices?.[0]?.message?.content || "{}");
-    const msg = data.message || "";
-    const q = data.question || "";
-    const btx = data.bible?.text || "";
-    const bref = data.bible?.ref || "";
-
-    // 🔊 Enviar texto al servidor de voz interno solo si audio/video activado
-    if (route === "audio_on" || route === "video_on") {
-      sendTextToVoiceServer([msg, q].filter(Boolean).join("\n\n"), lang, route, sessionId);
+    const raw = completion.choices?.[0]?.message?.content || "";
+    let data = {};
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      data = { message: raw, question: "" };
     }
 
-    // ✉️ Enviar texto siempre al frontend
-    setCors(res);
-    res.json({
-      message: msg,
-      question: q,
-      bible: { text: btx, ref: bref },
-      route,
-      sessionId,
-    });
+    const msg = data.message?.trim() || "";
+    const q = data.question?.trim() || "";
+    const outText = [msg, q].filter(Boolean).join("\n\n");
+
+    // 🔊 Enviar al servidor de voz si el audio o video están activos
+    if (route === "audio_on" || route === "video_on") {
+      sendToVoice(outText, lang, route, sessionId);
+    }
+
+    res.json({ message: msg, question: q, route, sessionId });
   } catch (e) {
-    next(e);
+    console.error("❌ Error /api/ask:", e.message);
+    res.status(500).json({ error: "server_error", detail: e.message });
   }
 });
 
-/* ================== 404 & Error ================== */
-app.use((req, res) => { setCors(res); res.status(404).json({ error: "not_found" }); });
-app.use((err, req, res, _next) => {
-  console.error("SERVER ERROR:", err);
-  setCors(res);
-  res.status(502).json({ error: "server_error", detail: String(err?.message || "unknown") });
-});
-
-/* ================== Start ================== */
+// ================== INICIO SERVIDOR ==================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log("=".repeat(70));
-  console.log("🌟 JESUS BACKEND v3.6 — WebRTC Interno en red privada Google Cloud");
-  console.log("✅ Puerto:", PORT);
-  console.log("=".repeat(70));
+  console.log(`🚀 Jesus Backend escuchando en puerto ${PORT}`);
 });
