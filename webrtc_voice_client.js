@@ -9,10 +9,8 @@ const VOICE_SERVER_URL = "http://10.128.0.40:8000/webrtc/tts";
  */
 export async function sendTextViaWebRTC(text, lang = "es", sessionId = "default") {
   return new Promise(async (resolve, reject) => {
-    const timeout = setTimeout(() => {
-      reject(new Error("WebRTC timeout - servidor no respondió en 30s"));
-      pc.close();
-    }, 30000);
+    let pc = null;
+    let timeoutId = null;
 
     try {
       console.log("──────────────────────────────────────────────");
@@ -23,9 +21,16 @@ export async function sendTextViaWebRTC(text, lang = "es", sessionId = "default"
       console.log(text);
       console.log("──────────────────────────────────────────────");
 
-      const pc = new wrtc.RTCPeerConnection({
+      pc = new wrtc.RTCPeerConnection({
         iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
       });
+
+      // ✅ Ahora pc está definido, podemos crear el timeout
+      timeoutId = setTimeout(() => {
+        console.error("[WebRTC] ⏱️ Timeout - servidor no respondió en 30s");
+        if (pc) pc.close();
+        reject(new Error("WebRTC timeout - servidor no respondió en 30s"));
+      }, 30000);
 
       let dataChannel = null;
       let channelReady = false;
@@ -43,20 +48,20 @@ export async function sendTextViaWebRTC(text, lang = "es", sessionId = "default"
         
         // ⏱️ PEQUEÑO DELAY para asegurar que el servidor esté listo
         setTimeout(() => {
-          if (dataChannel.readyState === "open") {
+          if (dataChannel && dataChannel.readyState === "open") {
             const payload = { text, lang, route: "audio_on", sessionId };
             console.log(`[WebRTC] 📤 ENVIANDO payload:`, JSON.stringify(payload).substring(0, 100) + "...");
             dataChannel.send(JSON.stringify(payload));
             console.log(`[WebRTC] ✅ Mensaje enviado exitosamente`);
           } else {
-            console.error(`[WebRTC] ❌ Canal no está abierto: ${dataChannel.readyState}`);
+            console.error(`[WebRTC] ❌ Canal no está abierto: ${dataChannel?.readyState}`);
           }
         }, 100); // 100ms de espera
       };
 
       dataChannel.onerror = (error) => {
         console.error("[WebRTC] ❌ Error en DataChannel:", error);
-        clearTimeout(timeout);
+        if (timeoutId) clearTimeout(timeoutId);
         reject(error);
       };
 
@@ -73,15 +78,15 @@ export async function sendTextViaWebRTC(text, lang = "es", sessionId = "default"
             console.log(`[WebRTC] 🎧 Chunk de audio (${msg.audio?.length || 0} bytes)`);
           } else if (msg.event === "done") {
             console.log("[WebRTC] ✅ Servidor completó transmisión");
-            clearTimeout(timeout);
+            if (timeoutId) clearTimeout(timeoutId);
             setTimeout(() => {
-              pc.close();
+              if (pc) pc.close();
               resolve({ success: true, sessionId });
             }, 500);
           } else if (msg.event === "error") {
             console.error("[WebRTC] ❌ Error del servidor:", msg.message);
-            clearTimeout(timeout);
-            pc.close();
+            if (timeoutId) clearTimeout(timeoutId);
+            if (pc) pc.close();
             reject(new Error(msg.message));
           }
         } catch (err) {
@@ -93,7 +98,7 @@ export async function sendTextViaWebRTC(text, lang = "es", sessionId = "default"
       pc.onconnectionstatechange = () => {
         console.log(`[WebRTC] 🔄 Estado de conexión: ${pc.connectionState}`);
         if (pc.connectionState === "failed" || pc.connectionState === "closed") {
-          clearTimeout(timeout);
+          if (timeoutId) clearTimeout(timeoutId);
           reject(new Error(`Conexión falló: ${pc.connectionState}`));
         }
       };
@@ -153,7 +158,8 @@ export async function sendTextViaWebRTC(text, lang = "es", sessionId = "default"
 
     } catch (err) {
       console.error("❌ [WebRTC] Error crítico:", err.message);
-      clearTimeout(timeout);
+      if (timeoutId) clearTimeout(timeoutId);
+      if (pc) pc.close();
       reject(err);
     }
   });
