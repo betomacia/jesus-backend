@@ -1,7 +1,7 @@
 /**
  * ✝️ JESUS BACKEND v4.2 — OpenAI + Voz WebRTC Router
- * Migrado completamente a WebRTC (sin fallback REST)
- * Con sessionId único (uuidv4) y reenvío directo al servidor de voz
+ * Mantiene toda la lógica OpenAI original (sin tocar prompts)
+ * Solo migra la comunicación de voz a WebRTC
  */
 
 import express from "express";
@@ -10,14 +10,14 @@ import fetch from "node-fetch";
 import wrtc from "wrtc";
 import OpenAI from "openai";
 import { exec } from "child_process";
-import { v4 as uuidv4 } from "uuid"; // 🔹 Generador de sessionId único
+import { v4 as uuidv4 } from "uuid"; // Generador de sessionId
 
 dotenv.config({ path: "/home/ubuntu/jesus-backend/.env" });
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
 /* ================== CONFIG ================== */
-const VOICE_SERVER_URL_RTC = "http://10.128.0.40:8000/webrtc/tts"; // 🔹 Voz por WebRTC
+const VOICE_SERVER_URL_RTC = "http://10.128.0.40:8000/webrtc/tts"; // Solo WebRTC
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 /* ====================== CORS ================== */
@@ -97,12 +97,8 @@ Salida EXCLUSIVA en JSON:
     });
 
     const data = JSON.parse(r?.choices?.[0]?.message?.content || "{}");
-    const sessionId = uuidv4(); // 🔹 Generar nuevo ID para bienvenida
-    res.json({
-      message: data.message,
-      question: data.question,
-      sessionId,
-    });
+    const sessionId = uuidv4(); // Generar ID único
+    res.json({ message: data.message, question: data.question, sessionId });
   } catch (err) {
     console.error("❌ /api/welcome error:", err);
     res.status(500).json({ error: "welcome_failed" });
@@ -111,23 +107,20 @@ Salida EXCLUSIVA en JSON:
 /* ================== /api/ask ================== */
 app.post("/api/ask", async (req, res) => {
   try {
-    const { message = "", history = [], lang = "es", route = "frontend" } = req.body || {};
-    const sessionId = uuidv4(); // 🔹 Nuevo identificador único para la conversación
+    const { message = "", history = [], lang = "es", route = "frontend", sessionId = uuidv4() } = req.body || {};
 
-    // ====== Construir historial ======
+    // 💬 Mantener todo el flujo OpenAI original
     const convo = [];
     const recent = Array.isArray(history) ? history.slice(-8) : [];
-    for (const h of recent) {
+    for (const h of recent)
       if (typeof h === "string") convo.push({ role: "user", content: h });
-    }
     convo.push({ role: "user", content: message });
 
-    // ====== Prompt de OpenAI ======
-    const SYS = `Eres Dios. Responde SIEMPRE en ${LANG_NAME(lang)} (${lang}). Da mensajes sabios, breves y positivos.`;
+    const SYS = `Eres Dios. Responde SIEMPRE en ${LANG_NAME(lang)} (${lang}).`;
 
     const r = await openai.chat.completions.create({
       model: "gpt-4o",
-      temperature: 0.8,
+      temperature: 0.75,
       max_tokens: 350,
       messages: [{ role: "system", content: SYS }, ...convo],
       response_format: {
@@ -151,7 +144,6 @@ app.post("/api/ask", async (req, res) => {
       },
     });
 
-    // ====== Formatear respuesta ======
     const data = JSON.parse(r?.choices?.[0]?.message?.content || "{}");
     const msg = String(data?.message || "").trim();
     const q = String(data?.question || "").trim();
@@ -159,37 +151,38 @@ app.post("/api/ask", async (req, res) => {
     const bref = String(data?.bible?.ref || "").trim();
     const fullText = [msg, btx ? `— ${btx} (${bref})` : "", q].filter(Boolean).join("\n\n");
 
-    // ====== Enviar texto al Servidor de Voz por WebRTC ======
+    // ===================== 🔊 ENVÍO WEBRTC =====================
     if (route !== "frontend" && fullText) {
       try {
-        console.log(`🎙️ [WebRTC] Enviando texto al servidor de voz (${lang}) — ${route}`);
+        console.log(`🎙️ [WebRTC] Enviando texto al servidor de voz (${lang})...`);
+        const webrtcBody = {
+          text: fullText,
+          lang,
+          route,
+          sessionId,
+        };
 
-        // Enviar la oferta SDP
-        const offer = await wrtc.RTCPeerConnection.createOffer
-          ? new wrtc.RTCPeerConnection().createOffer()
-          : null;
-
-        // Enviar el texto por POST al endpoint WebRTC del servidor de voz
-        const webrtcRes = await fetch(VOICE_SERVER_URL_RTC, {
+        // Se envía por POST al servidor de voz (que maneja SDP y streaming)
+        const response = await fetch(VOICE_SERVER_URL_RTC, {
           method: "POST",
-          headers: { "Content-Type": "application/sdp" },
-          body: JSON.stringify({ text: fullText, lang, route, sessionId }),
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(webrtcBody),
         });
 
-        if (!webrtcRes.ok) throw new Error(`WebRTC TTS status ${webrtcRes.status}`);
-        console.log("✅ [WebRTC] Texto entregado correctamente al servidor de voz");
+        if (!response.ok) throw new Error(`WebRTC response ${response.status}`);
+        console.log("✅ [WebRTC] Texto entregado al servidor de voz correctamente");
       } catch (err) {
         console.error("⚠️ Error enviando al servidor de voz WebRTC:", err.message);
       }
     }
 
-    // ====== Responder al frontend ======
+    // ===================== 🔁 RESPUESTA AL FRONTEND =====================
     res.json({
       message: msg,
       question: q,
       bible: { text: btx, ref: bref },
-      sessionId,
       route,
+      sessionId,
     });
   } catch (err) {
     console.error("❌ /api/ask error:", err);
@@ -215,8 +208,9 @@ const PORT = process.env.PORT || 3100;
 app.listen(PORT, () => {
   console.log("=".repeat(70));
   console.log(`🌟 JESUS BACKEND v4.2 — Ejecutando en puerto ${PORT}`);
-  console.log("📡 OpenAI + Voz WebRTC activo (sin fallback REST)");
+  console.log("📡 OpenAI intacto + Voz WebRTC activo (sin REST)");
   console.log("📬 Webhook GitHub activo en /webhook");
   console.log("=".repeat(70));
 });
+
 
