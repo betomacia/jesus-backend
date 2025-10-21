@@ -25,12 +25,15 @@ export async function sendTextViaWebRTC(text, lang = "es", sessionId = "default"
         iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
       });
 
-      // ✅ Ahora pc está definido, podemos crear el timeout
+      // ⏱️ Timeout solo para detectar conexiones muertas (más largo)
       timeoutId = setTimeout(() => {
-        console.error("[WebRTC] ⏱️ Timeout - servidor no respondió en 30s");
-        if (pc) pc.close();
-        reject(new Error("WebRTC timeout - servidor no respondió en 30s"));
-      }, 30000);
+        console.error("[WebRTC] ⏱️ Timeout - servidor no respondió en 45s");
+        if (pc && pc.signalingState !== "closed") {
+          pc.close();
+        }
+        pc = null;
+        reject(new Error("WebRTC timeout - servidor no respondió en 45s"));
+      }, 45000);
 
       let dataChannel = null;
       let channelReady = false;
@@ -62,6 +65,10 @@ export async function sendTextViaWebRTC(text, lang = "es", sessionId = "default"
       dataChannel.onerror = (error) => {
         console.error("[WebRTC] ❌ Error en DataChannel:", error);
         if (timeoutId) clearTimeout(timeoutId);
+        if (pc && pc.signalingState !== "closed") {
+          pc.close();
+        }
+        pc = null;
         reject(error);
       };
 
@@ -86,7 +93,10 @@ export async function sendTextViaWebRTC(text, lang = "es", sessionId = "default"
           } else if (msg.event === "error") {
             console.error("[WebRTC] ❌ Error del servidor:", msg.message);
             if (timeoutId) clearTimeout(timeoutId);
-            if (pc) pc.close();
+            if (pc && pc.signalingState !== "closed") {
+              pc.close();
+            }
+            pc = null;
             reject(new Error(msg.message));
           }
         } catch (err) {
@@ -96,10 +106,11 @@ export async function sendTextViaWebRTC(text, lang = "es", sessionId = "default"
 
       // ✅ Manejar cambios de estado de conexión
       pc.onconnectionstatechange = () => {
-        console.log(`[WebRTC] 🔄 Estado de conexión: ${pc.connectionState}`);
-        if (pc.connectionState === "failed" || pc.connectionState === "closed") {
+        console.log(`[WebRTC] 🔄 Estado de conexión: ${pc?.connectionState || 'null'}`);
+        if (pc && (pc.connectionState === "failed" || pc.connectionState === "closed")) {
           if (timeoutId) clearTimeout(timeoutId);
-          reject(new Error(`Conexión falló: ${pc.connectionState}`));
+          pc = null;
+          reject(new Error(`Conexión falló: ${pc?.connectionState}`));
         }
       };
 
@@ -118,19 +129,22 @@ export async function sendTextViaWebRTC(text, lang = "es", sessionId = "default"
       await pc.setLocalDescription(offer);
       console.log("[WebRTC] 📝 Oferta local establecida");
 
-      // ⏱️ Esperar a que ICE gathering termine
-      await new Promise((res) => {
-        if (pc.iceGatheringState === "complete") {
-          res();
-        } else {
-          pc.onicegatheringstatechange = () => {
-            if (pc.iceGatheringState === "complete") {
-              res();
-            }
-          };
-        }
-      });
-      console.log("[WebRTC] 🧊 ICE gathering completado, enviando oferta al servidor...");
+      // ⏱️ Esperar a que ICE gathering termine (con timeout de 3s)
+      await Promise.race([
+        new Promise((res) => {
+          if (pc.iceGatheringState === "complete") {
+            res();
+          } else {
+            pc.onicegatheringstatechange = () => {
+              if (pc.iceGatheringState === "complete") {
+                res();
+              }
+            };
+          }
+        }),
+        new Promise((res) => setTimeout(res, 3000)) // Timeout de 3s
+      ]);
+      console.log("[WebRTC] 🧊 ICE gathering completado/timeout, enviando oferta al servidor...");
 
       // ✅ Enviar oferta al servidor
       const res = await fetch(VOICE_SERVER_URL, {
@@ -139,7 +153,7 @@ export async function sendTextViaWebRTC(text, lang = "es", sessionId = "default"
           "Content-Type": "application/sdp",
           "Accept": "application/sdp"
         },
-        body: pc.localDescription.sdp,
+        body: pc.localDescription?.sdp || "",
       });
 
       if (!res.ok) {
@@ -150,16 +164,23 @@ export async function sendTextViaWebRTC(text, lang = "es", sessionId = "default"
       const answerSdp = await res.text();
       console.log("[WebRTC] 📥 Respuesta SDP recibida del servidor");
       
-      await pc.setRemoteDescription({
-        type: "answer",
-        sdp: answerSdp
-      });
-      console.log("[WebRTC] ✅ Respuesta remota establecida - conexión en proceso");
+      if (pc.signalingState !== "closed") {
+        await pc.setRemoteDescription({
+          type: "answer",
+          sdp: answerSdp
+        });
+        console.log("[WebRTC] ✅ Respuesta remota establecida - conexión en proceso");
+      } else {
+        console.warn("[WebRTC] ⚠️ Conexión cerrada antes de establecer respuesta remota");
+      }
 
     } catch (err) {
       console.error("❌ [WebRTC] Error crítico:", err.message);
       if (timeoutId) clearTimeout(timeoutId);
-      if (pc) pc.close();
+      if (pc && pc.signalingState !== "closed") {
+        pc.close();
+      }
+      pc = null;
       reject(err);
     }
   });
