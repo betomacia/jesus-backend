@@ -1,7 +1,6 @@
 /**
- * ✝️ JESUS BACKEND v4.0 — OpenAI + WebRTC Forward
- * Comunicación directa con el servidor de voz (10.128.0.40:8000/webrtc/tts)
- * y servidor de avatar (10.128.0.51:8080)
+ * ✝️ JESUS BACKEND v4.1 — OpenAI + Voz REST/RTC Router
+ * Incluye fallback REST temporal para pruebas directas de TTS
  */
 
 import express from "express";
@@ -15,7 +14,8 @@ const app = express();
 app.use(express.json({ limit: "2mb" }));
 
 /* ================== CONFIG ================== */
-const VOICE_SERVER_URL = "http://10.128.0.40:8000/webrtc/tts"; // WebRTC TTS interno
+const VOICE_SERVER_URL_REST = "http://10.128.0.40:8000/tts";      // Fallback clásico
+const VOICE_SERVER_URL_RTC = "http://10.128.0.40:8000/webrtc/tts"; // Original WebRTC
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 /* ====================== CORS ================== */
@@ -43,10 +43,11 @@ const LANG_NAME = (l = "es") =>
 app.get("/", (_req, res) =>
   res.json({
     ok: true,
-    service: "Jesus Backend (OpenAI + WebRTC)",
-    version: "4.0",
+    service: "Jesus Backend (OpenAI + Voz)",
+    version: "4.1",
+    voice_server: VOICE_SERVER_URL_RTC,
+    fallback: VOICE_SERVER_URL_REST,
     endpoints: ["/api/welcome", "/api/ask"],
-    voice: VOICE_SERVER_URL,
   })
 );
 
@@ -147,33 +148,27 @@ app.post("/api/ask", async (req, res) => {
     const bref = String(data?.bible?.ref || "").trim();
     const fullText = [msg, btx ? `— ${btx} (${bref})` : "", q].filter(Boolean).join("\n\n");
 
-    // 🔊 Reenvío al servidor de voz si aplica
+    // 🔊 ENVÍO AL SERVIDOR DE VOZ SI APLICA
     if (route !== "frontend" && fullText) {
       try {
-        const pc = new wrtc.RTCPeerConnection();
-        const dc = pc.createDataChannel("tts");
+        console.log(`🎙️ Intentando enviar texto al servidor de voz (${lang})...`);
 
-        dc.onopen = () => {
-          console.log(`📡 Canal abierto → enviando texto al servidor de voz`);
-          dc.send(JSON.stringify({ text: fullText, lang, route, sessionId }));
-        };
-
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-
-        const response = await fetch(VOICE_SERVER_URL, {
+        // ==== REST Fallback Test ====
+        const ttsRes = await fetch(VOICE_SERVER_URL_REST, {
           method: "POST",
-          headers: { "Content-Type": "application/sdp" },
-          body: offer.sdp,
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: fullText, lang }),
         });
 
-        const answerSdp = await response.text();
-        await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
+        if (!ttsRes.ok) throw new Error(`TTS REST status ${ttsRes.status}`);
 
-        // Cerrar conexión tras 20s
-        setTimeout(() => pc.close(), 20000);
+        const audioArrayBuffer = await ttsRes.arrayBuffer();
+        console.log(`✅ Audio recibido desde servidor de voz (${audioArrayBuffer.byteLength} bytes)`);
+
+        // opcional: podrías guardar o enviar el audio al frontend en el futuro
+
       } catch (err) {
-        console.error("⚠️ Error reenviando al servidor de voz:", err.message);
+        console.error("⚠️ Error reenviando al servidor de voz REST:", err.message);
       }
     }
 
@@ -194,8 +189,7 @@ app.post("/api/ask", async (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("=".repeat(70));
-  console.log(`🌟 JESUS BACKEND v4.0 — Ejecutando en puerto ${PORT}`);
-  console.log("📡 OpenAI + WebRTC Voice bridge activo");
+  console.log(`🌟 JESUS BACKEND v4.1 — Ejecutando en puerto ${PORT}`);
+  console.log("📡 OpenAI + Voz REST bridge activo (fallback habilitado)");
   console.log("=".repeat(70));
 });
-
