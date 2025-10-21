@@ -10,7 +10,7 @@ import wrtc from "wrtc";
 import OpenAI from "openai";
 import { exec } from "child_process";
 
-dotenv.config();
+dotenv.config({ path: "/home/ubuntu/jesus-backend/.env" });
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
@@ -201,4 +201,5 @@ app.listen(PORT, () => {
   console.log("📬 Webhook GitHub activo en /webhook");
   console.log("=".repeat(70));
 });
+
 
