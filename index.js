@@ -1,23 +1,23 @@
 /**
- * ✝️ JESUS BACKEND v4.2 — OpenAI + Voz WebRTC Router
+ * ✝️ JESUS BACKEND v4.3 — OpenAI + Voz WebRTC Router
  * Mantiene toda la lógica OpenAI original (sin tocar prompts)
- * Solo migra la comunicación de voz a WebRTC
+ * Solo migra la comunicación de voz a WebRTC real (DataChannel)
  */
 
 import express from "express";
 import dotenv from "dotenv";
 import fetch from "node-fetch";
-import wrtc from "wrtc";
 import OpenAI from "openai";
 import { exec } from "child_process";
-import { v4 as uuidv4 } from "uuid"; // Generador de sessionId
+import { v4 as uuidv4 } from "uuid";
+import { sendTextViaWebRTC } from "./webrtc_voice_client.js"; // ✅ nuevo import WebRTC real
 
 dotenv.config({ path: "/home/ubuntu/jesus-backend/.env" });
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
 /* ================== CONFIG ================== */
-const VOICE_SERVER_URL_RTC = "http://10.128.0.40:8000/webrtc/tts"; // Solo WebRTC
+const VOICE_SERVER_URL_RTC = "http://10.128.0.40:8000/webrtc/tts";
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 /* ====================== CORS ================== */
@@ -46,7 +46,7 @@ app.get("/", (_req, res) =>
   res.json({
     ok: true,
     service: "Jesus Backend (OpenAI + Voz WebRTC)",
-    version: "4.2",
+    version: "4.3",
     voice_server: VOICE_SERVER_URL_RTC,
     endpoints: ["/api/welcome", "/api/ask", "/webhook"],
   })
@@ -97,7 +97,7 @@ Salida EXCLUSIVA en JSON:
     });
 
     const data = JSON.parse(r?.choices?.[0]?.message?.content || "{}");
-    const sessionId = uuidv4(); // Generar ID único
+    const sessionId = uuidv4();
     res.json({ message: data.message, question: data.question, sessionId });
   } catch (err) {
     console.error("❌ /api/welcome error:", err);
@@ -109,7 +109,7 @@ app.post("/api/ask", async (req, res) => {
   try {
     const { message = "", history = [], lang = "es", route = "frontend", sessionId = uuidv4() } = req.body || {};
 
-    // 💬 Mantener todo el flujo OpenAI original
+    // 💬 Mantener flujo OpenAI intacto
     const convo = [];
     const recent = Array.isArray(history) ? history.slice(-8) : [];
     for (const h of recent)
@@ -151,26 +151,11 @@ app.post("/api/ask", async (req, res) => {
     const bref = String(data?.bible?.ref || "").trim();
     const fullText = [msg, btx ? `— ${btx} (${bref})` : "", q].filter(Boolean).join("\n\n");
 
-    // ===================== 🔊 ENVÍO WEBRTC =====================
+    // ===================== 🔊 ENVÍO WEBRTC REAL =====================
     if (route !== "frontend" && fullText) {
+      console.log(`🎙️ [WebRTC] Enviando texto al servidor de voz (${lang})...`);
       try {
-        console.log(`🎙️ [WebRTC] Enviando texto al servidor de voz (${lang})...`);
-        const webrtcBody = {
-          text: fullText,
-          lang,
-          route,
-          sessionId,
-        };
-
-        // Se envía por POST al servidor de voz (que maneja SDP y streaming)
-        const response = await fetch(VOICE_SERVER_URL_RTC, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(webrtcBody),
-        });
-
-        if (!response.ok) throw new Error(`WebRTC response ${response.status}`);
-        console.log("✅ [WebRTC] Texto entregado al servidor de voz correctamente");
+        await sendTextViaWebRTC(fullText, lang, sessionId);
       } catch (err) {
         console.error("⚠️ Error enviando al servidor de voz WebRTC:", err.message);
       }
@@ -189,7 +174,6 @@ app.post("/api/ask", async (req, res) => {
     res.status(500).json({ error: "ask_failed" });
   }
 });
-
 /* ================== GITHUB AUTO-UPDATE ================== */
 app.post("/webhook", async (req, res) => {
   console.log("🚀 Webhook recibido desde GitHub — iniciando actualización...");
@@ -207,10 +191,8 @@ app.post("/webhook", async (req, res) => {
 const PORT = process.env.PORT || 3100;
 app.listen(PORT, () => {
   console.log("=".repeat(70));
-  console.log(`🌟 JESUS BACKEND v4.2 — Ejecutando en puerto ${PORT}`);
-  console.log("📡 OpenAI intacto + Voz WebRTC activo (sin REST)");
+  console.log(`🌟 JESUS BACKEND v4.3 — Ejecutando en puerto ${PORT}`);
+  console.log("📡 OpenAI intacto + Voz WebRTC activo");
   console.log("📬 Webhook GitHub activo en /webhook");
   console.log("=".repeat(70));
 });
-
-
