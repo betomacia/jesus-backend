@@ -1,22 +1,19 @@
 /**
- * ✝️ JESUS BACKEND v4.4 — OpenAI + Voz WebRTC Router
- * Responde INMEDIATAMENTE al frontend, envía a voz en background
+ * ✝️ JESUS BACKEND v5.0 — OpenAI ONLY
+ * Frontend se conecta directo al servidor de voz
  */
 
 import express from "express";
 import dotenv from "dotenv";
-import fetch from "node-fetch";
 import OpenAI from "openai";
 import { exec } from "child_process";
 import { v4 as uuidv4 } from "uuid";
-import { sendTextViaWebRTC } from "./webrtc_voice_client.js";
 
 dotenv.config({ path: "/home/ubuntu/jesus-backend/.env" });
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
 /* ================== CONFIG ================== */
-const VOICE_SERVER_URL_RTC = "http://10.128.0.40:8000/webrtc/tts";
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 /* ====================== CORS ================== */
@@ -44,9 +41,9 @@ const LANG_NAME = (l = "es") =>
 app.get("/", (_req, res) =>
   res.json({
     ok: true,
-    service: "Jesus Backend (OpenAI + Voz WebRTC)",
-    version: "4.4",
-    voice_server: VOICE_SERVER_URL_RTC,
+    service: "Jesus Backend (OpenAI Only)",
+    version: "5.0",
+    note: "Frontend conecta directo a servidor de voz",
     endpoints: ["/api/welcome", "/api/ask", "/webhook"],
   })
 );
@@ -109,9 +106,9 @@ app.post("/api/ask", async (req, res) => {
   try {
     const { message = "", history = [], lang = "es", route = "frontend", sessionId = uuidv4() } = req.body || {};
 
-    console.log(`[API] 📥 Mensaje recibido con route="${route}"`);
+    console.log(`[API] 📥 Mensaje recibido (route="${route}")`);
 
-    // 💬 Mantener flujo OpenAI intacto
+    // 💬 Construir conversación
     const convo = [];
     const recent = Array.isArray(history) ? history.slice(-8) : [];
     for (const h of recent)
@@ -120,6 +117,7 @@ app.post("/api/ask", async (req, res) => {
 
     const SYS = `Eres Dios. Responde SIEMPRE en ${LANG_NAME(lang)} (${lang}).`;
 
+    // 🤖 Consultar OpenAI
     const r = await openai.chat.completions.create({
       model: "gpt-4o",
       temperature: 0.75,
@@ -151,10 +149,9 @@ app.post("/api/ask", async (req, res) => {
     const q = String(data?.question || "").trim();
     const btx = String(data?.bible?.text || "").trim();
     const bref = String(data?.bible?.ref || "").trim();
-    const fullText = [msg, btx ? `— ${btx} (${bref})` : "", q].filter(Boolean).join("\n\n");
 
-    // ===================== ✅ RESPONDER AL FRONTEND INMEDIATAMENTE =====================
-    console.log(`[API] ✅ Enviando respuesta al frontend (${fullText.length} caracteres)`);
+    // ✅ SOLO responder al frontend
+    console.log(`[API] ✅ Respondiendo al frontend (${msg.length} chars)`);
     res.json({
       message: msg,
       question: q,
@@ -162,20 +159,6 @@ app.post("/api/ask", async (req, res) => {
       route,
       sessionId,
     });
-
-    // ===================== 🔊 ENVÍO WEBRTC EN BACKGROUND (NO BLOQUEA) =====================
-    if (route !== "frontend" && fullText) {
-      console.log(`[API] 🎙️ Iniciando envío a WebRTC en background (route=${route})...`);
-      
-      // ⚡ Ejecutar en background sin await - no bloquea la respuesta
-      sendTextViaWebRTC(fullText, lang, sessionId)
-        .then(() => {
-          console.log(`[API] ✅ Audio enviado correctamente a servidor de voz`);
-        })
-        .catch((err) => {
-          console.warn(`[API] ⚠️ Error enviando audio (no crítico):`, err.message);
-        });
-    }
 
   } catch (err) {
     console.error("❌ /api/ask error:", err);
@@ -200,11 +183,8 @@ app.post("/webhook", async (req, res) => {
 const PORT = process.env.PORT || 3100;
 app.listen(PORT, () => {
   console.log("=".repeat(70));
-  console.log(`🌟 JESUS BACKEND v4.4 — Ejecutando en puerto ${PORT}`);
-  console.log("📡 OpenAI intacto + Voz WebRTC en background (no bloquea)");
+  console.log(`🌟 JESUS BACKEND v5.0 — Ejecutando en puerto ${PORT}`);
+  console.log("📡 OpenAI ONLY - Frontend conecta directo a servidor de voz");
   console.log("📬 Webhook GitHub activo en /webhook");
   console.log("=".repeat(70));
 });
-
-
-
