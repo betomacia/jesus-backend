@@ -1,0 +1,44 @@
+# Avatar Server Requirements
+# Para servidor G2 con GPU L4
+
+# Web Server
+aiohttp==3.9.1
+aiofiles==23.2.1
+
+# WebRTC
+aiortc==1.6.0
+av==11.0.0
+
+# Deep Learning
+torch==2.1.2
+torchvision==0.16.2
+torchaudio==2.1.2
+
+# Computer Vision
+opencv-python==4.9.0.80
+opencv-contrib-python==4.9.0.80
+Pillow==10.2.0
+
+# Audio Processing
+librosa==0.10.1
+soundfile==0.12.1
+scipy==1.11.4
+
+# Modelos de Avatar (instalar según necesidad)
+# LivePortrait - Estado del arte para avatares ultra-realistas
+# git+https://github.com/KwaiVGI/LivePortrait.git
+
+# SadTalker - Excelente para talking heads
+# git+https://github.com/OpenTalker/SadTalker.git
+
+# Wav2Lip - Lip sync robusto
+# git+https://github.com/Rudrabha/Wav2Lip.git
+
+# Utilidades
+numpy==1.24.3
+mediapipe==0.10.9  # Para detección facial
+face-alignment==1.4.1  # Para landmarks faciales
+resampy==0.4.2  # Para resampling de audio
+
+# Performance
+accelerate==0.25.0  # Optimización de inferencia

@@ -1,0 +1,49 @@
+# Configuración del Avatar Server
+
+server:
+  host: "0.0.0.0"
+  port: 8765
+  workers: 1  # Un worker por GPU
+
+gpu:
+  device: "cuda:0"  # GPU L4
+  mixed_precision: true  # Para mejor performance
+  compile: true  # PyTorch 2.0 compile para optimización
+
+model:
+  type: "liveportrait"  # liveportrait | sadtalker | wav2lip
+  checkpoint_path: "./models/liveportrait"
+  portrait_size: 512  # Resolución óptima para L4 (512x512)
+  batch_size: 1  # Procesamiento en tiempo real
+
+video:
+  fps: 25  # FPS para balance latencia/calidad
+  codec: "h264"
+  bitrate: 2000000  # 2 Mbps
+  resolution: [512, 512]
+
+audio:
+  sample_rate: 16000  # 16kHz suficiente para lip-sync
+  hop_length: 320  # ~20ms frames
+  n_mels: 80  # Mel-spectrogram features
+
+latency:
+  target_ms: 200  # Latencia objetivo total
+  frame_buffer: 2  # Frames en buffer
+  audio_chunk_ms: 20  # Chunks de 20ms
+
+portraits:
+  default: "./portraits/default.jpg"
+  custom_dir: "./portraits"
+  allowed_formats: [".jpg", ".jpeg", ".png"]
+
+tts:
+  provider: "elevenlabs"
+  api_key_env: "ELEVENLABS_API_KEY"
+  voice_id_env: "ELEVENLABS_VOICE_ID"
+  model: "eleven_flash_v2_5"  # Modelo de baja latencia
+
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "./logs/avatar-server.log"
