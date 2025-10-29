@@ -72,16 +72,23 @@ router.get("/status", async (_req, res) => {
 /* =========================================================
    1) CREAR STREAM
    POST /api/avatar/streams
-   Body: { portrait_id: "jesus_1" } o { portrait_path: "/path/to/portrait.jpg" }
+   Body: {
+     video_id: "jesus_default",  // ID pre-configurado
+     gesture_video: "/path/to/gestos.mp4",  // O path personalizado
+     idle_video: "/path/to/reposo.mp4",
+     use_ai: false  // Opcional
+   }
    ========================================================= */
 router.post("/streams", async (req, res) => {
   try {
-    const { portrait_id, portrait_path } = req.body || {};
+    const { video_id, gesture_video, idle_video, use_ai } = req.body || {};
 
-    // Por defecto usar el portrait de Jesús
+    // Por defecto usar videos de Jesús
     const payload = {
-      portrait_id: portrait_id || "jesus_default",
-      portrait_path: portrait_path || undefined,
+      video_id: video_id || "jesus_default",
+      gesture_video: gesture_video || undefined,
+      idle_video: idle_video || undefined,
+      use_ai: use_ai || false,  // Por defecto sin IA (más rápido)
     };
 
     const r = await fetch(`${AVATAR_SERVER_URL}/streams`, {

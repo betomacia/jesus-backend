@@ -1,4 +1,4 @@
-# Configuración del Avatar Server
+# Configuración del Avatar Server con soporte para videos MP4
 
 server:
   host: "0.0.0.0"
@@ -11,31 +11,56 @@ gpu:
   compile: true  # PyTorch 2.0 compile para optimización
 
 model:
-  type: "liveportrait"  # liveportrait | sadtalker | wav2lip
+  # OPCIONAL: Solo si quieres procesamiento adicional con IA
+  # Por defecto usa solo los videos MP4 (más rápido y realista)
+  type: "liveportrait"  # liveportrait | sadtalker | wav2lip | none
   checkpoint_path: "./models/liveportrait"
-  portrait_size: 512  # Resolución óptima para L4 (512x512)
+  enabled: false  # false = solo videos, true = con procesamiento IA
   batch_size: 1  # Procesamiento en tiempo real
 
 video:
+  # Configuración de videos de avatar
   fps: 25  # FPS para balance latencia/calidad
   codec: "h264"
   bitrate: 2000000  # 2 Mbps
-  resolution: [512, 512]
+  resolution: [512, 512]  # Resolución óptima para L4
+
+  # Directorio de videos
+  videos_dir: "./videos"
+
+  # Videos por defecto
+  default_gesture: "./videos/jesus_gestos.mp4"  # Video cuando habla
+  default_idle: "./videos/jesus_reposo.mp4"     # Video en estado neutral
+
+  # Caché de frames
+  cache_frames: 300  # ~12 segundos a 25fps
+  preload: true  # Pre-cargar frames en memoria
 
 audio:
   sample_rate: 16000  # 16kHz suficiente para lip-sync
   hop_length: 320  # ~20ms frames
   n_mels: 80  # Mel-spectrogram features
 
+  # Detección de habla
+  speaking_threshold: 0.01  # Umbral de energía para detectar habla
+  speaking_timeout_ms: 500  # Ms sin audio para considerar que dejó de hablar
+
 latency:
-  target_ms: 200  # Latencia objetivo total
+  target_ms: 150  # Latencia objetivo total (con videos es más bajo)
   frame_buffer: 2  # Frames en buffer
   audio_chunk_ms: 20  # Chunks de 20ms
 
-portraits:
-  default: "./portraits/default.jpg"
-  custom_dir: "./portraits"
-  allowed_formats: [".jpg", ".jpeg", ".png"]
+# Configuraciones de videos pre-definidos
+video_profiles:
+  jesus_default:
+    gesture_video: "./videos/jesus_gestos.mp4"
+    idle_video: "./videos/jesus_reposo.mp4"
+    description: "Avatar de Jesús estándar"
+
+  jesus_compassion:
+    gesture_video: "./videos/jesus_compassion_gestos.mp4"
+    idle_video: "./videos/jesus_compassion_reposo.mp4"
+    description: "Avatar de Jesús con expresión compasiva"
 
 tts:
   provider: "elevenlabs"

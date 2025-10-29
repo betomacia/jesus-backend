@@ -21,6 +21,9 @@ from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
 from aiortc.contrib.media import MediaPlayer, MediaRelay
 from av import VideoFrame
 
+# Importar procesador de video
+from video_processor import VideoProcessor, video_cache
+
 # Configuración de logging
 logging.basicConfig(
     level=logging.INFO,
@@ -46,43 +49,56 @@ class AvatarVideoTrack(VideoStreamTrack):
 
     kind = "video"
 
-    def __init__(self, portrait_path: str, processor):
+    def __init__(self, video_processor, ai_processor=None):
         super().__init__()
-        self.portrait_path = portrait_path
-        self.processor = processor
+        self.video_processor = video_processor
+        self.ai_processor = ai_processor
         self.counter = 0
         self.fps = 25  # FPS objetivo para baja latencia
         self._timestamp = 0
         self._start = None
 
-        # Cargar imagen portrait
-        self.portrait_img = cv2.imread(portrait_path)
-        if self.portrait_img is None:
-            raise ValueError(f"No se pudo cargar el portrait: {portrait_path}")
-
-        # Resize para optimizar procesamiento (512x512 es ideal para L4)
-        self.portrait_img = cv2.resize(self.portrait_img, (512, 512))
-        self.portrait_img = cv2.cvtColor(self.portrait_img, cv2.COLOR_BGR2RGB)
+        # Estado del avatar
+        self.is_speaking = False
+        self.last_audio_time = 0
 
         # Queue para audio que controla la animación
         self.audio_queue = asyncio.Queue(maxsize=10)
-        self.current_frame = self.portrait_img.copy()
 
-        logger.info(f"AvatarVideoTrack inicializado con portrait: {portrait_path}")
+        # Obtener primer frame
+        self.current_frame = self.video_processor.get_next_frame(is_speaking=False)
+
+        logger.info(f"AvatarVideoTrack inicializado con video processor")
 
     async def recv(self):
         """Genera y retorna el siguiente frame de video"""
         pts, time_base = await self.next_timestamp()
 
         try:
+            # Verificar si hay audio reciente (últimos 500ms = hablando)
+            import time
+            current_time = time.time()
+            self.is_speaking = (current_time - self.last_audio_time) < 0.5
+
             # Intentar obtener audio features del queue (non-blocking)
             try:
                 audio_features = self.audio_queue.get_nowait()
-                # Procesar frame con el modelo de avatar
-                self.current_frame = await self._process_frame(audio_features)
+                self.last_audio_time = current_time
+                self.is_speaking = True
+
+                # Si hay AI processor, procesar frame con el modelo
+                if self.ai_processor:
+                    self.current_frame = await self._process_frame(audio_features)
+                else:
+                    # Sin AI: solo usar frames del video según estado
+                    self.current_frame = self.video_processor.get_next_frame(
+                        is_speaking=True
+                    )
             except asyncio.QueueEmpty:
-                # Si no hay audio nuevo, mantener frame actual o estado neutral
-                pass
+                # Sin audio: usar frames de reposo
+                self.current_frame = self.video_processor.get_next_frame(
+                    is_speaking=self.is_speaking
+                )
 
             # Convertir a VideoFrame
             frame = VideoFrame.from_ndarray(self.current_frame, format="rgb24")
@@ -94,35 +110,37 @@ class AvatarVideoTrack(VideoStreamTrack):
 
         except Exception as e:
             logger.error(f"Error generando frame: {e}")
-            # Retornar frame estático en caso de error
-            frame = VideoFrame.from_ndarray(self.portrait_img, format="rgb24")
+            # Retornar frame de fallback
+            fallback_frame = self.video_processor.get_next_frame(is_speaking=False)
+            frame = VideoFrame.from_ndarray(fallback_frame, format="rgb24")
             frame.pts = pts
             frame.time_base = time_base
             return frame
 
     async def _process_frame(self, audio_features: dict) -> np.ndarray:
         """
-        Procesa el frame con el modelo de avatar basado en características de audio
+        Procesa el frame con el modelo de IA basado en características de audio
         """
-        # Esta es la función que conecta con el modelo de IA
-        # Por ahora retorna el portrait base, pero aquí irá la inferencia del modelo
-
-        if self.processor is None:
-            return self.portrait_img
+        if self.ai_processor is None:
+            # Sin AI: usar frames del video
+            return self.video_processor.get_next_frame(is_speaking=True)
 
         try:
-            # Ejecutar inferencia en GPU
+            # Obtener frame base del video
+            base_frame = self.video_processor.get_next_frame(is_speaking=True)
+
+            # Ejecutar inferencia en GPU (si hay modelo de IA)
             loop = asyncio.get_event_loop()
             frame = await loop.run_in_executor(
                 None,
-                self.processor.process_frame,
-                self.portrait_img,
+                self.ai_processor.process_frame,
+                base_frame,
                 audio_features
             )
             return frame
         except Exception as e:
             logger.error(f"Error en procesamiento de frame: {e}")
-            return self.portrait_img
+            return self.video_processor.get_next_frame(is_speaking=True)
 
     async def add_audio(self, audio_data: bytes):
         """Añade datos de audio para procesamiento"""
@@ -239,8 +257,10 @@ async def create_stream(request):
     Crea una nueva sesión de streaming de avatar
 
     Body: {
-        "portrait_url": "https://...",  // URL o path del portrait
-        "portrait_id": "jesus_portrait_1"  // ID del portrait pre-cargado
+        "video_id": "jesus_default",  // ID del conjunto de videos pre-configurado
+        "gesture_video": "/path/to/gestos.mp4",  // Path al video de gestos
+        "idle_video": "/path/to/reposo.mp4",  // Path al video de reposo
+        "use_ai": false  // Si usar modelo de IA (opcional, por defecto false)
     }
 
     Returns: {
@@ -250,30 +270,52 @@ async def create_stream(request):
     """
     try:
         data = await request.json()
-        portrait_path = data.get("portrait_path", "")
-        portrait_id = data.get("portrait_id", "")
+        video_id = data.get("video_id", "")
+        gesture_video = data.get("gesture_video", "")
+        idle_video = data.get("idle_video", "")
+        use_ai = data.get("use_ai", False)
 
-        # Determinar path del portrait
-        if portrait_id:
-            portrait_path = f"./portraits/{portrait_id}.jpg"
-        elif not portrait_path:
-            portrait_path = "./portraits/default.jpg"
+        # Determinar paths de los videos
+        if video_id:
+            # Usar ID pre-configurado
+            gesture_video = f"./videos/{video_id}_gestos.mp4"
+            idle_video = f"./videos/{video_id}_reposo.mp4"
+        elif not gesture_video or not idle_video:
+            # Usar videos por defecto
+            gesture_video = "./videos/jesus_gestos.mp4"
+            idle_video = "./videos/jesus_reposo.mp4"
 
-        # Verificar que existe el portrait
-        if not Path(portrait_path).exists():
+        # Verificar que existen los videos
+        if not Path(gesture_video).exists():
             return web.json_response(
-                {"error": "portrait_not_found", "path": portrait_path},
+                {"error": "gesture_video_not_found", "path": gesture_video},
+                status=400
+            )
+        if not Path(idle_video).exists():
+            return web.json_response(
+                {"error": "idle_video_not_found", "path": idle_video},
                 status=400
             )
 
         # Crear ID de sesión
         session_id = f"sess_{uuid.uuid4().hex[:24]}"
 
+        # Obtener o crear VideoProcessor (cacheado)
+        video_processor = video_cache.get_processor(
+            gesture_video=gesture_video,
+            idle_video=idle_video,
+            target_fps=25,
+            target_size=(512, 512)
+        )
+
         # Crear peer connection
         pc = RTCPeerConnection()
 
+        # Decidir si usar AI processor
+        ai_proc = avatar_processor if use_ai else None
+
         # Crear track de video del avatar
-        video_track = AvatarVideoTrack(portrait_path, avatar_processor)
+        video_track = AvatarVideoTrack(video_processor, ai_proc)
         pc.addTrack(video_track)
 
         # Manejar track de audio entrante (para lip-sync)
@@ -306,7 +348,10 @@ async def create_stream(request):
             "id": session_id,
             "pc": pc,
             "video_track": video_track,
-            "portrait_path": portrait_path,
+            "video_processor": video_processor,
+            "gesture_video": gesture_video,
+            "idle_video": idle_video,
+            "use_ai": use_ai,
             "created_at": datetime.now().isoformat(),
             "state": "created"
         }
