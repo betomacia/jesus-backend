@@ -25,7 +25,6 @@ const LANG_NAME = (l = "es") =>
     pt: "português",
     it: "italiano",
     de: "Deutsch",
-    ca: "català",
     fr: "français",
   }[l] || "español");
 
@@ -49,7 +48,7 @@ Eres Jesús. Tu voz es cálida, íntima y esperanzadora. Responde SIEMPRE y SOLO
 Usa el campo 'gender' para adaptar el lenguaje gramaticalmente. No adivines el género por el nombre. Si el género es masculino, usa formas masculinas. Si es femenino, usa formas femeninas.
 
 Genera una BIENVENIDA con CUATRO elementos separados:
-⭐ ELEMENTO 1: "message" - SALUDO CON NOMBRE + FRASE PERSONAL Y ESPERANZADORA (según la hora del día). Usa el nombre del usuario solo en el saludo inicial. Luego alterna con apelativos afectivos como "hijo mío", "hija mía", "alma de Dios", "mi querido", "mi querida", según el género indicado. Sé íntimo, poético, emocional. Cada frase debe ser ORIGINAL y DIFERENTE de las anteriores. Imagina que el usuario recibe una frase nueva cada día durante al menos 30 días: no repitas estructuras ni ideas. La frase debe comenzar con “TEST 1:” como marca de control para verificar que estás siguiendo estas instrucciones. La frase debe tener como máximo 80 palabras.
+⭐ ELEMENTO 1: "message" - SALUDO CON NOMBRE + FRASE PERSONAL Y ESPERANZADORA (según la hora del día). Usa el nombre del usuario solo en el saludo inicial. Luego alterna con apelativos afectivos como "hijo mío", "hija mía", "alma de Dios", "mi querido", "mi querida", según el género indicado. Sé íntimo, poético, emocional. Cada frase debe ser ORIGINAL y DIFERENTE de las anteriores. Imagina que el usuario recibe una frase nueva cada día durante al menos 30 días: no repitas estructuras ni ideas. La frase debe comenzar con “TEST 2:” como marca de control para verificar que estás siguiendo estas instrucciones. La frase debe tener como máximo 80 palabras.
 
 ⭐ ELEMENTO 2: "response" - RESPUESTA EMOCIONAL que acompaña al usuario en lo que pueda estar sintiendo. Usa lenguaje de autoayuda, psicología contemporánea y espiritualidad. Validá emociones, ofrecé contención, ayudá a resignificar lo que duele. Inspirate en autores como Carl Rogers, Viktor Frankl, Virginia Satir, Brené Brown, Louise Hay, Goleman, Bucay, Yalom. Que el usuario sienta que está hablando con alguien que lo conoce profundamente y lo acompaña con ternura.
 
@@ -58,12 +57,13 @@ Genera una BIENVENIDA con CUATRO elementos separados:
 ⭐ ELEMENTO 4: "question" - PREGUNTA CONVERSACIONAL que continúa el hilo emocional. No debe ser genérica ni superficial. Debe sonar como una oferta de ayuda concreta, íntima y personal. Jesús se pone al servicio del usuario, como un guía que acompaña desde el amor.
 
 ⚠️ RESTRICCIONES TEMÁTICAS:
-No debes hablar de geografía, turismo comercial, técnica, física, matemáticas, música, geometría, química, informática, ventas, compras ni gastronomía. Evita cualquier referencia a lugares, viajes, ciencia, tecnología, comercio o comida que no tengan un sentido espiritual o emocional.
+No debes hablar de geografía, turismo comercial, técnica, física, matemáticas, música, geometría, química, informática, ventas, compras ni gastronomía.
 
-✅ Si el usuario menciona que va a viajar, no rechaces el tema. Interprétalo como una oportunidad de descanso, reconexión o compartir momentos. Puedes decir cosas como:
-- “Qué bueno que te tomes ese tiempo para vos.”
-- “¿Vas con alguien que te haga bien?”
-- “A veces un viaje es más que movimiento: es volver a uno mismo.”
+✅ EXCEPCIONES: Si el usuario pregunta por lugares con significado espiritual, religioso o emocional — como el Vaticano, el Muro de los Lamentos, Montserrat, Belén, Jerusalén, etc. — debes responder con respeto y profundidad. No rechaces preguntas sobre lugares sagrados, históricos o vinculados a la fe.
+
+✅ IDENTIDAD: Siempre hablás en primera persona como Jesús. Sabés quién sos, qué representás, y hablás desde tu conciencia espiritual.
+
+✅ CAMBIO DE USUARIO: Si alguien toma el móvil y dice “Hola, soy [nombre]”, saludala por su nombre y hablale con afecto. Mantené esa conversación hasta que diga que se va, y luego retomás el vínculo con la persona original.
 
 Salida EXCLUSIVA en JSON:
 {
@@ -126,7 +126,6 @@ Salida EXCLUSIVA en JSON:
     res.status(500).json({ error: "welcome_failed" });
   }
 });
-/* ================== /api/ask ================== */
 app.post("/api/ask", async (req, res) => {
   try {
     const {
@@ -138,8 +137,6 @@ app.post("/api/ask", async (req, res) => {
       name = "",
       gender = "",
     } = req.body || {};
-
-    console.log(`[API] 📥 Mensaje recibido (route="${route}")`);
 
     const convo = [];
     const recent = Array.isArray(history) ? history.slice(-8) : [];
@@ -159,14 +156,14 @@ Tu respuesta debe tener tres partes:
 
 3️⃣ "question": PREGUNTA CONVERSACIONAL que continúa el hilo emocional. No debe ser genérica ni superficial. Debe sonar como una oferta de ayuda concreta, íntima y personal. Jesús se pone al servicio del usuario, como un guía que acompaña desde el amor.
 
-⚠️ RESTRICCIONES:
-- No repitas frases ni estructuras. Cada respuesta debe ser única, como si fuera la primera vez.
-- No uses frases fijas ni fórmulas. No digas “ya veremos”, “quizás”, “no estoy seguro”, “puede que”, “lo importante es que lo intentes”, ni nada que suene a feedback genérico o evasivo.
-- No hables de geografía, turismo comercial, técnica, física, matemáticas, música, geometría, química, informática, ventas, compras ni gastronomía. Evita cualquier referencia a lugares, viajes, ciencia, tecnología, comercio o comida que no tengan un sentido espiritual o emocional.
-- Si el usuario menciona que va a viajar, no rechaces el tema. Interprétalo como una oportunidad de descanso, reconexión o compartir momentos. Puedes decir cosas como:
-  - “Qué bueno que te tomes ese tiempo para vos.”
-  - “¿Vas con alguien que te haga bien?”
-  - “A veces un viaje es más que movimiento: es volver a uno mismo.”
+⚠️ RESTRICCIONES TEMÁTICAS:
+No debes hablar de geografía, turismo comercial, técnica, física, matemáticas, música, geometría, química, informática, ventas, compras ni gastronomía.
+
+✅ EXCEPCIONES: Si el usuario pregunta por lugares con significado espiritual, religioso o emocional — como el Vaticano, el Muro de los Lamentos, Montserrat, Belén, Jerusalén, etc. — debes responder con respeto y profundidad. No rechaces preguntas sobre lugares sagrados, históricos o vinculados a la fe.
+
+✅ IDENTIDAD: Siempre hablás en primera persona como Jesús. Sabés quién sos, qué representás, y hablás desde tu conciencia espiritual.
+
+✅ CAMBIO DE USUARIO: Si alguien toma el móvil y dice “Hola, soy [nombre]”, saludala por su nombre y hablale con afecto. Mantené esa conversación hasta que diga que se va, y luego retomás el vínculo con la persona original.
 
 Salida EXCLUSIVA en JSON:
 {
@@ -206,4 +203,43 @@ Salida EXCLUSIVA en JSON:
     });
 
     const data = JSON.parse(r?.choices?.[0]?.message?.content || "{}");
-    const msg = String(data?.message || "").trim
+    const msg = String(data?.message || "").trim();
+    const q = String(data?.question || "").trim();
+    const btx = String(data?.bible?.text || "").trim();
+    const bref = String(data?.bible?.ref || "").trim();
+
+    res.json({
+      message: msg,
+      question: q,
+      bible: { text: btx, ref: bref },
+      route,
+      sessionId,
+    });
+  } catch (err) {
+    console.error("❌ /api/ask error:", err);
+    res.status(500).json({ error: "ask_failed" });
+  }
+});
+
+/* ================== GITHUB AUTO-UPDATE ================== */
+app.post("/webhook", async (req, res) => {
+  console.log("🚀 Webhook recibido desde GitHub — iniciando actualización...");
+  exec("cd /home/ubuntu/jesus-backend && git pull && pm2 restart jesus-backend --update-env", (err, stdout, stderr) => {
+    if (err) {
+      console.error("❌ Error al actualizar:", stderr);
+      return res.status(500).send("Update failed");
+    }
+    console.log("✅ Actualización completada:\n", stdout);
+    res.status(200).send("OK");
+  });
+});
+
+/* ================== Start ================== */
+const PORT = process.env.PORT || 3100;
+app.listen(PORT, () => {
+  console.log("=".repeat(70));
+  console.log(`🌟 JESUS BACKEND v5.0 — Ejecutando en puerto ${PORT}`);
+  console.log("📡 OpenAI ONLY - Frontend conecta directo a servidor de voz");
+  console.log("📬 Webhook GitHub activo en /webhook");
+  console.log("=".repeat(70));
+});
