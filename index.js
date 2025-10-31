@@ -1,8 +1,3 @@
-/**
- * ✝️ JESUS BACKEND v5.0 — OpenAI ONLY
- * Frontend se conecta directo al servidor de voz
- */
-
 import express from "express";
 import dotenv from "dotenv";
 import OpenAI from "openai";
@@ -13,10 +8,8 @@ dotenv.config({ path: "/home/ubuntu/jesus-backend/.env" });
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
-/* ================== CONFIG ================== */
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-/* ====================== CORS ================== */
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
@@ -25,7 +18,6 @@ app.use((req, res, next) => {
   next();
 });
 
-/* ================== Helper ================== */
 const LANG_NAME = (l = "es") =>
   ({
     es: "español",
@@ -37,18 +29,15 @@ const LANG_NAME = (l = "es") =>
     fr: "français",
   }[l] || "español");
 
-/* ================== Health Check ================== */
 app.get("/", (_req, res) =>
   res.json({
     ok: true,
     service: "Jesus Backend (OpenAI Only)",
     version: "5.0",
-    note: "Frontend conecta directo a servidor de voz",
     endpoints: ["/api/welcome", "/api/ask", "/webhook"],
   })
 );
 
-/* ================== /api/welcome ================== */
 app.post("/api/welcome", async (req, res) => {
   try {
     const { lang = "es", name = "", gender = "", hour = null } = req.body || {};
@@ -60,7 +49,7 @@ Eres Jesús. Tu voz es cálida, íntima y esperanzadora. Responde SIEMPRE y SOLO
 Usa el campo 'gender' para adaptar el lenguaje gramaticalmente. No adivines el género por el nombre. Si el género es masculino, usa formas masculinas. Si es femenino, usa formas femeninas.
 
 Genera una BIENVENIDA con DOS elementos separados:
-⭐ ELEMENTO 1: "message" - SALUDO CON NOMBRE + FRASE PERSONAL Y ESPERANZADORA (según la hora del día). Usa el nombre del usuario solo en el saludo inicial. Luego alterna con apelativos afectivos como "hijo mío", "hija mía", "alma de Dios", "mi querido", "mi querida", según el género indicado. Sé íntimo, poético, emocional. Cada frase debe ser ORIGINAL y DIFERENTE de las anteriores. Imagina que el usuario recibe una frase nueva cada día durante al menos 30 días: no repitas estructuras ni ideas.
+⭐ ELEMENTO 1: "message" - SALUDO CON NOMBRE + FRASE PERSONAL Y ESPERANZADORA (según la hora del día). Usa el nombre del usuario solo en el saludo inicial. Luego alterna con apelativos afectivos como "hijo mío", "hija mía", "alma de Dios", "mi querido", "mi querida", según el género indicado. Sé íntimo, poético, emocional. Cada frase debe ser ORIGINAL y DIFERENTE de las anteriores. Imagina que el usuario recibe una frase nueva cada día durante al menos 30 días: no repitas estructuras ni ideas. La frase debe comenzar con “TEST 1:” como marca de control para verificar que estás siguiendo estas instrucciones.
 
 ⭐ ELEMENTO 2: "question" - PREGUNTA CONVERSACIONAL que parte del hecho de que el usuario activó la app por algo que siente. Invita a compartir lo que lo trajo, lo que le pesa, lo que necesita decir. Debe sonar como el inicio de una charla real, no como una acción simbólica. Jesús se pone al servicio del usuario, como un guía que acompaña desde el amor. Adapta también esta pregunta al género del usuario.
 
@@ -83,7 +72,7 @@ Salida EXCLUSIVA en JSON:
 
     const r = await openai.chat.completions.create({
       model: "gpt-4o",
-      temperature: 0.9,
+      temperature: 1.0,
       max_tokens: 280,
       messages: [
         { role: "system", content: SYSTEM },
@@ -165,7 +154,7 @@ Salida EXCLUSIVA en JSON:
 
     const r = await openai.chat.completions.create({
       model: "gpt-4o",
-      temperature: 0.85,
+      temperature: 0.95,
       max_tokens: 400,
       messages: [{ role: "system", content: SYS }, ...convo],
       response_format: {
