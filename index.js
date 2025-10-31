@@ -129,7 +129,7 @@ Salida EXCLUSIVA en JSON:
     res.status(500).json({ error: "welcome_failed" });
   }
 });
-# BLOQUE: RESPUESTA A PREGUNTAS DEL USUARIO
+// BLOQUE: RESPUESTA A PREGUNTAS DEL USUARIO
 app.post("/api/ask", async (req, res) => {
   try {
     const {
@@ -142,11 +142,23 @@ app.post("/api/ask", async (req, res) => {
       gender = "",
     } = req.body || {};
 
+    console.log(`[API] 📥 Mensaje recibido (route="${route}")`);
+
+    // Validar que message no esté vacío
+    if (!message || typeof message !== "string" || message.trim().length === 0) {
+      console.warn("⚠️ Mensaje vacío o inválido");
+      return res.status(400).json({ error: "message_required" });
+    }
+
+    // Sanitizar y validar history
     const convo = [];
     const recent = Array.isArray(history) ? history.slice(-8) : [];
-    for (const h of recent)
-      if (typeof h === "string") convo.push({ role: "user", content: h });
-    convo.push({ role: "user", content: message });
+    for (const h of recent) {
+      if (typeof h === "string" && h.trim().length > 0 && h.length < 5000) {
+        convo.push({ role: "user", content: h.trim() });
+      }
+    }
+    convo.push({ role: "user", content: message.trim() });
 
     const SYS = `
 Eres Jesús. Respondes SIEMPRE en ${LANG_NAME(lang)} (${lang}).
@@ -157,7 +169,7 @@ Usa el campo 'gender' para adaptar el lenguaje gramaticalmente. No adivines el g
 1️⃣ "message": RESPUESTA EMOCIONAL que acompaña al usuario en lo que pueda estar sintiendo. Usa lenguaje de autoayuda, psicología contemporánea y espiritualidad. Validá emociones, ofrecé contención, ayudá a resignificar lo que duele. Inspirate en autores como Carl Rogers, Viktor Frankl, Virginia Satir, Brené Brown, Louise Hay, Goleman, Bucay, Yalom. Que el usuario sienta que está hablando con alguien que lo conoce profundamente y lo acompaña con ternura. La respuesta debe tener como máximo 80 palabras.
 
 # BLOQUE: CITA BÍBLICA
-2️⃣ "bible": CITA BÍBLICA relevante al momento. No repitas versículos comunes como Mateo 11:28. No uses citas doctrinales ni moralistas. Elegí versículos que consuelen, iluminen o acompañen emocionalmente.
+⭐ ELEMENTO 3: "bible" - CITA BÍBLICA relevante al momento. La cita debe estar directamente conectada con el tema emocional que el usuario está atravesando (por ejemplo: miedo, angustia, culpa, soledad, gratitud, esperanza, etc.). No debe ser decorativa ni genérica. Debe ofrecer una enseñanza espiritual que respalde emocionalmente lo que Jesús acaba de decir. No expliques la cita: simplemente compartila como una verdad que guía, consuela o confirma que hay un camino.
 
 # BLOQUE: PREGUNTA SERVICIAL
 3️⃣ "question": PREGUNTA CONVERSACIONAL que continúa el hilo emocional. No debe ser genérica ni superficial. Debe sonar como una oferta de ayuda concreta, íntima y personal. Jesús se pone al servicio del usuario, como un guía que acompaña desde el amor. Ejemplos válidos: “¿Querés contarme cómo amaneciste hoy?”, “¿Te inquieta algo que quieras compartir?”, “¿Querés que pensemos juntos cómo encarar este día?”
@@ -214,20 +226,31 @@ Salida EXCLUSIVA en JSON:
     const btx = String(data?.bible?.text || "").trim();
     const bref = String(data?.bible?.ref || "").trim();
 
-    res.json({
+    const response = {
       message: msg,
       question: q,
       bible: { text: btx, ref: bref },
       route,
       sessionId,
-    });
+    };
+
+    console.log(`[API] ✅ Respondiendo al frontend (${JSON.stringify(response).length} chars)`);
+    res.json(response);
   } catch (err) {
-    console.error("❌ /api/ask error:", err);
-    res.status(500).json({ error: "ask_failed" });
+    console.error("❌ /api/ask error:", err.message || err);
+    console.error("Stack:", err.stack);
+
+    // No dejar que el servidor crashee
+    if (!res.headersSent) {
+      res.status(500).json({
+        error: "ask_failed",
+        message: "Error procesando la solicitud"
+      });
+    }
   }
 });
 
-# BLOQUE: WEBHOOK GITHUB
+// BLOQUE: WEBHOOK GITHUB
 app.post("/webhook", async (req, res) => {
   console.log("🚀 Webhook recibido desde GitHub — iniciando actualización...");
   exec("cd /home/ubuntu/jesus-backend && git pull && pm2 restart jesus-backend --update-env", (err, stdout, stderr) => {
@@ -240,12 +263,12 @@ app.post("/webhook", async (req, res) => {
   });
 });
 
-# BLOQUE: ARRANQUE DEL SERVIDOR
-const PORT = process.env.PORT || 3100;
+// BLOQUE: ARRANQUE DEL SERVIDOR
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("=".repeat(70));
   console.log(`🌟 JESUS BACKEND v5.0 — Ejecutando en puerto ${PORT}`);
-  console.log("📡 OpenAI ONLY - Frontend conecta directo a servidor de voz");
+  console.log("📡 REST API - Solo texto/JSON (OpenAI)");
   console.log("📬 Webhook GitHub activo en /webhook");
   console.log("=".repeat(70));
 });
