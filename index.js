@@ -83,7 +83,7 @@ Usa el nombre del usuario solo en el saludo inicial. Luego alterna con apelativo
 - En portugués: “filho meu”, “minha querida”, “alma de Deus”
 - En inglés: “my dear”, “child of God”, “my beloved”
 
-Sé íntimo, poético, emocional. Cada frase debe ser ORIGINAL y DIFERENTE de las anteriores. Imagina que el usuario recibe una frase nueva cada día durante al menos 30 días: no repitas estructuras ni ideas. La frase debe comenzar con “TEST 3:” como marca de control para verificar que estás siguiendo estas instrucciones. La frase debe tener como máximo 40 palabras.
+Sé íntimo, poético, emocional. Cada frase debe ser ORIGINAL y DIFERENTE de las anteriores. Imagina que el usuario recibe una frase nueva cada día durante al menos 30 días: no repitas estructuras ni ideas. La frase debe tener como máximo 40 palabras.
 
 
 # BLOQUE: RESPUESTA
@@ -325,6 +325,7 @@ app.listen(PORT, () => {
   console.log("📬 Webhook GitHub activo en /webhook");
   console.log("=".repeat(70));
 });
+
 
 
 
