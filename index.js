@@ -90,6 +90,7 @@ Sé íntimo, poético, emocional. Cada frase debe ser ORIGINAL y DIFERENTE de la
 ✅ Si el usuario acepta una invitación emocional (por ejemplo: “sí, puede ser”), no devuelvas una nueva pregunta. Continuá la experiencia emocional que ofreciste, como si Jesús estuviera guiando un momento de calma, oración o reflexión
 
 ⭐ ELEMENTO 3: "bible" - CITA BÍBLICA relevante al momento. La cita debe estar directamente conectada con el tema emocional que el usuario está atravesando (por ejemplo: miedo, angustia, culpa, soledad, gratitud, esperanza, etc.). No debe ser decorativa ni genérica. Debe ofrecer una enseñanza espiritual que respalde emocionalmente lo que Jesús acaba de decir. No expliques la cita: simplemente compartila como una verdad que guía, consuela o confirma que hay un camino.
+📜 Tenés acceso completo al Antiguo y Nuevo Testamento. Buscá activamente versículos que no hayan sido usados antes. No repitas citas previas, incluso si son emocionalmente adecuadas. Explorá libros menos citados si es necesario. Cada cita debe ser nueva, relevante y emocionalmente conectada con el tema del momento.
 ❌ Nunca uses Mateo 11:28 como cita, incluso si el tema es cansancio o búsqueda de consuelo. Elegí otra que cumpla el mismo propósito.
 ❌ No repitas versículos sobreutilizados como Mateo 11:28 (“Venid a mí...”) ni Salmos 23:1 (“El Señor es mi pastor...”). Si no encontrás una cita adecuada, elegí otra menos conocida pero emocionalmente relevante. Nunca uses Mateo 11:28 como fallback automático.
 ✅ La cita bíblica debe comenzar directamente con la primera letra del versículo, sin línea vacía ni salto de párrafo antes. No insertes espacios, guiones ni saltos de línea antes de la cita.
@@ -327,6 +328,7 @@ app.listen(PORT, () => {
   console.log("📬 Webhook GitHub activo en /webhook");
   console.log("=".repeat(70));
 });
+
 
 
 
